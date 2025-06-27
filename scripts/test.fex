@@ -1,0 +1,31 @@
+// test.fex: A sample script for FeX language
+
+println("Hello from the modern FeX language!");
+
+let x = 10;
+let y = 20;
+println(x + y); // Should print 30
+
+if (x < y) {
+    println("x is less than y");
+} else {
+    println("x is not less than y");
+}
+
+let a = 0;
+while (a < 5) {
+    println(a);
+    a = a + 1;
+}
+
+let factorial = fn(n) {
+    if (n <= 1) {
+        1; // 'return' is not a keyword, last expression is returned
+    } else {
+        n * factorial(n - 1);
+    }
+};
+
+let result = factorial(21); // Calculate factorial of 21
+println("Factorial of 21 is:");
+println(result); // Should be 51090942171709440000

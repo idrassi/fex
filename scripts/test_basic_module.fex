@@ -1,0 +1,27 @@
+// test_basic_module.fex
+// Purpose: Validates the fundamental module definition, export, and usage.
+
+println("--- Running Basic Module Test ---");
+
+// Define a module named "math"
+module("math") {
+  // Export a function 'clamp'
+  export fn clamp(x, lo, hi) {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+  }
+}
+
+// Import the module to make it accessible
+import math;
+
+// Call the exported function using dot notation
+let result1 = math.clamp(5.5, 0, 10);
+let result2 = math.clamp(-5, 0, 10);
+let result3 = math.clamp(15, 0, 10);
+
+println("clamping 5.5 between 0 and 10: ", result1); // Expected: 5.5
+println("clamping -5 between 0 and 10: ", result2);  // Expected: 0
+println("clamping 15 between 0 and 10: ", result3);  // Expected: 10
+println("");

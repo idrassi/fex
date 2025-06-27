@@ -1,0 +1,81 @@
+//
+// Test script for Fex List Syntax
+// ---------------------------------
+// This script verifies the creation and usage of lists,
+// and their interaction with other language constructs.
+//
+
+println("--- Starting Fex List Tests ---");
+println("");
+
+
+println("1. Basic List Creation:");
+println("Empty list:", []);
+println("List of numbers:", [1, 2, 3, 4]);
+println("List of strings:", ["a", "b", "c"]);
+println("List of mixed types:", [1, "two", true, nil, 3.14]);
+println("List with expressions:", [1 + 2, 6 / 2, 10 - 7]);
+println("");
+
+
+println("2. Nested Lists:");
+println("A nested list:", [1, ["a", "b"], 3]);
+println("");
+
+
+println("3. Lists and Variables:");
+let my_list = [10, 20, 30];
+println("Assigned to variable 'my_list':", my_list);
+let item = "hello";
+let another_list = [item, "world"];
+println("List with variable inside:", another_list);
+println("");
+
+
+println("4. Lists and Functions:");
+
+// A function that accepts a list and prints its first element
+let print_first = fn(l) {
+    // `car` is the Lisp-style function to get the first element of a list.
+    println("First element of the passed list is:", car(l));
+};
+
+print_first(["first-item", "second-item", "third-item"]);
+
+// A function that returns a new list
+let make_point = fn(x, y) {
+    return ["point", x, y];
+};
+let p = make_point(100, 200);
+println("List returned from a function:", p);
+println("");
+
+
+println("5. Advanced Usage: Iterating with a custom function:");
+
+// Define a 'for_each' function that takes a list and a function.
+// It applies the function to each element of the list.
+let for_each = fn(list, func) {
+    let current = list;
+    while (current) { // Loop until the list is nil (empty)
+        let element = car(current);
+        func(element); // Call the provided function with the element
+        current = cdr(current); // Move to the rest of the list
+    }
+};
+
+// Let's test it! Define a list and a function to use with for_each.
+let data = ["apples", 10, "oranges", 25];
+println("Iterating over list:", data);
+
+let print_inventory_item = fn(item) {
+    print("  -> Item: "); // Using 'print' to not add a newline
+    println(item);
+};
+
+// Call our custom iterator
+for_each(data, print_inventory_item);
+println("");
+
+
+println("--- Fex List Tests Complete ---");

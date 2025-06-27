@@ -1,0 +1,141 @@
+// A collection of Lisp-style list utility functions, implemented in fex.
+// These are needed because they are not built-in.
+
+// nth(n, list): Returns the nth element of a list (0-indexed).
+let nth = fn(n, lst) {
+  while (n > 0) {
+    n = n - 1;
+    lst = cdr(lst);
+  }
+  if (n == 0) {
+    car(lst);
+  } else {
+    nil;
+  }
+};
+
+// rev(list): Returns a reversed copy of a list.
+let rev = fn(lst) {
+  let result = nil;
+  while (lst) {
+    result = cons(car(lst), result);
+    lst = cdr(lst);
+  }
+  result; // Return the new list
+};
+
+// map(func, list): Returns a new list containing the results of applying
+// the function 'func' to each element of the original list.
+let map = fn(f, lst) {
+  let result = nil;
+  while (lst) {
+    result = cons(f(car(lst)), result);
+    lst = cdr(lst);
+  }
+  rev(result); // Map builds the list backwards, so we reverse it at the end.
+};
+
+// --- Game of Life Implementation ---
+
+// Prints the grid to the console, representing 1 as '#' and 0 as '-'.
+// Note: This is different from the 'fe' version because fex's 'print'
+// function has different behavior. We must iterate and print character
+// by character.
+let print_grid = fn(grid) {
+  map(fn(row) {
+    // Print each cell in the row without a newline
+    map(fn(cell) {
+      if (cell == 0) { print("-"); } else { print("#"); }
+    }, row);
+    // Add a newline after the row is complete
+    println();
+  }, grid);
+};
+
+
+// Gets the state of a cell at (x, y). Returns 0 if the coordinates
+// are out of bounds, which simplifies neighbor counting.
+let get_cell = fn(grid, x, y) {
+  // The 'or' operator provides a default value of 0 if nth returns nil.
+  nth(x, nth(y, grid)) or 0;
+};
+
+
+// Calculates the state of a single cell in the next generation based
+// on Conway's rules.
+let next_cell = fn(grid, cell, x, y) {
+  // Count live neighbors
+  let n =
+    get_cell(grid, x - 1, y - 1) +
+    get_cell(grid, x - 1, y)     +
+    get_cell(grid, x - 1, y + 1) +
+    get_cell(grid, x,     y - 1) +
+    get_cell(grid, x,     y + 1) +
+    get_cell(grid, x + 1, y - 1) +
+    get_cell(grid, x + 1, y)     +
+    get_cell(grid, x + 1, y + 1);
+
+  // Apply the rules of life:
+  // 1. A living cell with 2 or 3 live neighbors survives.
+  // 2. A dead cell with exactly 3 live neighbors becomes a live cell.
+  // 3. All other live cells die, and all other dead cells stay dead.
+  if ((cell == 1) and (n == 2 or n == 3)) {
+    1;
+  } else if ((cell == 0) and (n == 3)) {
+    1;
+  } else {
+    0;
+  }
+};
+
+
+// Computes the entire next grid state by applying next_cell to each cell.
+// We use mutable counters 'x' and 'y' captured by the closures.
+let next_grid = fn(grid) {
+  let y = -1;
+  map(fn(row) {
+    y = y + 1;
+    let x = -1;
+    map(fn(cell) {
+      x = x + 1;
+      next_cell(grid, cell, x, y);
+    }, row);
+  }, grid);
+};
+
+
+// Main simulation loop. Runs 'n' iterations of the game.
+let life = fn(n, grid) {
+  let i = 1;
+  while (i <= n) {
+    println(">> iteration", i);
+    print_grid(grid);
+    println(); // Print an extra newline for spacing
+    grid = next_grid(grid);
+    i = i + 1;
+  }
+};
+
+
+// --- Simulation Examples ---
+
+// A "blinker" oscillator in a 3x3 universe.
+// Note the modern list literal syntax `[...]`.
+life(5, [
+  [0, 1, 0],
+  [0, 1, 0],
+  [0, 1, 0]
+]);
+
+
+// A "glider" spaceship in an 8x8 universe.
+life(22, [
+  [0, 0, 1, 0, 0, 0, 0, 0],
+  [0, 0, 0, 1, 0, 0, 0, 0],
+  [0, 1, 1, 1, 0, 0, 0, 0],
+  [0, 0, 0, 0, 0, 0, 0, 0],
+  [0, 0, 0, 0, 0, 0, 0, 0],
+  [0, 0, 0, 0, 0, 0, 0, 0],
+  [0, 0, 0, 0, 0, 0, 0, 0],
+  [0, 0, 0, 0, 0, 0, 0, 0]
+]);

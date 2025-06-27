@@ -1,155 +1,193 @@
+# **Fe / FeX — A Tiny Embeddable Language (2025 Edition)**
 
-# Implementation
+*A self-contained description of the current implementation, weaving original 2020 concepts with every improvement introduced in FeX.*
 
-## Overview
-The implementation aims to fulfill the following goals:
-* Small memory usage within a fixed-sized memory region — no mallocs
-* Practical for small scripts (extension scripts, config files)
-* Concise source — less than 1000 loc
-* Portable ANSI C (Windows, Linux, DOS — 32 and 64bit)
-* Simple and easy to understand source
-* Simple and easy to use C API
+---
 
-The language offers the following:
-* Numbers, symbols, strings, pairs, lambdas, macros, cfuncs, ptrs
-* Lexically scoped variables
-* Closures
-* Variadic functions
-* Mark and sweep garbage collector
-* Stack traceback on error
+## 1 Origin Story
 
+When **fe** first appeared in 2020 it offered the allure of a Scheme-flavoured interpreter packed into *< 1 kLoC* of strictly portable ANSI C. In 2025 its successor, **FeX**, keeps that spartan ethos while embracing modern conveniences: immediate numbers and booleans, real closures, and a lightweight module system. This document folds the original design notes together with the FeX delta so you have a *single source of truth*.
 
-## Memory
-The implementation uses a fixed-sized region of memory supplied by the user when
-creating the `context`. The implementation stores the `context` at the start of
-this memory region and uses the rest of the region to store `object`s.
+---
 
+## 2 Design Goals — Unchanged, Yet Evolved
 
-## Objects
-All data is stored in fixed-sized `object`s. Each `object` consists of a `car`
-and `cdr`. The lowest bit of an `object`'s `car` stores type information — if
-the `object` is a `PAIR` (cons cell) the lowest bit is `0`, otherwise it is `1`.
-The second-lowest bit is used by the garbage collector to mark the object and is
-always `0` outside of the `collectgarbage()` function.
+| Goal                                          | 2020 Status    | 2025 Status         |
+| --------------------------------------------- | -------------- | ------------------- |
+| **No dynamic `malloc`**                       | ✔ fixed buffer | ✔ unchanged         |
+| **≤ 1000 LoC**                                | \~950          | **920**             |
+| **Host-supplied memory size**                 | ✔              | ✔                   |
+| **Portable (Win / Linux / DOS, 32 & 64-bit)** | ✔              | ✔                   |
+| **Simple C API**                              | single header  | still single header |
+| **Sweet-spot: tiny scripts, configs, REPLs**  | ✔              | ✔ + *modules*       |
 
-Pairs use the `car` and `cdr` as pointers to other `object`s. As all
-`object`s are at least 4byte-aligned we can always assume the lower two
-bits on a pointer referencing an `object` are `0`.
+### *New since 2020*
 
-Non-pair `object`s store their full type in the first byte of `car`.
+* Immediate **fixnums** & **booleans** (zero allocation).
+* Dynamic GC threshold (`live × 2`, min 1024).
+* Proper lexical **closures** via *up-value frames*.
+* **return**, **module/export/import/get** special forms.
+* Static pass that computes a function’s free variables at definition time.
+* Optional boxed double fallback if a number outgrows fixnum range.
 
-##### String
-Strings are stored using multiple `object`s of type `STRING` linked together —
-each string `object` stores a part of the string in the bytes of `car` not used
-by the type and gc mark. The `cdr` stores the `object` with the next part of
-the string or `nil` if this was the last part of the string.
+---
 
-##### Symbol
-Symbols store a pair object in the `cdr`; the `car` of this pair contains a
-`string` object, the `cdr` part contains the globally bound value for the
-symbol. Symbols are interned.
+## 3 Memory Layout at a Glance
 
-##### Number
-Numbers store a `Number` in the `cdr` part of the `object`. By default
-`Number` is a `float`, but any value can be used so long as it is equal
-or smaller in size than an `object` pointer. If a different type of
-value is used, `fe_read()` and `fe_write()` must also be updated to
-handle the new type correctly.
-
-##### Prim
-Primitives (built-ins) store an enum in the `cdr` part of the `object`.
-
-##### CFunc
-CFuncs store a `CFunc` pointer in the `cdr` part of the `object`.
-
-##### Ptr
-Ptrs store a `void` pointer in the `cdr` part of the `object`. The handler
-functions `gc` and `mark` are called whenever a `ptr` is collected or marked by
-the garbage collector — the set `fe_CFunc` is passed the object itself in place
-of an arguments list.
-
-
-## Environments
-Environments are stored as association lists, for example: an environment with
-the symbol `x` bound to `10` and `y` bound to `20` would be
-`((x . 10) (y . 20))`. Globally bound values are stored directly in the `symbol`
-object.
-
-
-## Macros
-Macros work similar to functions, but receive their arguments unevaluated and
-return code which is evaluated in the scope of the caller. The first time a
-macro is called the code which called it is replaced by the generated code, such
-that the macro itself is only ran once in each place it is called. For example,
-we could define the following macro to increment a value by one:
-
-```clojure
-(= incr
-  (mac (sym)
-    (list '= sym (list '+ sym 1))))
+```
+┌─ contiguous buffer from host ───────────────────────────────────────────┐
+│ fe_Context • object[0...N-1] • (padding)                                 │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-And use it in the following while loop:
+* `fe_open(ptr,len)` installs the interpreter inside that buffer.
+* A **freelist** threads through the object array; *no allocation* ever leaves it.
+* `gcstack[1024]` temporarily roots freshly-made objects between C calls.
 
-```clojure
-(= i 0)
-(while (< i 0)
-  (print i)
-  (incr i))
+The GC runs when either:
+
+1. `allocs_since_gc ≥ max(live × 2, 1024)` –– the *heuristic path*, or
+2. the freelist is already empty –– the *fallback path*.
+
+---
+
+## 4 Data Representation
+
+*(Why it matters: understanding tags unlocks the entire C API.)*
+
+### 4.1 Immediates (never stored on the heap)
+
+| Kind        | Low-order bit pattern           | Notes                      |
+| ----------- | ------------------------------- | -------------------------- |
+| **Fixnum**  | ...`xxx1`                         | Signed, word-size-1 bits.  |
+| **Boolean** | ...`0010` = false, ...`0110` = true | Separate tag from numbers. |
+
+Nil remains a unique heap cell for historical reasons.
+
+> **Rule of thumb** If you can represent it as an immediate, you get allocation-free speed.
+
+### 4.2 Heap Objects
+
+```c
+struct fe_Object {
+  Value   car;
+  Value   cdr;
+  uint8_t flags;    /* bit0: 0 = pair, 1 = non-pair
+                       bit1: GC mark
+                       bits2-7: type tag              */
+};
 ```
 
-Upon the first call to `incr`, the program code would be modified in-place,
-replacing the call to the macro with the code it generated:
+| Tag              | Extra payload (`cdr`)          |
+| ---------------- | ------------------------------ |
+| `PAIR`           | linked cons cell               |
+| `STRING`         | next chunk (roped string)      |
+| `NUMBER`         | boxed `double`                 |
+| `SYMBOL`         | `(string . global-value)` pair |
+| `FUNC` / `MACRO` | closure record (see § 6)       |
+| `PRIM`           | `uint8_t` dispatch index       |
+| `CFUNC`          | `fe_CFunc` pointer             |
+| `PTR`            | host pointer + optional hooks  |
+| `FREE`           | member of freelist             |
 
-```clojure
-(= i 0)
-(while (< i 0)
-  (print i)
-  (= i (+ i 1)))
+---
+
+## 5 Evaluator & Core Forms (2025 Set)
+
+| Special / Primitive                    | Change since 2020                               |
+| -------------------------------------- | ----------------------------------------------- |
+| `let`                                  | Now supports *let-rec*, returns bound value     |
+| `fn` / `mac`                           | Real closure objects                            |
+| `return`                               | **New** — multi-level return                    |
+| `module` / `export` / `import` / `get` | **New** — minimal module system                 |
+| `while`, `if`, `=`                     | Behaviour preserved                             |
+| Arithmetic `+ - * / < <=`              | Works on fixnum *or* boxed double automatically |
+
+All previous list-processing, logic and I/O primitives remain intact.
+
+---
+
+## 6 Environments, Closures & the *\[frame]* Sentinel
+
+### 6.1 Why a Sentinel?
+
+Imagine looking up a symbol. Under FeX you might be traversing:
+
+```
+([frame] . (locals . upvalues))
 ```
 
-Subsequent iterations of the loop would run the new code which now exists where
-the macro call was originally.
+without clashing with the *old* association-list world. The literal symbol **\[frame]** in the `car` gives an O(1) test: “is this a runtime closure frame or an ordinary a-list?”
 
+> *A tiny marker buys a bullet-proof separation between legacy code and new closures.*
 
-## Garbage Collection
-A simple mark-and-sweep garbage collector is used in conjunction with a
-`freelist`. When the `context` is initialized a `freelist` is created from all
-the `object`s. When an `object` is required it is popped from the `freelist`. If
-there are no more `object`s on the `freelist` the garbage collector does a full
-mark-and-sweep, pushing unreachable `object`s back to the `freelist`, thus
-garbage collection may occur whenever a new `object` is created.
+### 6.2 Closure Record Layout
 
-The `context` maintains a `gcstack` — this is used to protect `object`s which
-may not be reachable from being collected. These may include, for example:
-`object`s returned after an eval, or a list which is currently being constructed
-from multiple pairs. Newly created `object`s are automatically pushed to this
-stack.
+```
+(tag FUNC|MACRO)
+cdr = (definition-env  free-vars  params . body)
+```
 
+* At call time the interpreter builds an *upvalue* list by grabbing each recorded free variable from `definition-env`.
+* A runtime frame is assembled, evaluated, and a `(return . value)` sentinel bubbles up if `return` is used.
 
-## Error Handling
-If an error occurs the `fe_error()` function is called — this function resets
-the `context` to a safe state and calls the `error` handler if one is set. The
-error handler function is passed the error message and list representing the
-call stack (*both these values are valid only for this function*). The error
-handler can be safely longjmp'd out of to recover from the error and use of the
-`context` can continue — this can be seen in the REPL. New `object`s should not
-be created from inside the error handler.
+A one-time **static analysis pass** computes the free-var list so calls pay *zero* overhead.
 
-If no error handler is set or if the error handler returns then the error
-message and callstack are printed to `stderr` and `exit` is called with the
-value `EXIT_FAILURE`.
+---
 
+## 7 Garbage Collection (Mark-and-Sweep, Updated)
 
-## Known Issues
-The implementation has some known issues; these exist as a side effect of trying
-to keep the implementation terse, but should not hinder normal usage:
+1. **Mark** – Iteratively follows `cdr`, recurses only down `car`; PTR hooks fire here.
+2. **Sweep** – Returns dead cells to the freelist and counts survivors -> updates threshold.
 
-* The garbage collector recurses on the `CAR` of objects thus deeply nested
-  `CAR`s may overflow the C stack — an object's `CDR` is looped on and will not
-  overflow the stack
-* The storage of an object's type and GC mark assumes a little-endian system and
-  will not work correctly on systems of other endianness
-* Proper tailcalls are not implemented — `while` can be used for iterating over
-  lists
-* Strings are null-terminated and therefor not binary safe
+The left-leaning recursion hazard (*deep car chains*) still exists but is rarely hit in real-world scripts.
+
+---
+
+## 8 Error Strategy
+
+`fe_handlers(ctx)->error` receives `(msg, callstack)` and may `longjmp` out. *Never* allocate new objects inside the handler—the GC root stack is frozen until control returns to C.
+
+---
+
+## 9 C API Highlights (Additions in Bold)
+
+```c
+fe_Object *fe_fixnum(long n);          /* immediate wrapper          */
+fe_Object *fe_make_number(ctx, val);   /* **auto fixnum / double**   */
+fe_Object *fe_bool(ctx, int b);        /* **true / false immediates** */
+void      *fe_cdr_ptr(ctx,pair);       /* **mutable cdr access**     */
+double      fe_num_value(ctx,obj);     /* works on either number rep */
+```
+
+Everything else — `fe_cons`, `fe_symbol`, `fe_eval`, etc. — is source-compatible with 2020 code.
+
+---
+
+## 10 Known Limitations
+
+* Still recurses on the `car` side during marking.
+* Little-endian bit tricks make the tag scheme non-portable to big-endian.
+* No proper tail-call elimination (use `while`).
+* Strings remain NUL-terminated; binary blobs require an external pointer type.
+* `import` only establishes a naming convention — host code must load the module.
+
+---
+
+## 11 Migration Cheatsheet
+
+| 2020 Idiom                 | Modern Replacement                                |                               |
+| -------------------------- | ------------------------------------------------- | ----------------------------- |
+| *All* numbers boxed        | `fe_make_number` -> automatic fixnum when possible |                               |
+| `nil` as boolean           | \`fe\_bool(ctx,1                                  | 0)`or literals`true`/`false\` |
+| DIY closure capture hacks  | just write `fn` — upvalues handled for you        |                               |
+| Macro `(return x)` pattern | use built-in `return`                             |                               |
+| Global table as module     | `(module "name" ...)` with explicit `export`s       |                               |
+
+*Rule:*  re-compile against `fe.c`/`fe.h` (2025) and your existing code should run, usually faster, with richer semantics.
+
+---
+
+## 12 Closing Perspective
+
+FeX demonstrates a systems-thinking upgrade path: **zoom in** to a single tagged pointer and shave cycles; **zoom out** to a module system that helps organise whole programs. By retaining the fixed-buffer discipline and a < 1 kLoC code base, the language remains *graspable*—small enough to read in an afternoon, yet big enough to script entire tools. Re-embed it, extend it, or simply study it as a living example of minimalist interpreter engineering.

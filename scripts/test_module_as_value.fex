@@ -1,0 +1,24 @@
+// test_module_as_value.fex
+// Purpose: Validates that modules are first-class values that can be
+// assigned to other variables.
+
+println("--- Running Module as First-Class Value Test ---");
+
+module("config") {
+    export let version = "1.0";
+    export let author = "Fex Team";
+}
+
+import config;
+
+println("Accessing original config.version: ", config.version);
+
+// Assign the module object to another variable
+let app_config = config;
+
+println("Accessing alias app_config.version: ", app_config.version);
+println("Accessing alias app_config.author: ", app_config.author);
+
+// Check if they are the same underlying object (association list)
+println("Is 'config' the same as 'app_config'? ", is(config, app_config));
+println("");

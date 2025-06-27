@@ -1,0 +1,47 @@
+// ----------------------- mandelbrot.fex -----------------------
+// ASCII-PGM (P2) Mandelbrot set – 500 × 300, 16-level grayscale.
+
+let width   = 500;
+let height  = 300;
+let maxiter = 16;
+
+// Header ----------------------------------------------------------------------
+println("P2");
+print(width, " ", height);   println();   // “500 300\n”
+println(maxiter);                             // “16\n”
+
+// Pixels ----------------------------------------------------------------------
+let ypixel = 0;
+while (ypixel < height) {
+    // Map pixel-row to complex-plane y-coordinate (–1 ... +1).
+    let y = ypixel / (height / 2) - 1;
+
+    let xpixel = 0;
+    while (xpixel < width) {
+        // Map pixel-column to complex-plane x-coordinate (–2 ... +1).
+        let x = xpixel / (width / 3) - 2;
+
+        // z₀ = 0 -> iterate z_{n+1} = z_n² + c  (c = x + i·y).
+        let x0   = x;
+        let y0   = y;
+        let iter = 0;
+
+        while (iter < maxiter
+               and (x0 * x0 + y0 * y0) <= 4) {
+
+            let x1 = x0 * x0 - y0 * y0 + x;
+            let y1 = 2 * x0 * y0 + y;
+
+            x0   = x1;
+            y0   = y1;
+            iter = iter + 1;
+        }
+
+        // Each pixel: iteration count (grayscale level) followed by a space.
+        print(iter, " ");
+        xpixel = xpixel + 1;
+    }
+
+    println();               // Newline at end of scan-line.
+    ypixel = ypixel + 1;
+}

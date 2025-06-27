@@ -1,0 +1,33 @@
+// test_namespacing.fex
+// Purpose: Verifies that non-exported members are encapsulated and not
+// accessible from the global scope.
+
+println("--- Running Namespacing Test ---");
+
+let global_var = "I am global";
+
+module("scope_test") {
+  let secret = "This is a secret, not exported.";
+  
+  fn get_secret() {
+      return secret;
+  }
+  
+  export fn expose_secret() {
+    return get_secret(); // Call internal function
+  }
+  
+  export fn get_global_var() {
+      return global_var; // Access global scope
+  }
+}
+
+import scope_test;
+
+println("Can the module access the global scope? ", scope_test.get_global_var());
+println("Can we expose a secret through an exported function? ", scope_test.expose_secret());
+println("");
+
+println("Attempting to access non-exported variable 'secret': ", scope_test.secret);
+println("Attempting to access non-exported function 'get_secret': ", scope_test.get_secret);
+println("");

@@ -1,0 +1,127 @@
+//
+// FEX Garbage Collector Stress Test
+//
+// This script is designed to test the robustness and correctness of the fex
+// garbage collector, especially after implementing the new threshold-based trigger.
+//
+// How it works:
+// 1. It creates a `long_lived_list` which acts as a "root" set of data that
+//    must survive the entire duration of the script.
+// 2. It loops for a large number of `iterations`. In each loop, it:
+//    a) Creates a large, temporary list (`garbage`) that should be
+//       collected by the GC almost immediately. This creates memory pressure.
+//    b) Creates a small, permanent `survivor` object and adds it to the
+//       `long_lived_list`.
+// 3. After the loop, it performs a rigorous check on the `long_lived_list`
+//    to ensure that no data was lost or corrupted by the GC.
+// 4. It prints a final report indicating whether the test passed or failed.
+
+// --- Configuration ---
+let iterations = 5000;      // Number of times to create garbage and a survivor.
+let temp_list_size = 100;   // Size of the temporary list created in each iteration.
+
+println("--- GC Stress Test Starting ---");
+println("Iterations:", iterations, "| Temporary objects per iteration:", temp_list_size);
+println("Total temporary allocations:", iterations * temp_list_size);
+
+
+// A function to create a list of a given size.
+// This is designed to create a lot of short-lived `fe_Object` pairs.
+// The returned list will be immediately discarded in the main loop, becoming garbage.
+let make_temporary_garbage = fn(size) {
+    let list = nil;
+    let i = 0;
+    while (i < size) {
+        // Each call to `list()` creates a new pair that becomes garbage later.
+        // We use the underlying 'cons' primitive for maximum efficiency here.
+        list = cons(i, list);
+        i = i + 1;
+    }
+    return list;
+};
+
+
+// --- Main Stress Loop ---
+
+let i = 0;
+let counter = 0;
+let long_lived_list = nil; // This list must survive all GC cycles.
+
+while (i < iterations) {
+    // 1. Create a large amount of temporary garbage that should be collected.
+    let garbage = make_temporary_garbage(temp_list_size);
+
+    // 2. Create a small object that must survive and add it to our root list.
+    //    We store the iteration number `i` to verify it later.
+    let survivor = list(i, "survivor");
+    long_lived_list = cons(survivor, long_lived_list);
+
+    counter = counter + 1; // Increment the counter for progress tracking
+    // 3. Print progress periodically to show the script is running.
+    if (counter > 0 and (counter == 1000)) {
+        println("... iteration ", i, " completed");
+        counter = 0; // Reset the counter after printing
+    }
+
+
+    i = i + 1;
+}
+
+println("Stress loop finished. Verifying integrity of", iterations, "surviving objects...");
+
+
+// --- Verification Phase ---
+
+let valid = true;
+let current_node = long_lived_list;
+let j = iterations - 1; // We built the list in reverse, so we check in reverse.
+
+while (j >= 0) {
+    if (current_node == nil) {
+        println("VERIFICATION FAILED: List is shorter than expected! Prematurely ended.");
+        valid = false;
+        j = -1; // End loop
+    } else {
+        // Get the survivor object, which is a pair like `(4999, "survivor")`
+        let survivor_pair = car(current_node);
+
+        // Extract its parts
+        let num = car(survivor_pair);
+        let str = car(cdr(survivor_pair));
+
+        // Check if the data is what we expect
+        if (num != j or str != "survivor") {
+            println("VERIFICATION FAILED at expected index", j);
+            println("  Expected:", j, "and 'survivor'");
+            println("  Got:", num, "and", str);
+            valid = false;
+        }
+
+        // Move to the next node in the main list
+        current_node = cdr(current_node);
+        j = j - 1;
+    }
+}
+
+// After the loop, check if the list was actually longer than expected.
+if (valid and current_node != nil) {
+    println("VERIFICATION FAILED: List is longer than expected!");
+    valid = false;
+}
+
+
+// --- Final Report ---
+
+if (valid) {
+    println("");
+    println("---------------------------------");
+    println("--- GC Stress Test PASSED ---");
+    println("---------------------------------");
+    println("All", iterations, "long-lived objects survived and are intact.");
+} else {
+    println("");
+    println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    println("--- GC Stress Test FAILED ---");
+    println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    println("Data was lost or corrupted during garbage collection.");
+}

@@ -1,0 +1,13 @@
+let fib = fn (n) {
+    // Fibonacci function using recursion
+  if (2 <= n) {
+    // If n is 2 or greater, calculate recursively
+    return fib(n - 1) + fib(n - 2);
+  } else {
+    // If n is less than 2, return n
+    return n;
+  }
+};
+
+println("Fibonacci of 28 is: ", fib(28));
+// Should print: Fibonacci of 28 is: 317811

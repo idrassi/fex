@@ -1,5 +1,6 @@
 /*
 ** Copyright (c) 2020 rxi
+** Copyright (c) 2025 Mounir IDRASSI <mounir.idrassi@amcrypto.jp>
 **
 ** Permission is hereby granted, free of charge, to any person obtaining a copy
 ** of this software and associated documentation files (the "Software"), to
@@ -20,46 +21,69 @@
 ** IN THE SOFTWARE.
 */
 
+/* Fe Core Language */
+
+
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 #include <string.h>
 #include "fe.h"
 
 #define unused(x)     ( (void) (x) )
 #define car(x)        ( (x)->car.o )
 #define cdr(x)        ( (x)->cdr.o )
-#define tag(x)        ( (x)->car.c )
+#define tag(x)        ( (x)->flags )
 #define isnil(x)      ( (x) == &nil )
-#define type(x)       ( tag(x) & 0x1 ? tag(x) >> 2 : FE_TPAIR )
+#define type(x) \
+   ( FE_IS_FIXNUM(x)              ? FE_TNUMBER :          \
+     FE_IS_BOOLEAN(x)             ? FE_TBOOLEAN :         \
+     ((tag(x) & 1)                ? tag(x) >> 2 : FE_TPAIR) )
 #define settype(x,t)  ( tag(x) = (t) << 2 | 1 )
 #define number(x)     ( (x)->cdr.n )
 #define prim(x)       ( (x)->cdr.c )
 #define cfunc(x)      ( (x)->cdr.f )
 #define strbuf(x)     ( &(x)->car.c + 1 )
+#define nval(o)       fe_num_value(o)
 
 #define STRBUFSIZE    ( (int) sizeof(fe_Object*) - 1 )
 #define GCMARKBIT     ( 0x2 )
-#define GCSTACKSIZE   ( 256 )
+#define GCSTACKSIZE   ( 1024 )
+
+/* --- GC constants --- */
+#define GC_GROWTH_FACTOR 2
+#define GC_INITIAL_DIVISOR 4
+#define GC_MIN_THRESHOLD 1024
 
 
 enum {
- P_LET, P_SET, P_IF, P_FN, P_MAC, P_WHILE, P_QUOTE, P_AND, P_OR, P_DO, P_CONS,
+ P_LET, P_SET, P_IF, P_FN, P_MAC, P_WHILE,
+ P_RETURN, P_MODULE, P_EXPORT, P_IMPORT, P_GET,
+ P_QUOTE, P_AND, P_OR, P_DO, P_CONS,
  P_CAR, P_CDR, P_SETCAR, P_SETCDR, P_LIST, P_NOT, P_IS, P_ATOM, P_PRINT, P_LT,
  P_LTE, P_ADD, P_SUB, P_MUL, P_DIV, P_MAX
 };
 
 static const char *primnames[] = {
-  "let", "=", "if", "fn", "mac", "while", "quote", "and", "or", "do", "cons",
+  "let", "=", "if", "fn", "mac", "while", "return",
+  "module", "export", "import", "get",
+  "quote", "and", "or", "do", "cons",
   "car", "cdr", "setcar", "setcdr", "list", "not", "is", "atom", "print", "<",
   "<=", "+", "-", "*", "/"
 };
 
 static const char *typenames[] = {
   "pair", "free", "nil", "number", "symbol", "string",
-  "func", "macro", "prim", "cfunc", "ptr"
+  "func", "macro", "prim", "cfunc", "ptr",
+  "boolean"
 };
 
 typedef union { fe_Object *o; fe_CFunc f; fe_Number n; char c; } Value;
 
-struct fe_Object { Value car, cdr; };
+struct fe_Object {
+  Value car, cdr;
+  uint8_t flags;                 /* holds GC-mark + type tag   */
+};
 
 struct fe_Context {
   fe_Handlers handlers;
@@ -69,13 +93,124 @@ struct fe_Context {
   int object_count;
   fe_Object *calllist;
   fe_Object *freelist;
+  fe_Object *modulestack;
   fe_Object *symlist;
   fe_Object *t;
   int nextchr;
+  /* --- GC fields --- */
+  int live_count;          /* Objects surviving last GC */
+  int allocs_since_gc;     /* Objects allocated since last GC */
+  int gc_threshold;        /* Trigger next GC when allocs_since_gc exceeds this */
 };
 
-static fe_Object nil = {{ (void*) (FE_TNIL << 2 | 1) }, { NULL }};
+static fe_Object nil = {{ NULL }, { NULL }, (FE_TNIL << 2 | 1)};
 
+static fe_Object *return_sym = NULL;
+static fe_Object *frame_sym = NULL; /* Tag for new environment frames */
+/* Symbols for static analysis */
+static fe_Object *do_sym = NULL;
+static fe_Object *let_sym = NULL;
+static fe_Object *quote_sym = NULL;
+static fe_Object *fn_sym = NULL;
+static fe_Object *mac_sym = NULL;
+
+static int list_has(fe_Object *list, fe_Object *item) {
+  for (; !isnil(list); list = cdr(list)) {
+    if (car(list) == item) { return 1; }
+  }
+  return 0;
+}
+
+/* Truth test that all new code should use                               */
+static int fe_truthy(fe_Object *o) {
+    return !FE_IS_FALSE(o) && !isnil(o);
+} 
+
+static void analyze(fe_Context *ctx, fe_Object *node, fe_Object *bound, fe_Object **free_vars) {
+  /* Base case: atom. If it's a symbol not in our bound list, it's free. */
+  if (type(node) != FE_TPAIR) {
+    if (type(node) == FE_TSYMBOL && !list_has(bound, node) && !list_has(*free_vars, node)) {
+      *free_vars = fe_cons(ctx, node, *free_vars);
+    }
+    return;
+  }
+
+  fe_Object *op = car(node);
+  fe_Object *args = cdr(node);
+  fe_Object *p;
+
+  /* Special form handling */
+  if (op == quote_sym) {
+    return; /* Don't analyze contents of a quote */
+  }
+
+  if (op == do_sym) {
+    fe_Object *local_bound = bound;
+    int gc = fe_savegc(ctx);
+    fe_pushgc(ctx, local_bound);
+
+    for (p = args; !isnil(p); p = cdr(p)) {
+      fe_Object *stmt = car(p);
+      /* Check for (let var expr) */
+      if (type(stmt) == FE_TPAIR && car(stmt) == let_sym) {
+        fe_Object *let_args = cdr(stmt);
+        fe_Object *var = car(let_args);
+        fe_Object *expr = car(cdr(let_args));
+
+        /* Analyze the expression in the current environment */
+        analyze(ctx, expr, local_bound, free_vars);
+
+        /* Add the new variable to the local bound list for subsequent statements */
+        local_bound = fe_cons(ctx, var, local_bound);
+        fe_restoregc(ctx, gc);
+        fe_pushgc(ctx, local_bound);
+      } else {
+        analyze(ctx, stmt, local_bound, free_vars);
+      }
+    }
+    fe_restoregc(ctx, gc);
+    return;
+  }
+  
+  if (op == fn_sym || op == mac_sym) {
+    fe_Object *params = car(args);
+    fe_Object *body = car(cdr(args));
+    fe_Object *inner_free;
+    int gc = fe_savegc(ctx);
+
+    /* The inner function's bound variables start with its own parameters. */
+    fe_Object *inner_bound = &nil;
+    fe_pushgc(ctx, inner_bound);
+    for (p = params; !isnil(p); p = cdr(p)) {
+      inner_bound = fe_cons(ctx, car(p), inner_bound);
+    }
+
+    inner_free = &nil;
+    fe_pushgc(ctx, inner_free);
+    analyze(ctx, body, inner_bound, &inner_free);
+    fe_restoregc(ctx, gc);
+
+    /* The inner function's free variables must be resolved in the outer scope.
+       We treat them as expressions to be analyzed in the outer 'bound' list. */
+    fe_pushgc(ctx, inner_free);
+    for (p = inner_free; !isnil(p); p = cdr(p)) {
+      analyze(ctx, car(p), bound, free_vars);
+    }
+    fe_restoregc(ctx, gc);
+    return;
+  }
+
+  /* Generic case: treat as a function call. Analyze the operator and all arguments. */
+  analyze(ctx, op, bound, free_vars);
+  for (p = args; !isnil(p); p = cdr(p)) {
+    if (type(p) == FE_TPAIR) {
+        analyze(ctx, car(p), bound, free_vars);
+    } else { /* Dotted pair in arguments */
+        analyze(ctx, p, bound, free_vars);
+        break;
+    }
+  }
+}
 
 fe_Handlers* fe_handlers(fe_Context *ctx) {
   return &ctx->handlers;
@@ -112,17 +247,56 @@ fe_Object* fe_nextarg(fe_Context *ctx, fe_Object **arg) {
 
 static fe_Object* checktype(fe_Context *ctx, fe_Object *obj, int type) {
   char buf[64];
-  if (type(obj) != type) {
-    sprintf(buf, "expected %s, got %s", typenames[type], typenames[type(obj)]);
+  int actual_type = type(obj);
+  
+  /* Special case: allow fixnums when expecting numbers */
+  if (type == FE_TNUMBER && FE_IS_FIXNUM(obj)) {
+    return obj;
+  }
+  
+  if (actual_type != type) {
+    sprintf(buf, "expected %s, got %s", 
+            typenames[type], 
+            FE_IS_FIXNUM(obj) ? "number" : typenames[actual_type]);
     fe_error(ctx, buf);
   }
   return obj;
 }
 
+static fe_Object* checknum(fe_Context *ctx, fe_Object *obj)
+{
+    if (FE_IS_FIXNUM(obj)) return obj;           /* fine � immediate */
+    return checktype(ctx, obj, FE_TNUMBER);      /* boxed double or error */
+}
 
 int fe_type(fe_Context *ctx, fe_Object *obj) {
   unused(ctx);
   return type(obj);
+}
+
+fe_Number fe_num_value(fe_Object *o)
+{
+    if (FE_IS_FIXNUM(o)) {
+        return (fe_Number)FE_UNBOX_FIXNUM(o);
+    } else {
+        return (o)->cdr.n;
+    }
+}
+
+fe_Object *fe_make_number(fe_Context *ctx, fe_Number v)
+{
+    /* 1. Is it an integer?  (Avoids FP rounding issues.)             */
+    fe_Number iv = (fe_Number)(intptr_t)v;
+    if (v == iv) {
+        /* 2. Does it fit in the fixnum range for this word size?     */
+        intptr_t i = (intptr_t)iv;
+        intptr_t shr = i >> (8*sizeof(intptr_t)-2);   /* sign-extend  */
+        if (shr == 0 || shr == -1) {                  /* fits */      
+            return FE_FIXNUM(i);
+        }
+    }
+    /* Fallback: allocate the boxed double. */
+    return fe_number(ctx, v);
 }
 
 
@@ -133,12 +307,16 @@ int fe_isnil(fe_Context *ctx, fe_Object *obj) {
 
 
 void fe_pushgc(fe_Context *ctx, fe_Object *obj) {
+  /* Immediates never reach the GC root stack */
+  if (FE_IS_FIXNUM(obj) || FE_IS_BOOLEAN(obj) || obj == &nil) {
+    return;
+  }
+  
   if (ctx->gcstack_idx == GCSTACKSIZE) {
     fe_error(ctx, "gc stack overflow");
   }
   ctx->gcstack[ctx->gcstack_idx++] = obj;
 }
-
 
 void fe_restoregc(fe_Context *ctx, int idx) {
   ctx->gcstack_idx = idx;
@@ -151,33 +329,57 @@ int fe_savegc(fe_Context *ctx) {
 
 
 void fe_mark(fe_Context *ctx, fe_Object *obj) {
-  fe_Object *car;
-begin:
-  if (tag(obj) & GCMARKBIT) { return; }
-  car = car(obj); /* store car before modifying it with GCMARKBIT */
-  tag(obj) |= GCMARKBIT;
+    /*  Tail-recursive mark without �goto', and with a *fresh* check
+        every time we follow cdr(obj).  That way, if the cdr turned
+        out to be an immediate fixnum we bail before dereferencing it. */
 
-  switch (type(obj)) {
-    case FE_TPAIR:
-      fe_mark(ctx, car);
-      /* fall through */
-    case FE_TFUNC: case FE_TMACRO: case FE_TSYMBOL: case FE_TSTRING:
-      obj = cdr(obj);
-      goto begin;
+    for (;;) {
+        /* 0. Fast exits for objects we never allocate. */
+        if (FE_IS_FIXNUM(obj) || FE_IS_BOOLEAN(obj) || isnil(obj)) return;
 
-    case FE_TPTR:
-      if (ctx->handlers.mark) { ctx->handlers.mark(ctx, obj); }
-      break;
-  }
+        /* 1. Do not mark rogue pointers that don't belong to us. */
+        if (obj < ctx->objects || obj >= ctx->objects + ctx->object_count)
+            return;
+
+        /* 2. Already marked?  Done. */
+        if (tag(obj) & GCMARKBIT) return;
+        tag(obj) |= GCMARKBIT;
+
+        switch (type(obj)) {
+        case FE_TPAIR:
+            /* mark car, then continue with cdr in the next loop
+               iteration (this removes deep recursion) */
+            fe_mark(ctx, car(obj));
+            obj = cdr(obj);
+            continue;               /* re-check fixnum / nil next round */
+
+        case FE_TFUNC:   /* (prototype . body) where prototype=(free_vars) */
+        case FE_TMACRO:  /* (prototype . body) where prototype=(free_vars) */
+        case FE_TSYMBOL: /* (name-string . value)   */
+        case FE_TSTRING: /* chunk list              */
+            obj = cdr(obj);
+            continue;
+
+        case FE_TPTR:
+            if (ctx->handlers.mark) ctx->handlers.mark(ctx, obj);
+            /* fall-through */
+        default:
+            return;                 /* nothing more to traverse */
+        }
+    }
 }
 
 
 static void collectgarbage(fe_Context *ctx) {
   int i;
+  int live = 0; /* Counter for live objects */
   /* mark */
   for (i = 0; i < ctx->gcstack_idx; i++) {
-    fe_mark(ctx, ctx->gcstack[i]);
+    if (!FE_IS_FIXNUM(ctx->gcstack[i]) && ctx->gcstack[i] != &nil) {
+      fe_mark(ctx, ctx->gcstack[i]);
+    }
   }
+  fe_mark(ctx, ctx->modulestack);
   fe_mark(ctx, ctx->symlist);
   /* sweep and unmark */
   for (i = 0; i < ctx->object_count; i++) {
@@ -192,15 +394,32 @@ static void collectgarbage(fe_Context *ctx) {
       ctx->freelist = obj;
     } else {
       tag(obj) &= ~GCMARKBIT;
+      live++; /* This object is alive */
     }
+  }
+
+  /* --- Update GC state and threshold --- */
+  ctx->live_count = live;
+  ctx->allocs_since_gc = 0;
+  ctx->gc_threshold = ctx->live_count * GC_GROWTH_FACTOR;
+  if (ctx->gc_threshold < GC_MIN_THRESHOLD) {
+    ctx->gc_threshold = GC_MIN_THRESHOLD;
   }
 }
 
+/* -------------------------------------------------------------------------
+ * Early-return helper
+ * ---------------------------------------------------------------------- */
+static int is_return_obj(fe_Object *obj) {
+  return type(obj) == FE_TPAIR && car(obj) == return_sym;
+}
+
+/* --------------------------------------------------------------------- */
 
 static int equal(fe_Object *a, fe_Object *b) {
   if (a == b) { return 1; }
   if (type(a) != type(b)) { return 0; }
-  if (type(a) == FE_TNUMBER) { return number(a) == number(b); }
+  if (type(a) == FE_TNUMBER) { return nval(a) == nval(b); }
   if (type(a) == FE_TSTRING) {
     for (; !isnil(a); a = cdr(a), b = cdr(b)) {
       if (car(a) != car(b)) { return 0; }
@@ -226,31 +445,45 @@ static int streq(fe_Object *obj, const char *str) {
 
 static fe_Object* object(fe_Context *ctx) {
   fe_Object *obj;
-  /* do gc if freelist has no more objects */
-  if (isnil(ctx->freelist)) {
+
+  /* --- GC trigger logic --- */
+  /* Trigger GC if the allocation count exceeds the threshold,
+   * or as a fallback if the freelist is empty. */
+  if (ctx->allocs_since_gc >= ctx->gc_threshold || isnil(ctx->freelist)) {
     collectgarbage(ctx);
     if (isnil(ctx->freelist)) { fe_error(ctx, "out of memory"); }
   }
+
   /* get object from freelist and push to the gcstack */
   obj = ctx->freelist;
   ctx->freelist = cdr(obj);
+  
+  /* Increment allocation counter and push to GC stack for protection */
+  ctx->allocs_since_gc++;
   fe_pushgc(ctx, obj);
+
   return obj;
 }
 
 
 fe_Object* fe_cons(fe_Context *ctx, fe_Object *car, fe_Object *cdr) {
   fe_Object *obj = object(ctx);
-  car(obj) = car;
-  cdr(obj) = cdr;
+    obj->flags = 0;               /* <- essential:  �I am a pair�        */
+    car(obj)  = car;
+    cdr(obj)  = cdr;
   return obj;
 }
 
 
 fe_Object* fe_bool(fe_Context *ctx, int b) {
-  return b ? ctx->t : &nil;
+  (void)ctx;
+  return b ? FE_TRUE : FE_FALSE;
 }
 
+fe_Object* fe_nil(fe_Context *ctx) {
+  (void)ctx;
+  return &nil; /* Return the static nil object */
+}
 
 fe_Object* fe_number(fe_Context *ctx, fe_Number n) {
   fe_Object *obj = object(ctx);
@@ -338,6 +571,10 @@ fe_Object* fe_cdr(fe_Context *ctx, fe_Object *obj) {
   return cdr(checktype(ctx, obj, FE_TPAIR));
 }
 
+fe_Object** fe_cdr_ptr(fe_Context *ctx, fe_Object *obj) {
+  if (isnil(obj)) { fe_error(ctx, "cannot get cdr pointer of nil"); }
+  return &cdr(checktype(ctx, obj, FE_TPAIR));
+}
 
 static void writestr(fe_Context *ctx, fe_WriteFn fn, void *udata, const char *s) {
   while (*s) { fn(ctx, udata, *s++); }
@@ -351,12 +588,25 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
       writestr(ctx, fn, udata, "nil");
       break;
 
+    case FE_TBOOLEAN:
+      writestr(ctx, fn, udata, (obj == FE_TRUE) ? "true" : "false");
+      break;
+
     case FE_TNUMBER:
-      sprintf(buf, "%.7g", number(obj));
+      if (FE_IS_FIXNUM(obj)) {
+          sprintf(buf, "%lld", (intmax_t)FE_UNBOX_FIXNUM(obj));
+      } else {
+          sprintf(buf, "%.7g", number(obj));
+      }
       writestr(ctx, fn, udata, buf);
       break;
 
     case FE_TPAIR:
+      if (car(obj) == frame_sym) {
+        writestr(ctx, fn, udata, "[env frame]");
+        break;
+      }
+
       fn(ctx, udata, '(');
       for (;;) {
         fe_write(ctx, car(obj), fn, udata, 1);
@@ -425,7 +675,8 @@ int fe_tostring(fe_Context *ctx, fe_Object *obj, char *dst, int size) {
 
 
 fe_Number fe_tonumber(fe_Context *ctx, fe_Object *obj) {
-  return number(checktype(ctx, obj, FE_TNUMBER));
+    unused(ctx);
+    return nval(obj);      /* works for both representations */
 }
 
 
@@ -433,12 +684,29 @@ void* fe_toptr(fe_Context *ctx, fe_Object *obj) {
   return cdr(checktype(ctx, obj, FE_TPTR));
 }
 
-
 static fe_Object* getbound(fe_Object *sym, fe_Object *env) {
-  /* try to find in environment */
-  for (; !isnil(env); env = cdr(env)) {
-    fe_Object *x = car(env);
-    if (car(x) == sym) { return x; }
+  fe_Object *p;
+  /* Check for new closure environment frame */
+  if (type(env) == FE_TPAIR && car(env) == frame_sym) {
+    fe_Object *locals = car(cdr(env));
+    fe_Object *upvals = cdr(cdr(env));
+    /* search locals */
+    for (p = locals; !isnil(p); p = cdr(p)) {
+      fe_Object *x = car(p);
+      if (car(x) == sym) { return x; }
+    }
+    /* search upvalues */
+    for (p = upvals; !isnil(p); p = cdr(p)) {
+      fe_Object *x = car(p);
+      if (car(x) == sym) { return x; }
+    }
+    /* not found in frame, fall through to globals */
+  } else {
+    /* try to find in old-style association list environment */
+    for (; !isnil(env); env = cdr(env)) {
+      fe_Object *x = car(env);
+      if (car(x) == sym) { return x; }
+    }
   }
   /* return global */
   return cdr(sym);
@@ -530,8 +798,16 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
       *p = '\0';
       ctx->nextchr = chr;
       n = strtod(buf, &p);  /* try to read as number */
-      if (p != buf && strchr(delimiter, *p)) { return fe_number(ctx, n); }
-      if (!strcmp(buf, "nil")) { return &nil; }
+      if (p != buf && strchr(delimiter, *p)) { 
+        /* Check if it's an integer (no decimal point) and fits in fixnum range */
+        if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E') && n >= INTPTR_MIN && n <= INTPTR_MAX && n == (intptr_t)n) {
+          return fe_fixnum((intptr_t)n);
+        }
+        return fe_number(ctx, n); 
+      }
+      if (!strcmp(buf, "nil"))   { return &nil;  }
+      if (!strcmp(buf, "true"))  { return FE_TRUE;  }
+      if (!strcmp(buf, "false")) { return FE_FALSE; }
       return fe_symbol(ctx, buf);
   }
 }
@@ -555,7 +831,7 @@ fe_Object* fe_readfp(fe_Context *ctx, FILE *fp) {
 }
 
 
-static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Object **bind);
+static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Object **newenv);
 
 static fe_Object* evallist(fe_Context *ctx, fe_Object *lst, fe_Object *env) {
   fe_Object *res = &nil;
@@ -576,6 +852,7 @@ static fe_Object* dolist(fe_Context *ctx, fe_Object *lst, fe_Object *env) {
     fe_pushgc(ctx, lst);
     fe_pushgc(ctx, env);
     res = eval(ctx, fe_nextarg(ctx, &lst), env, &env);
+    if (is_return_obj(res)) { break; }
   }
   return res;
 }
@@ -597,19 +874,19 @@ static fe_Object* argstoenv(fe_Context *ctx, fe_Object *prm, fe_Object *arg, fe_
 
 #define evalarg() eval(ctx, fe_nextarg(ctx, &arg), env, NULL)
 
-#define arithop(op) {                             \
-    fe_Number x = fe_tonumber(ctx, evalarg());    \
-    while (!isnil(arg)) {                         \
-      x = x op fe_tonumber(ctx, evalarg());       \
-    }                                             \
-    res = fe_number(ctx, x);                      \
-  }
+#define arithop(op) {                                     \
+    fe_Number x = nval(checknum(ctx, evalarg()));         \
+    while (!isnil(arg)) {                                 \
+        x = x op nval(checknum(ctx, evalarg()));          \
+    }                                                     \
+    res = fe_make_number(ctx, x);                         \
+}
 
-#define numcmpop(op) {                            \
-    va = checktype(ctx, evalarg(), FE_TNUMBER);   \
-    vb = checktype(ctx, evalarg(), FE_TNUMBER);   \
-    res = fe_bool(ctx, number(va) op number(vb)); \
-  }
+#define numcmpop(op) {                                    \
+    va  = checknum(ctx, evalarg());                       \
+    vb  = checknum(ctx, evalarg());                       \
+    res = fe_bool(ctx, nval(va) op nval(vb));             \
+}
 
 
 static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Object **newenv) {
@@ -631,12 +908,104 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
   switch (type(fn)) {
     case FE_TPRIM:
       switch (prim(fn)) {
-        case P_LET:
-          va = checktype(ctx, fe_nextarg(ctx, &arg), FE_TSYMBOL);
-          if (newenv) {
-            *newenv = fe_cons(ctx, fe_cons(ctx, va, evalarg()), env);
-          }
+        case P_MODULE: {
+          /* form: (module "name" body) */
+          fe_Object *name_obj = evalarg();
+          fe_Object *body = fe_nextarg(ctx, &arg);
+          char name_buf[128];
+
+          /* Create and push module's export table */
+          fe_Object *exports = &nil;
+          fe_pushgc(ctx, exports);
+          ctx->modulestack = fe_cons(ctx, exports, ctx->modulestack);
+
+          /* Evaluate module body */
+          eval(ctx, body, env, &env);
+
+          /* Pop module from stack and retrieve final exports table */
+          exports = car(ctx->modulestack);
+          ctx->modulestack = cdr(ctx->modulestack);
+
+          /* Register module in global environment */
+          checktype(ctx, name_obj, FE_TSTRING);
+          fe_tostring(ctx, name_obj, name_buf, sizeof(name_buf));
+          fe_set(ctx, fe_symbol(ctx, name_buf), exports);
+          res = exports;
           break;
+        }
+        case P_EXPORT: {
+          /* form: (export (let name value)) */
+          if (isnil(ctx->modulestack)) fe_error(ctx, "export outside of module");
+
+          fe_Object *decl = fe_nextarg(ctx, &arg);
+          fe_Object *name_sym = fe_car(ctx, fe_cdr(ctx, decl));
+          checktype(ctx, name_sym, FE_TSYMBOL);
+
+          /* Evaluate declaration to bind it and get value */
+          res = eval(ctx, decl, env, &env);
+
+          /* Add to current module's export table */
+          fe_Object *binding = fe_cons(ctx, name_sym, res);
+          fe_Object *exports = fe_car(ctx, ctx->modulestack);
+          exports = fe_cons(ctx, binding, exports);
+          car(ctx->modulestack) = exports;
+          break;
+        }
+        case P_IMPORT:
+          /* form: (import name) - no-op for now */
+          res = &nil;
+          break;
+        case P_GET: {
+          /* form: (get object property) */
+          va = evalarg(); /* The module object (or any table) */
+          vb = fe_nextarg(ctx, &arg); /* The property symbol (not evaluated) */
+          checktype(ctx, vb, FE_TSYMBOL);
+          res = cdr(getbound(vb, va)); /* Re-use getbound for assoc list lookup */
+          break;
+        }
+        case P_RETURN: {
+            /* evaluate argument, defaulting to nil */
+            va  = isnil(arg) ? &nil : evalarg();
+            /* (__return__ . value)  � single pair keeps GC simple */
+            res = fe_cons(ctx, return_sym, va);
+            break;
+        }
+        case P_LET: {
+          fe_Object *sym = checktype(ctx, fe_nextarg(ctx, &arg), FE_TSYMBOL);
+          fe_Object *val_expr = fe_nextarg(ctx, &arg);
+          fe_Object *val;
+
+          if (newenv) {
+            /* Implement `letrec` semantics for local bindings to allow recursion.
+               A new binding is created with a nil placeholder, the value is evaluated
+               in this new environment, and then the binding is updated. */
+            fe_Object *binding = fe_cons(ctx, sym, &nil);
+
+            fe_Object *new_frame_env;
+            if (type(*newenv) == FE_TPAIR && car(*newenv) == frame_sym) {
+                fe_Object *locals = car(cdr(*newenv));
+                fe_Object *upvals = cdr(cdr(*newenv));
+                fe_Object *new_locals = fe_cons(ctx, binding, locals);
+                new_frame_env = fe_cons(ctx, new_locals, upvals);
+                new_frame_env = fe_cons(ctx, frame_sym, new_frame_env);
+            } else {
+                new_frame_env = fe_cons(ctx, binding, *newenv);
+            }
+            *newenv = new_frame_env;
+
+            val = eval(ctx, val_expr, *newenv, NULL);
+            cdr(binding) = val;
+          } else {
+            /* This case handles top-level 'let' in the REPL.
+               We'll make it a global binding. This simple approach lacks letrec
+               semantics for the REPL, but is better than doing nothing. */
+            val = eval(ctx, val_expr, env, NULL);
+            fe_set(ctx, sym, val);
+          }
+          /* A `let` expression should evaluate to the assigned value. */
+          res = val;
+          break;
+        }
 
         case P_SET:
           va = checktype(ctx, fe_nextarg(ctx, &arg), FE_TSYMBOL);
@@ -646,7 +1015,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
         case P_IF:
           while (!isnil(arg)) {
             va = evalarg();
-            if (!isnil(va)) {
+            if (fe_truthy(va)) {
               res = isnil(arg) ? va : evalarg();
               break;
             }
@@ -655,18 +1024,44 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           }
           break;
 
-        case P_FN: case P_MAC:
-          va = fe_cons(ctx, env, arg);
-          fe_nextarg(ctx, &arg);
+        case P_FN: case P_MAC: {
+          fe_Object *params = fe_nextarg(ctx, &arg);
+          fe_Object *body = fe_car(ctx, arg);
+
+          int s = fe_savegc(ctx);
+          fe_Object *bound = &nil;
+          fe_Object *p;
+          fe_Object *free_vars;
+          fe_pushgc(ctx, bound);
+          for (p = params; !isnil(p); p = cdr(p)) {
+              bound = fe_cons(ctx, car(p), bound);
+          }
+
+          free_vars = &nil;
+          fe_pushgc(ctx, free_vars);
+          analyze(ctx, body, bound, &free_vars);
+          fe_restoregc(ctx, s);
+          
+          fe_pushgc(ctx, free_vars);
+          fe_pushgc(ctx, params);
+          fe_pushgc(ctx, body);
+          fe_pushgc(ctx, env); /* Protect the definition-time environment */
+
+          va = fe_cons(ctx, body, &nil);
+          va = fe_cons(ctx, params, va);
+          va = fe_cons(ctx, free_vars, va);
+          va = fe_cons(ctx, env, va); /* Prepend definition env to the list */
+          
           res = object(ctx);
           settype(res, prim(fn) == P_FN ? FE_TFUNC : FE_TMACRO);
           cdr(res) = va;
           break;
+        }
 
         case P_WHILE:
           va = fe_nextarg(ctx, &arg);
           n = fe_savegc(ctx);
-          while (!isnil(eval(ctx, va, env, NULL))) {
+          while (fe_truthy(eval(ctx, va, env, NULL))) {
             dolist(ctx, arg, env);
             fe_restoregc(ctx, n);
           }
@@ -677,11 +1072,11 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           break;
 
         case P_AND:
-          while (!isnil(arg) && !isnil(res = evalarg()));
+          while (!isnil(arg) && fe_truthy(res = evalarg()));
           break;
 
         case P_OR:
-          while (!isnil(arg) && isnil(res = evalarg()));
+          while (!isnil(arg) && !fe_truthy(res = evalarg()));
           break;
 
         case P_DO:
@@ -716,7 +1111,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           break;
 
         case P_NOT:
-          res = fe_bool(ctx, isnil(evalarg()));
+          res = fe_bool(ctx, !fe_truthy(evalarg()));
           break;
 
         case P_IS:
@@ -739,7 +1134,24 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
         case P_LT: numcmpop(<); break;
         case P_LTE: numcmpop(<=); break;
         case P_ADD: arithop(+); break;
-        case P_SUB: arithop(-); break;
+        case P_SUB:
+          /* --------  subtraction / unary minus -------- */
+          if (isnil(arg)) {                 /* (-)  →  0  (Scheme behaviour) */
+              res = fe_make_number(ctx, 0);
+          } else {
+              /* first operand */
+              fe_Number x = nval(checknum(ctx, evalarg()));
+
+              if (isnil(arg)) {             /* unary: (- x) → -x */
+                  res = fe_make_number(ctx, -x);
+              } else {                      /* n-ary: (- x y z …) */
+                  while (!isnil(arg)) {
+                      x -= nval(checknum(ctx, evalarg()));
+                  }
+                  res = fe_make_number(ctx, x);
+              }
+          }
+          break;
         case P_MUL: arithop(*); break;
         case P_DIV: arithop(/); break;
       }
@@ -749,21 +1161,77 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
       res = cfunc(fn)(ctx, evallist(ctx, arg, env));
       break;
 
-    case FE_TFUNC:
+    case FE_TFUNC: {
       arg = evallist(ctx, arg, env);
-      va = cdr(fn); /* (env params ...) */
-      vb = cdr(va); /* (params ...) */
-      res = dolist(ctx, cdr(vb), argstoenv(ctx, car(vb), arg, car(va)));
-      break;
 
-    case FE_TMACRO:
-      va = cdr(fn); /* (env params ...) */
-      vb = cdr(va); /* (params ...) */
-      /* replace caller object with code generated by macro and re-eval */
-      *obj = *dolist(ctx, cdr(vb), argstoenv(ctx, car(vb), arg, car(va)));
+      fe_Object *fn_guts = cdr(fn);         /* (def_env free_vars params . body) */
+      fe_Object *def_env = car(fn_guts);
+      fn_guts = cdr(fn_guts);
+      fe_Object *free_vars = car(fn_guts);
+      fe_Object *params_body = cdr(fn_guts);
+      fe_Object *params = car(params_body);
+      fe_Object *body = cdr(params_body);
+      fe_Object *p;
+
+      /* Create upvalue list (the closure's captured environment) */
+      fe_Object *upvals = &nil;
+      int s = fe_savegc(ctx);
+      fe_pushgc(ctx, upvals);
+      fe_pushgc(ctx, def_env);
+      for (p = free_vars; !isnil(p); p = cdr(p)) {
+        fe_Object *sym = car(p);
+        fe_Object *binding = getbound(sym, def_env); /* Use the captured definition env */
+        upvals = fe_cons(ctx, binding, upvals);
+      }
+      fe_restoregc(ctx, s);
+
+      fe_pushgc(ctx, upvals);
+      fe_pushgc(ctx, arg);
+
+      /* Create local environment */
+      fe_Object *locals = argstoenv(ctx, params, arg, &nil);
+
+      /* Create new frame: (frame_sym . (locals . upvals)) */
+      fe_Object *frame = fe_cons(ctx, locals, upvals);
+      frame = fe_cons(ctx, frame_sym, frame);
+
+      res = dolist(ctx, body, frame);
+      if (is_return_obj(res)) {
+          res = cdr(res);
+      }
+      break;
+    }
+
+    case FE_TMACRO: {
+      fe_Object *fn_guts = cdr(fn);         /* (def_env free_vars params . body) */
+      fe_Object *def_env = car(fn_guts);
+      fn_guts = cdr(fn_guts);
+      fe_Object *free_vars = car(fn_guts);
+      fe_Object *params_body = cdr(fn_guts);
+      fe_Object *params = car(params_body);
+      fe_Object *body = cdr(params_body);
+      fe_Object *p;
+
+      fe_Object *upvals = &nil;
+      int s = fe_savegc(ctx);
+      fe_pushgc(ctx, upvals);
+      fe_pushgc(ctx, def_env);
+      for (p = free_vars; !isnil(p); p = cdr(p)) {
+        fe_Object *sym = car(p);
+        fe_Object *binding = getbound(sym, def_env);
+        upvals = fe_cons(ctx, binding, upvals);
+      }
+      fe_restoregc(ctx, s);
+      
+      fe_Object *locals = argstoenv(ctx, params, arg, &nil);
+      fe_Object *frame = fe_cons(ctx, locals, upvals);
+      frame = fe_cons(ctx, frame_sym, frame);
+      
+      *obj = *dolist(ctx, body, frame);
       fe_restoregc(ctx, gc);
       ctx->calllist = cdr(&cl);
       return eval(ctx, obj, env, NULL);
+    }
 
     default:
       fe_error(ctx, "tried to call non-callable value");
@@ -795,9 +1263,18 @@ fe_Context* fe_open(void *ptr, int size) {
   ctx->objects = (fe_Object*) ptr;
   ctx->object_count = size / sizeof(fe_Object);
 
+    /* --- Initialize new GC state --- */
+  ctx->live_count = 0;
+  ctx->allocs_since_gc = 0;
+  ctx->gc_threshold = (ctx->object_count / GC_INITIAL_DIVISOR);
+  if (ctx->gc_threshold < GC_MIN_THRESHOLD) {
+    ctx->gc_threshold = GC_MIN_THRESHOLD;
+  }
+
   /* init lists */
   ctx->calllist = &nil;
   ctx->freelist = &nil;
+  ctx->modulestack = &nil;
   ctx->symlist = &nil;
 
   /* populate freelist */
@@ -821,6 +1298,15 @@ fe_Context* fe_open(void *ptr, int size) {
     fe_set(ctx, fe_symbol(ctx, primnames[i]), v);
     fe_restoregc(ctx, save);
   }
+
+  /* --- Initialize symbols for closures and analysis --- */
+  return_sym = fe_symbol(ctx, "return");
+  frame_sym = fe_symbol(ctx, "[frame]");
+  do_sym = fe_symbol(ctx, "do");
+  let_sym = fe_symbol(ctx, "let");
+  quote_sym = fe_symbol(ctx, "quote");
+  fn_sym = fe_symbol(ctx, "fn");
+  mac_sym = fe_symbol(ctx, "mac");
 
   return ctx;
 }

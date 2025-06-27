@@ -1,0 +1,28 @@
+// test_multiple_exports.fex
+// Purpose: Validates exporting multiple members (variables and functions)
+// and internal module member access.
+
+println("--- Running Multiple Exports Test ---");
+
+module("geometry") {
+  export let PI = 3.14159;
+
+  let internal_helper = 2; // This should not be accessible from outside
+
+  // This function accesses another exported member of the same module
+  export fn circle_area(radius) {
+    return geometry.PI * radius * radius;
+  }
+  
+  // This function uses an internal (non-exported) variable
+  export fn circle_diameter(radius) {
+    return internal_helper * radius;
+  }
+}
+
+import geometry;
+
+println("Value of PI: ", geometry.PI);
+println("Area of circle with radius 10: ", geometry.circle_area(10));
+println("Diameter of circle with radius 5: ", geometry.circle_diameter(5));
+println("");
