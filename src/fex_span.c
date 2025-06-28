@@ -25,12 +25,23 @@
 
 #define BUCKETS 8192                  /* open-addressing hash table         */
 static FexSpan *table[BUCKETS];
+static int spans_enabled = 0;        /* disabled by default */
 
 #define hash_ptr(p) (((uintptr_t)((p)) >> 3) & (BUCKETS - 1))
+
+void fex_span_set_enabled(int enabled) {
+    spans_enabled = enabled;
+}
+
+int fex_span_is_enabled(void) {
+    return spans_enabled;
+}
 
 void fex_record_span(const fe_Object *node, const char *src,
                      int sl,int sc,int el,int ec)
 {
+    if (!spans_enabled) return;  /* early exit if disabled */
+    
     unsigned h = hash_ptr(node);
     FexSpan *e = malloc(sizeof *e);
     *e = (FexSpan){ node, src, sl, sc, el, ec, table[h] };
@@ -39,6 +50,8 @@ void fex_record_span(const fe_Object *node, const char *src,
 
 const FexSpan *fex_lookup_span(const fe_Object *node)
 {
+    if (!spans_enabled) return NULL;  /* early exit if disabled */
+    
     FexSpan *e;
     for (e = table[hash_ptr(node)]; e; e = e->next)
         if (e->node == node) return e;

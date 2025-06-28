@@ -101,7 +101,14 @@ static fe_Object* builtin_println(fe_Context *ctx, fe_Object *args) {
  * Registers all our custom C functions into the fe environment.
  */
 void fex_init(fe_Context *ctx) {
+    fex_init_with_config(ctx, FEX_CONFIG_NONE);
+}
+
+void fex_init_with_config(fe_Context *ctx, FexConfig config) {
     fe_handlers(ctx)->error = fex_on_error;
+
+    /* Configure spans */
+    fex_span_set_enabled(config & FEX_CONFIG_ENABLE_SPANS);
 
     /* Save/restore GC stack to avoid leaking the symbol object. */
     int gc_save = fe_savegc(ctx);

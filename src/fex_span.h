@@ -40,4 +40,8 @@ void  fex_record_span(const fe_Object *node,
 
 const FexSpan *fex_lookup_span(const fe_Object *node);
 
+/* Configuration */
+void fex_span_set_enabled(int enabled);
+int fex_span_is_enabled(void);
+
 #endif

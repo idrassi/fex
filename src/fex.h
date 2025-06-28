@@ -26,10 +26,23 @@
 #include "fe.h"
 
 /*
+ * Configuration flags for FeX
+ */
+typedef enum {
+    FEX_CONFIG_NONE = 0,
+    FEX_CONFIG_ENABLE_SPANS = 1 << 0,
+} FexConfig;
+
+/*
  * Initializes the FeX environment, registering custom built-in
  * functions like 'print'. Must be called after fe_open().
  */
 void fex_init(fe_Context *ctx);
+
+/*
+ * Initializes the FeX environment with configuration options.
+ */
+void fex_init_with_config(fe_Context *ctx, FexConfig config);
 
 /* 
  * Compiles a string of source code in the modern syntax into an

@@ -106,7 +106,40 @@ static void run_file(const char* path) {
   }
 }
 
+static void print_usage(const char* program_name) {
+    fprintf(stderr, "Usage: %s [options] [file]\n", program_name);
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  --spans    Enable detailed error reporting with source spans\n");
+    fprintf(stderr, "  --help     Show this help message\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "If no file is provided, starts the interactive REPL.\n");
+}
+
 int main(int argc, char **argv) {
+  int enable_spans = 0, i;
+  const char* filename = NULL;
+  
+  /* Parse command line arguments */
+  for (i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--spans") == 0) {
+      enable_spans = 1;
+    } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+      print_usage(argv[0]);
+      return 0;
+    } else if (argv[i][0] == '-') {
+      fprintf(stderr, "Unknown option: %s\n", argv[i]);
+      print_usage(argv[0]);
+      return 64;
+    } else {
+      if (filename != NULL) {
+        fprintf(stderr, "Multiple input files specified.\n");
+        print_usage(argv[0]);
+        return 64;
+      }
+      filename = argv[i];
+    }
+  }
+  
   /* Allocate memory pool for the fe context */
   void* mem = malloc(MEMORY_POOL_SIZE);
   if (!mem) {
@@ -116,17 +149,14 @@ int main(int argc, char **argv) {
   
   g_ctx = fe_open(mem, MEMORY_POOL_SIZE);
 
-  /* Initialize our custom environment */
-  fex_init(g_ctx);
+  /* Initialize our custom environment with conditional span support */
+  FexConfig config = enable_spans ? FEX_CONFIG_ENABLE_SPANS : FEX_CONFIG_NONE;
+  fex_init_with_config(g_ctx, config);
   
-  if (argc == 1) {
+  if (filename == NULL) {
     run_repl();
-  } else if (argc == 2) {
-    run_file(argv[1]);
   } else {
-    fprintf(stderr, "Usage: %s [path]\n", argv[0]);
-    free(mem);
-    return 64;
+    run_file(filename);
   }
 
   fe_close(g_ctx);
