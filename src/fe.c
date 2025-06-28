@@ -54,6 +54,22 @@
 #define GC_MIN_THRESHOLD 1024
 
 
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+/* --- String Slab Allocator Constants --- */
+#ifndef FE_STR_ARENA_RATIO
+#define FE_STR_ARENA_RATIO 0.3
+#endif
+#define FE_SLAB_SIZE 64
+#define FE_SLAB_DATA_SIZE (FE_SLAB_SIZE - sizeof(uint32_t))
+#define FE_SLAB_NULL ((uint32_t)-1)
+
+typedef struct {
+    uint32_t next; /* Offset of next slab in chain, or in freelist */
+    char data[FE_SLAB_DATA_SIZE];
+} fe_Slab;
+#endif
+
+
 enum {
  P_LET, P_SET, P_IF, P_FN, P_MAC, P_WHILE,
  P_RETURN, P_MODULE, P_EXPORT, P_IMPORT, P_GET,
@@ -76,7 +92,7 @@ static const char *typenames[] = {
   "boolean"
 };
 
-typedef union { fe_Object *o; fe_CFunc f; fe_Number n; char c;  char *s;} Value;
+typedef union { fe_Object *o; fe_CFunc f; fe_Number n; char c; char *s; uint32_t u32; } Value;
 
 struct fe_Object {
   Value car, cdr;
@@ -101,6 +117,11 @@ struct fe_Context {
   int gc_threshold;        /* Trigger next GC when allocs_since_gc exceeds this */
   size_t bytes_since_gc;   /* String bytes allocated since last GC */
   size_t byte_threshold;   /* Trigger next GC when bytes_since_gc exceeds this */
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+  uint8_t *str_base;
+  uint8_t *str_end;
+  uint32_t str_freelist;   /* Offset of first free slab head */
+#endif
 };
 
 static fe_Object nil = {{ NULL }, { NULL }, (FE_TNIL << 2 | 1)};
@@ -356,9 +377,16 @@ void fe_mark(fe_Context *ctx, fe_Object *obj) {
         case FE_TFUNC:   /* (prototype . body) where prototype=(free_vars) */
         case FE_TMACRO:  /* (prototype . body) where prototype=(free_vars) */
         case FE_TSYMBOL: /* (name-string . value)   */
-        case FE_TSTRING: /* chunk list              */
             obj = cdr(obj);
             continue;
+
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+        case FE_TSTRING: /* String object holds offset; no further marking from here */
+            return;
+#else
+        case FE_TSTRING: /* String object cdr holds a pointer we don't trace */
+            return;
+#endif
 
         case FE_TPTR:
             if (ctx->handlers.mark) ctx->handlers.mark(ctx, obj);
@@ -368,6 +396,25 @@ void fe_mark(fe_Context *ctx, fe_Object *obj) {
         }
     }
 }
+
+
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+static void str_slab_free(fe_Context *ctx, uint32_t offset) {
+    if (offset == FE_SLAB_NULL) return;
+    fe_Slab *slab = (fe_Slab*)(ctx->str_base + offset);
+    slab->next = ctx->str_freelist;
+    ctx->str_freelist = offset;
+}
+
+static void str_free_chain(fe_Context *ctx, uint32_t offset) {
+    while (offset != FE_SLAB_NULL) {
+        fe_Slab *slab = (fe_Slab*)(ctx->str_base + offset);
+        uint32_t next_offset = slab->next;
+        str_slab_free(ctx, offset);
+        offset = next_offset;
+    }
+}
+#endif
 
 
 static void collectgarbage(fe_Context *ctx) {
@@ -386,9 +433,15 @@ static void collectgarbage(fe_Context *ctx) {
     fe_Object *obj = &ctx->objects[i];
     if (type(obj) == FE_TFREE) { continue; }
     if (~tag(obj) & GCMARKBIT) {
-      if (type(obj)==FE_TSTRING && FE_STR_DATA(obj)) {
-          free(FE_STR_DATA(obj));
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+      if (type(obj) == FE_TSTRING) {
+        str_free_chain(ctx, obj->cdr.u32);
       }
+#else
+      if (type(obj)==FE_TSTRING && FE_STR_DATA(ctx, obj)) {
+          free(FE_STR_DATA(ctx, obj));
+      }
+#endif
       if (type(obj) == FE_TPTR && ctx->handlers.gc) {
         ctx->handlers.gc(ctx, obj);
       }
@@ -420,20 +473,79 @@ static int is_return_obj(fe_Object *obj) {
 
 /* --------------------------------------------------------------------- */
 
-static int equal(fe_Object *a, fe_Object *b) {
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+static int equal_slab(fe_Context *ctx, fe_Object *a, fe_Object *b) {
+    size_t len = FE_STR_LEN(a);
+    /* length is pre-checked by caller */
+    if (len == 0) return 1;
+    
+    uint32_t offset_a = a->cdr.u32;
+    uint32_t offset_b = b->cdr.u32;
+    size_t remaining = len;
+
+    while (remaining > 0) {
+        fe_Slab *slab_a = (fe_Slab*)(ctx->str_base + offset_a);
+        fe_Slab *slab_b = (fe_Slab*)(ctx->str_base + offset_b);
+        size_t to_cmp = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
+        
+        if (memcmp(slab_a->data, slab_b->data, to_cmp) != 0) {
+            return 0;
+        }
+
+        remaining -= to_cmp;
+        if (remaining > 0) {
+            offset_a = slab_a->next;
+            offset_b = slab_b->next;
+        }
+    }
+    return 1;
+}
+#endif
+
+static int equal(fe_Context *ctx, fe_Object *a, fe_Object *b) {
   if (a == b) { return 1; }
   if (type(a) != type(b)) { return 0; }
   if (type(a) == FE_TNUMBER) { return nval(a) == nval(b); }
   if (type(a) == FE_TSTRING) {
-    return FE_STR_LEN(a)==FE_STR_LEN(b) &&
-           memcmp(FE_STR_DATA(a), FE_STR_DATA(b), FE_STR_LEN(a))==0;
+    if (FE_STR_LEN(a) != FE_STR_LEN(b)) return 0;
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+    return equal_slab(ctx, a, b);
+#else
+    return memcmp(FE_STR_DATA(ctx, a), FE_STR_DATA(ctx, b), FE_STR_LEN(a))==0;
+#endif
   }
   return 0;
 }
 
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+static int streq_slab(fe_Context *ctx, fe_Object *obj, const char *str) {
+    size_t len = FE_STR_LEN(obj);
+    if (strlen(str) != len) return 0;
+    if (len == 0) return 1;
 
-static int streq(fe_Object *obj, const char *str) {
-  return strcmp(FE_STR_DATA(obj), str)==0;
+    uint32_t offset = obj->cdr.u32;
+    size_t remaining = len;
+
+    while(offset != FE_SLAB_NULL && remaining > 0) {
+        fe_Slab *slab = (fe_Slab*)(ctx->str_base + offset);
+        size_t to_cmp = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
+        if (memcmp(slab->data, str, to_cmp) != 0) {
+            return 0;
+        }
+        str += to_cmp;
+        remaining -= to_cmp;
+        offset = slab->next;
+    }
+    return remaining == 0;
+}
+#endif
+
+static int streq(fe_Context *ctx, fe_Object *obj, const char *str) {
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+  return streq_slab(ctx, obj, str);
+#else
+  return strcmp(FE_STR_DATA(ctx, obj), str)==0;
+#endif
 }
 
 
@@ -490,21 +602,75 @@ fe_Object* fe_number(fe_Context *ctx, fe_Number n) {
 
 #define GROW_STEP 64
 
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+static uint32_t str_slab_alloc(fe_Context *ctx) {
+    if (ctx->str_freelist == FE_SLAB_NULL) {
+        /* Before failing, try to collect garbage to free up slabs */
+        collectgarbage(ctx);
+        if (ctx->str_freelist == FE_SLAB_NULL) {
+            fe_error(ctx, "out of memory (string slab)");
+        }
+    }
+    uint32_t offset = ctx->str_freelist;
+    fe_Slab *slab = (fe_Slab*)(ctx->str_base + offset);
+    ctx->str_freelist = slab->next;
+    return offset;
+}
+
+static uint32_t str_alloc(fe_Context *ctx, const char *src, size_t len) {
+    if (len == 0) {
+        return FE_SLAB_NULL;
+    }
+    
+    uint32_t head_offset = str_slab_alloc(ctx);
+    fe_Slab *head_slab = (fe_Slab*)(ctx->str_base + head_offset);
+    
+    uint32_t current_offset = head_offset;
+    fe_Slab *current_slab = head_slab;
+    
+    const char *p = src;
+    size_t remaining = len;
+    size_t bytes_allocated = FE_SLAB_SIZE;
+
+    while (remaining > 0) {
+        size_t to_copy = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
+        memcpy(current_slab->data, p, to_copy);
+        p += to_copy;
+        remaining -= to_copy;
+
+        if (remaining > 0) {
+            uint32_t next_offset = str_slab_alloc(ctx);
+            bytes_allocated += FE_SLAB_SIZE;
+            current_slab->next = next_offset;
+            current_slab = (fe_Slab*)(ctx->str_base + next_offset);
+        } else {
+            current_slab->next = FE_SLAB_NULL;
+        }
+    }
+    
+    ctx->bytes_since_gc += bytes_allocated;
+    return head_offset;
+}
+#endif
+
 static fe_Object* make_string_obj(fe_Context *ctx,
                                   const char   *src,
                                   size_t        len)
 {
     fe_Object *o = object(ctx);
     settype(o, FE_TSTRING);
+    car(o) = FE_FIXNUM((intptr_t)len);
 
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+    o->cdr.u32 = str_alloc(ctx, src, len);
+#else
     char *buf = malloc(len+1);
     if (!buf) fe_error(ctx, "out of memory (string)");
     ctx->bytes_since_gc += len + 1;
     memcpy(buf, src, len);
     buf[len]='\0';
-
-    car(o) = FE_FIXNUM((intptr_t)len);
-    FE_STR_DATA(o) = buf;
+    o->cdr.s = buf;
+#endif
     return o;
 }
 
@@ -518,7 +684,7 @@ fe_Object* fe_symbol(fe_Context *ctx, const char *name) {
   fe_Object *obj;
   /* try to find in symlist */
   for (obj = ctx->symlist; !isnil(obj); obj = cdr(obj)) {
-    if (streq(car(cdr(car(obj))), name)) {
+    if (streq(ctx, car(cdr(car(obj))), name)) {
       return car(obj);
     }
   }
@@ -623,11 +789,31 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
 
     case FE_TSTRING:
       if (qt) fn(ctx, udata, '"');
-      const char *p = FE_STR_DATA(obj);
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+      size_t len = FE_STR_LEN(obj);
+      if (len > 0) {
+          uint32_t offset = obj->cdr.u32;
+          size_t remaining = len;
+          while (offset != FE_SLAB_NULL && remaining > 0) {
+              fe_Slab *slab = (fe_Slab*)(ctx->str_base + offset);
+              size_t to_write = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
+              size_t i;
+              for (i = 0; i < to_write; i++) {
+                  char c = slab->data[i];
+                  if (qt && c == '"') fn(ctx, udata, '\\');
+                  fn(ctx, udata, c);
+              }
+              remaining -= to_write;
+              offset = slab->next;
+          }
+      }
+#else
+      const char *p = FE_STR_DATA(ctx, obj);
       while (*p) {
           if (qt && *p=='"') fn(ctx, udata, '\\');
           fn(ctx, udata, *p++);
       }
+#endif
       if (qt) fn(ctx, udata, '"');
       break;
 
@@ -748,7 +934,7 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
       fe_pushgc(ctx, res); /* to cause error on too-deep nesting */
       while ( (v = read_(ctx, fn, udata)) != &rparen ) {
         if (v == NULL) { fe_error(ctx, "unclosed list"); }
-        if (type(v) == FE_TSYMBOL && streq(car(cdr(v)), ".")) {
+        if (type(v) == FE_TSYMBOL && streq(ctx, car(cdr(v)), ".")) {
           /* dotted pair */
           *tail = fe_read(ctx, fn, udata);
         } else {
@@ -768,24 +954,48 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
 
     case '"':
       {
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+#define FE_MAX_LITERAL_SZ 256
+        char s_buf[FE_MAX_LITERAL_SZ];
+        size_t len = 0;
+        chr = fn(ctx, udata);
+        while (chr != '"') {
+            if (chr == '\0') fe_error(ctx, "unclosed string");
+            if (chr == '\\') {
+                chr = fn(ctx, udata);
+                if (chr == 'n') chr = '\n';
+                else if (chr == 'r') chr = '\r';
+                else if (chr == 't') chr = '\t';
+            }
+            if (len >= FE_MAX_LITERAL_SZ - 1) {
+                fe_error(ctx, "string literal too long");
+            }
+            s_buf[len++] = chr;
+            chr = fn(ctx, udata);
+        }
+        return make_string_obj(ctx, s_buf, len);
+#else
         size_t cap = GROW_STEP, len = 0;
-        char *buf = malloc(cap);
-        if (!buf) fe_error(ctx, "out of memory (string)");
+        char *s_buf = malloc(cap);
+        if (!s_buf) fe_error(ctx, "out of memory (string)");
 
         chr = fn(ctx, udata);
         while (chr!='"') {
-          if (chr=='\0') fe_error(ctx, "unclosed string");
+          if (chr=='\0') { free(s_buf); fe_error(ctx, "unclosed string"); }
           if (chr=='\\') {
               chr = fn(ctx, udata);
               if (chr=='n') chr='\n';
               else if (chr=='r') chr='\r';
               else if (chr=='t') chr='\t';
           }
-          if (len+1>=cap) { cap+=GROW_STEP; buf=realloc(buf,cap); }
-          buf[len++]=chr;
+          if (len+1>=cap) { cap+=GROW_STEP; s_buf=realloc(s_buf,cap); }
+          s_buf[len++]=chr;
           chr = fn(ctx, udata);
         }
-        return make_string_obj(ctx, buf, len); /* duplicates & keeps */
+        fe_Object* str_obj = make_string_obj(ctx, s_buf, len);
+        free(s_buf);
+        return str_obj;
+#endif
       }
 
     default:
@@ -1112,7 +1322,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
 
         case P_IS:
           va = evalarg();
-          res = fe_bool(ctx, equal(va, evalarg()));
+          res = fe_bool(ctx, equal(ctx, va, evalarg()));
           break;
 
         case P_ATOM:
@@ -1248,18 +1458,44 @@ fe_Object* fe_eval(fe_Context *ctx, fe_Object *obj) {
 fe_Context* fe_open(void *ptr, int size) {
   int i, save;
   fe_Context *ctx;
+  size_t total_mem = size;
 
   /* init context struct */
+  if (total_mem < sizeof(fe_Context)) return NULL;
   ctx = ptr;
   memset(ctx, 0, sizeof(fe_Context));
-  ptr = (char*) ptr + sizeof(fe_Context);
-  size -= sizeof(fe_Context);
+  
+  void* arenas_ptr = (char*) ptr + sizeof(fe_Context);
+  size_t arenas_sz = total_mem - sizeof(fe_Context);
 
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+  /* Partition memory: [Object Arena][String Arena] */
+  size_t str_arena_sz = (size_t)(arenas_sz * FE_STR_ARENA_RATIO);
+  str_arena_sz -= str_arena_sz % sizeof(void*); /* Align */
+  size_t obj_arena_sz = arenas_sz - str_arena_sz;
+  
+  ctx->object_count = obj_arena_sz / sizeof(fe_Object);
+  ctx->objects = (fe_Object*)arenas_ptr;
+
+  ctx->str_base = (uint8_t*)ctx->objects + ctx->object_count * sizeof(fe_Object);
+  ctx->str_end = ctx->str_base + str_arena_sz;
+  ctx->str_freelist = FE_SLAB_NULL;
+
+  /* Populate string slab freelist */
+  uint8_t *slab_ptr = ctx->str_base;
+  while (slab_ptr + FE_SLAB_SIZE <= ctx->str_end) {
+      fe_Slab *slab = (fe_Slab*)slab_ptr;
+      slab->next = ctx->str_freelist;
+      ctx->str_freelist = (uint32_t)(slab_ptr - ctx->str_base);
+      slab_ptr += FE_SLAB_SIZE;
+  }
+#else
   /* init objects memory region */
-  ctx->objects = (fe_Object*) ptr;
-  ctx->object_count = size / sizeof(fe_Object);
+  ctx->objects = (fe_Object*) arenas_ptr;
+  ctx->object_count = arenas_sz / sizeof(fe_Object);
+#endif
 
-    /* --- Initialize new GC state --- */
+  /* --- Initialize new GC state --- */
   ctx->live_count = 0;
   ctx->allocs_since_gc = 0;
   ctx->gc_threshold = (ctx->object_count / GC_INITIAL_DIVISOR);

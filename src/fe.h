@@ -14,6 +14,10 @@
 #include <stdint.h>
 #include <inttypes.h>
 
+/* --- Compile-time Options --- */
+/* By default, define to enable slab-allocated strings, eliminating malloc for string data. */
+#define FE_OPT_NO_MALLOC_STRINGS
+
 #define FE_VERSION "1.0"
 
 typedef double fe_Number;
@@ -33,8 +37,13 @@ typedef struct { fe_ErrorFn error; fe_CFunc mark, gc; } fe_Handlers;
 #define FE_FIXNUM(n)       ((fe_Object*)(((intptr_t)(n) << 1) | 1))
 #define FE_UNBOX_FIXNUM(x) ((intptr_t)(x) >> 1)
 #define fe_fixnum(n)       FE_FIXNUM(n)          /* public alias – convenience */
-/* Forward macro for native strings */
-#define FE_STR_DATA(o)   ((o)->cdr.s)
+
+/* String data access. Under FE_OPT_NO_MALLOC_STRINGS, string data is in a separate
+ * arena and requires the context to resolve an offset to a pointer. */
+#ifndef FE_OPT_NO_MALLOC_STRINGS
+#define FE_STR_DATA(ctx, o)  ((o)->cdr.s)
+#endif
+
 #define FE_STR_LEN(obj)    (FE_UNBOX_FIXNUM((obj)->car.o))
 #define FE_IS_STRING(o)    (!FE_IS_FIXNUM(o) && ((o)->flags>>2)==FE_TSTRING)
 
