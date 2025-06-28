@@ -99,6 +99,8 @@ struct fe_Context {
   int live_count;          /* Objects surviving last GC */
   int allocs_since_gc;     /* Objects allocated since last GC */
   int gc_threshold;        /* Trigger next GC when allocs_since_gc exceeds this */
+  size_t bytes_since_gc;   /* String bytes allocated since last GC */
+  size_t byte_threshold;   /* Trigger next GC when bytes_since_gc exceeds this */
 };
 
 static fe_Object nil = {{ NULL }, { NULL }, (FE_TNIL << 2 | 1)};
@@ -402,6 +404,7 @@ static void collectgarbage(fe_Context *ctx) {
   /* --- Update GC state and threshold --- */
   ctx->live_count = live;
   ctx->allocs_since_gc = 0;
+  ctx->bytes_since_gc = 0;
   ctx->gc_threshold = ctx->live_count * GC_GROWTH_FACTOR;
   if (ctx->gc_threshold < GC_MIN_THRESHOLD) {
     ctx->gc_threshold = GC_MIN_THRESHOLD;
@@ -438,9 +441,11 @@ static fe_Object* object(fe_Context *ctx) {
   fe_Object *obj;
 
   /* --- GC trigger logic --- */
-  /* Trigger GC if the allocation count exceeds the threshold,
+  /* Trigger GC if object count or byte count exceeds the threshold,
    * or as a fallback if the freelist is empty. */
-  if (ctx->allocs_since_gc >= ctx->gc_threshold || isnil(ctx->freelist)) {
+  if (ctx->allocs_since_gc >= ctx->gc_threshold ||
+      ctx->bytes_since_gc >= ctx->byte_threshold ||
+      isnil(ctx->freelist)) {
     collectgarbage(ctx);
     if (isnil(ctx->freelist)) { fe_error(ctx, "out of memory"); }
   }
@@ -494,6 +499,7 @@ static fe_Object* make_string_obj(fe_Context *ctx,
 
     char *buf = malloc(len+1);
     if (!buf) fe_error(ctx, "out of memory (string)");
+    ctx->bytes_since_gc += len + 1;
     memcpy(buf, src, len);
     buf[len]='\0';
 
@@ -1260,6 +1266,8 @@ fe_Context* fe_open(void *ptr, int size) {
   if (ctx->gc_threshold < GC_MIN_THRESHOLD) {
     ctx->gc_threshold = GC_MIN_THRESHOLD;
   }
+  ctx->bytes_since_gc = 0;
+  ctx->byte_threshold = (size_t)ctx->object_count * sizeof(fe_Object) / 3;
 
   /* init lists */
   ctx->calllist = &nil;
