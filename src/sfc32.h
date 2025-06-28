@@ -1,4 +1,6 @@
 /*
+** SFC32 - Chris Doty-Humphrey's Small Fast Chaotic (SFC) PRNG
+**
 ** Copyright (c) 2025 Mounir IDRASSI <mounir.idrassi@amcrypto.jp>
 **
 ** Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -20,42 +22,31 @@
 ** IN THE SOFTWARE.
 */
 
-#ifndef FEX_H
-#define FEX_H
+#ifndef SFC32_H_
+#define SFC32_H_
 
-#include "fe.h"
-#include "fex_builtins.h"
+#include <stdint.h>
 
-/*
- * Configuration flags for FeX
- */
-typedef enum {
-    FEX_CONFIG_NONE = 0,
-    FEX_CONFIG_ENABLE_SPANS = 1 << 0,
-    FEX_CONFIG_ENABLE_EXTENDED_BUILTINS = 1 << 1,
-} FexConfig;
-
-/*
- * Initializes the FeX environment, registering custom built-in
- * functions like 'print'. Must be called after fe_open().
- */
-void fex_init(fe_Context *ctx);
-
-/*
- * Initializes the FeX environment with configuration options.
- */
-void fex_init_with_config(fe_Context *ctx, FexConfig config);
-
-/* 
- * Compiles a string of source code in the modern syntax into an
- * evaluatable fe_Object.
- */
-fe_Object* fex_compile(fe_Context *ctx, const char *source);
-
-/*
- * A convenience function that compiles and then evaluates a string
- * of source code.
- */
-fe_Object* fex_do_string(fe_Context *ctx, const char *source);
-
+#ifdef __cplusplus
+extern "C" {
 #endif
+
+typedef struct {
+    uint32_t a, b, c, d;   /* internal state (128 bits plus 32-bit counter) */
+} sfc32_state;
+
+/* Seed with a single 32-bit value.
+   Guarantees a != b != c, d starts at 1, and runs 12 warm-up rounds. */
+void sfc32_seed(sfc32_state *s, uint32_t seed);
+
+/* Seed directly with four 32-bit words (advanced use only). */
+void sfc32_seed4(sfc32_state *s,
+                 uint32_t a, uint32_t b, uint32_t c, uint32_t d);
+
+/* Next 32 random bits (uniform on [0, 2^32 − 1]). */
+uint32_t sfc32_next(sfc32_state *s);
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* SFC32_H_ */

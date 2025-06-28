@@ -64,7 +64,7 @@ static void fex_on_error(fe_Context *ctx,const char *msg,fe_Object *cl)
 #define CONS1(a,d) fex_cons_tok(P.ctx,(a),(d),P.previous,P.previous)
 /*
 ================================================================================
-|                              FEX BUILT-INs                                   |
+|                              FEX CORE BUILT-INs                                   |
 ================================================================================
 */
 
@@ -97,6 +97,29 @@ static fe_Object* builtin_println(fe_Context *ctx, fe_Object *args) {
     return result;
 }
 
+/* Read a line from stdin (no trailing newline), return a FeX string or nil on EOF */
+static fe_Object* builtin_read_line(fe_Context *ctx, fe_Object *args) {
+    (void)args;
+    char buffer[1024];
+    if (!fgets(buffer, sizeof(buffer), stdin)) {
+        return fe_nil(ctx);
+    }
+    size_t len = strlen(buffer);
+    if (len > 0 && buffer[len-1] == '\n') buffer[len-1] = '\0';
+    return fe_string(ctx, buffer);
+}
+
+/* Read a line from stdin and parse it as a number, or nil on EOF */
+static fe_Object* builtin_read_number(fe_Context *ctx, fe_Object *args) {
+    (void)args;
+    char buffer[1024];
+    if (!fgets(buffer, sizeof(buffer), stdin)) {
+        return fe_nil(ctx);
+    }
+    fe_Number num = strtod(buffer, NULL);
+    return fe_make_number(ctx, num);
+}
+
 /*
  * Registers all our custom C functions into the fe environment.
  */
@@ -113,16 +136,28 @@ void fex_init_with_config(fe_Context *ctx, FexConfig config) {
     /* Save/restore GC stack to avoid leaking the symbol object. */
     int gc_save = fe_savegc(ctx);
 
-    /* Create the C function object and bind it to the "print" symbol. */
+    /* Create the C function objects and bind them to symbols */
     fe_set(ctx,
         fe_symbol(ctx, "print"),
         fe_cfunc(ctx, builtin_print)
     );
-    /* Create the C function object for println and bind it to the "println" symbol. */
     fe_set(ctx,
         fe_symbol(ctx, "println"),
         fe_cfunc(ctx, builtin_println)
     );
+    fe_set(ctx,
+        fe_symbol(ctx, "readline"),
+        fe_cfunc(ctx, builtin_read_line)
+    );
+    fe_set(ctx,
+        fe_symbol(ctx, "readnumber"),
+        fe_cfunc(ctx, builtin_read_number)
+    );
+    
+    /* Initialize extended builtins if requested */
+    if (config & FEX_CONFIG_ENABLE_EXTENDED_BUILTINS) {
+        fex_init_all_builtins(ctx);
+    }
     
     fe_restoregc(ctx, gc_save);
 }
@@ -548,14 +583,7 @@ static fe_Object* parse_grouping() {
 
 static fe_Object* parse_number() {
   double value = strtod(P.previous.start, NULL);
-  /* Check if it's an integer (no decimal point) and fits in fixnum range */
-  if (!memchr(P.previous.start, '.', P.previous.length) && 
-      !memchr(P.previous.start, 'e', P.previous.length) && 
-      !memchr(P.previous.start, 'E', P.previous.length) && 
-      value >= INTPTR_MIN && value <= INTPTR_MAX && value == (intptr_t)value) {
-    return fe_fixnum((intptr_t)value);
-  }
-  return fe_number(P.ctx, (fe_Number)value);
+  return fe_make_number(P.ctx, (fe_Number)value);
 }
 
 static fe_Object* parse_string() {

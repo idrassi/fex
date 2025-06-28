@@ -798,12 +798,8 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
       *p = '\0';
       ctx->nextchr = chr;
       n = strtod(buf, &p);  /* try to read as number */
-      if (p != buf && strchr(delimiter, *p)) { 
-        /* Check if it's an integer (no decimal point) and fits in fixnum range */
-        if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E') && n >= INTPTR_MIN && n <= INTPTR_MAX && n == (intptr_t)n) {
-          return fe_fixnum((intptr_t)n);
-        }
-        return fe_number(ctx, n); 
+      if (p != buf && strchr(delimiter, *p)) {
+        return fe_make_number(ctx, n); 
       }
       if (!strcmp(buf, "nil"))   { return &nil;  }
       if (!strcmp(buf, "true"))  { return FE_TRUE;  }

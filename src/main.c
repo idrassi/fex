@@ -109,20 +109,23 @@ static void run_file(const char* path) {
 static void print_usage(const char* program_name) {
     fprintf(stderr, "Usage: %s [options] [file]\n", program_name);
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  --spans    Enable detailed error reporting with source spans\n");
-    fprintf(stderr, "  --help     Show this help message\n");
+    fprintf(stderr, "  --spans       Enable detailed error reporting with source spans\n");
+    fprintf(stderr, "  --builtins    Enable extended built-in functions\n");
+    fprintf(stderr, "  --help        Show this help message\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "If no file is provided, starts the interactive REPL.\n");
 }
 
 int main(int argc, char **argv) {
-  int enable_spans = 0, i;
+  int enable_spans = 0, enable_builtins = 0, i;
   const char* filename = NULL;
   
   /* Parse command line arguments */
   for (i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--spans") == 0) {
       enable_spans = 1;
+    } else if (strcmp(argv[i], "--builtins") == 0) {
+      enable_builtins = 1;
     } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       print_usage(argv[0]);
       return 0;
@@ -149,8 +152,10 @@ int main(int argc, char **argv) {
   
   g_ctx = fe_open(mem, MEMORY_POOL_SIZE);
 
-  /* Initialize our custom environment with conditional span support */
-  FexConfig config = enable_spans ? FEX_CONFIG_ENABLE_SPANS : FEX_CONFIG_NONE;
+  /* Initialize our custom environment with conditional support */
+  FexConfig config = FEX_CONFIG_NONE;
+  if (enable_spans) config |= FEX_CONFIG_ENABLE_SPANS;
+  if (enable_builtins) config |= FEX_CONFIG_ENABLE_EXTENDED_BUILTINS;
   fex_init_with_config(g_ctx, config);
   
   if (filename == NULL) {
