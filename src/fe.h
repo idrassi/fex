@@ -80,7 +80,8 @@ fe_Object* fe_bool(fe_Context *ctx, int b);
 fe_Object* fe_nil(fe_Context *ctx);
 fe_Object* fe_number(fe_Context *ctx, fe_Number n);
 fe_Object *fe_make_number(fe_Context *ctx, fe_Number v); /* automatic fixnum or boxed double */
-fe_Object* fe_string(fe_Context *ctx, const char *str);
+fe_Object* fe_string(fe_Context *ctx, const char *str, size_t len);
+fe_Object* fe_string_raw(fe_Context *ctx, size_t len, char fill_char);
 fe_Object* fe_symbol(fe_Context *ctx, const char *name);
 fe_Object* fe_cfunc(fe_Context *ctx, fe_CFunc fn);
 fe_Object* fe_ptr(fe_Context *ctx, void *ptr);
@@ -91,6 +92,7 @@ fe_Object** fe_cdr_ptr(fe_Context *ctx, fe_Object *obj);
 void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int qt); /* qt: print with string quotes on/off */
 void fe_writefp(fe_Context *ctx, fe_Object *obj, FILE *fp);
 int fe_tostring(fe_Context *ctx, fe_Object *obj, char *dst, int size);
+size_t fe_strlen(fe_Context *ctx, fe_Object *obj);/* caller must ensure obj is a string */
 fe_Number fe_tonumber(fe_Context *ctx, fe_Object *obj);
 void* fe_toptr(fe_Context *ctx, fe_Object *obj);
 void fe_set(fe_Context *ctx, fe_Object *sym, fe_Object *v);

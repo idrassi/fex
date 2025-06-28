@@ -28,7 +28,7 @@
 #include "fe.h"
 #include "fex.h"
 
-#define MEMORY_POOL_SIZE (1024 * 1024) /* 1MB */
+#define MEMORY_POOL_SIZE (5 * 1024 * 1024) /* 5MB */
 #define REPL_BUFFER_SIZE 1024
 
 static jmp_buf toplevel;
@@ -111,6 +111,7 @@ static void print_usage(const char* program_name) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --spans       Enable detailed error reporting with source spans\n");
     fprintf(stderr, "  --builtins    Enable extended built-in functions\n");
+    fprintf(stderr, "  --memory-pool-size SIZE  Set memory pool size in MB (default: 5MB)\n");
     fprintf(stderr, "  --help        Show this help message\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "If no file is provided, starts the interactive REPL.\n");
@@ -118,6 +119,7 @@ static void print_usage(const char* program_name) {
 
 int main(int argc, char **argv) {
   int enable_spans = 0, enable_builtins = 0, i;
+  size_t memory_pool_size = MEMORY_POOL_SIZE;
   const char* filename = NULL;
   
   /* Parse command line arguments */
@@ -126,6 +128,21 @@ int main(int argc, char **argv) {
       enable_spans = 1;
     } else if (strcmp(argv[i], "--builtins") == 0) {
       enable_builtins = 1;
+    } else if (strcmp(argv[i], "--memory-pool-size") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --memory-pool-size requires a value in MB\n");
+        print_usage(argv[0]);
+        return 64;
+      }
+      i++;
+      char* endptr;
+      long size_mb = strtol(argv[i], &endptr, 10);
+      if (*endptr != '\0' || size_mb <= 0) {
+        fprintf(stderr, "Error: Invalid memory pool size '%s'. Must be a positive integer in MB.\n", argv[i]);
+        print_usage(argv[0]);
+        return 64;
+      }
+      memory_pool_size = (size_t)size_mb * 1024 * 1024;
     } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       print_usage(argv[0]);
       return 0;
@@ -144,13 +161,13 @@ int main(int argc, char **argv) {
   }
   
   /* Allocate memory pool for the fe context */
-  void* mem = malloc(MEMORY_POOL_SIZE);
+  void* mem = malloc(memory_pool_size);
   if (!mem) {
-    fprintf(stderr, "Failed to allocate memory for interpreter.\n");
+    fprintf(stderr, "Failed to allocate %zu bytes for interpreter.\n", memory_pool_size);
     return 1;
   }
   
-  g_ctx = fe_open(mem, MEMORY_POOL_SIZE);
+  g_ctx = fe_open(mem, memory_pool_size);
 
   /* Initialize our custom environment with conditional support */
   FexConfig config = FEX_CONFIG_NONE;

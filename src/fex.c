@@ -105,8 +105,8 @@ static fe_Object* builtin_read_line(fe_Context *ctx, fe_Object *args) {
         return fe_nil(ctx);
     }
     size_t len = strlen(buffer);
-    if (len > 0 && buffer[len-1] == '\n') buffer[len-1] = '\0';
-    return fe_string(ctx, buffer);
+    if (len > 0 && buffer[len-1] == '\n') {buffer[len-1] = '\0'; len--;}
+    return fe_string(ctx, buffer, len);
 }
 
 /* Read a line from stdin and parse it as a number, or nil on EOF */
@@ -596,7 +596,7 @@ static fe_Object* parse_string() {
     }
     memcpy(buffer, P.previous.start + 1, len);
     buffer[len] = '\0';
-    return fe_string(P.ctx, buffer);
+    return fe_string(P.ctx, buffer, len);
 }
 
 static fe_Object* parse_literal() {

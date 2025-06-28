@@ -255,9 +255,7 @@ static fe_Object* builtin_string_length(fe_Context *ctx, fe_Object *args) {
     fe_Object *str = fe_nextarg(ctx, &args);
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "strlen");
 
-    char buffer[1024];
-    fe_tostring(ctx, str, buffer, sizeof(buffer));
-    return fe_make_number(ctx, (fe_Number)strlen(buffer));
+    return fe_make_number(ctx, (fe_Number) fe_strlen(ctx, str));
 }
 
 static fe_Object* builtin_string_upper(fe_Context *ctx, fe_Object *args) {
@@ -265,15 +263,25 @@ static fe_Object* builtin_string_upper(fe_Context *ctx, fe_Object *args) {
     fe_Object *str = fe_nextarg(ctx, &args);
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "upper");
 
+    size_t len = fe_strlen(ctx, str);
+    if (len == 0) {
+        return fe_string(ctx, "", 0);
+    }
+    
+    if (len >= 1024) {
+        fe_error(ctx, "upper: string too long");
+        return fe_nil(ctx);
+    }
+
     char buffer[1024];
     fe_tostring(ctx, str, buffer, sizeof(buffer));
     
-    int i;
-    for (i = 0; buffer[i]; i++) {
+    size_t i;
+    for (i = 0; i < len; i++) {
         buffer[i] = toupper(buffer[i]);
     }
-    
-    return fe_string(ctx, buffer);
+
+    return fe_string(ctx, buffer, len);
 }
 
 static fe_Object* builtin_string_lower(fe_Context *ctx, fe_Object *args) {
@@ -281,15 +289,25 @@ static fe_Object* builtin_string_lower(fe_Context *ctx, fe_Object *args) {
     fe_Object *str = fe_nextarg(ctx, &args);
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "lower");
 
+    size_t len = fe_strlen(ctx, str);
+    if (len == 0) {
+        return fe_string(ctx, "", 0);
+    }
+    
+    if (len >= 1024) {
+        fe_error(ctx, "lower: string too long");
+        return fe_nil(ctx);
+    }
+
     char buffer[1024];
     fe_tostring(ctx, str, buffer, sizeof(buffer));
     
-    int i;
-    for (i = 0; buffer[i]; i++) {
+    size_t i;
+    for (i = 0; i < len; i++) {
         buffer[i] = tolower(buffer[i]);
     }
-    
-    return fe_string(ctx, buffer);
+
+    return fe_string(ctx, buffer, len);
 }
 
 static fe_Object* builtin_string_concat(fe_Context *ctx, fe_Object *args) {
@@ -327,7 +345,7 @@ static fe_Object* builtin_string_concat(fe_Context *ctx, fe_Object *args) {
         result_len += buffer_len;
     }
     
-    fe_Object *obj = fe_string(ctx, result);
+    fe_Object *obj = fe_string(ctx, result, result_len);
     free(result);
     return obj;
 }
@@ -340,23 +358,28 @@ static fe_Object* builtin_string_substring(fe_Context *ctx, fe_Object *args) {
     
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "substring");
     
+    size_t str_len = fe_strlen(ctx, str);
+    int start = (int)fe_tonumber(ctx, start_obj);
+    int end = fe_isnil(ctx, end_obj) ? (int)str_len : (int)fe_tonumber(ctx, end_obj);
+    
+    if (start < 0) start = 0;
+    if (end > (int)str_len) end = (int)str_len;
+    if (start >= end) return fe_string(ctx, "", 0);
+    
+    if (str_len >= 1024) {
+        fe_error(ctx, "substring: string too long");
+        return fe_nil(ctx);
+    }
+    
     char buffer[1024];
     fe_tostring(ctx, str, buffer, sizeof(buffer));
     
-    int len = (int) strlen(buffer);
-    int start = (int)fe_tonumber(ctx, start_obj);
-    int end = fe_isnil(ctx, end_obj) ? len : (int)fe_tonumber(ctx, end_obj);
-    
-    if (start < 0) start = 0;
-    if (end > len) end = len;
-    if (start >= end) return fe_string(ctx, "");
-    
-    char result[1024];
     int result_len = end - start;
-    strncpy(result, buffer + start, result_len);
+    char result[1024];
+    memcpy(result, buffer + start, result_len);
     result[result_len] = '\0';
-    
-    return fe_string(ctx, result);
+
+    return fe_string(ctx, result, result_len);
 }
 
 static fe_Object* builtin_string_split(fe_Context *ctx, fe_Object *args) {
@@ -365,6 +388,15 @@ static fe_Object* builtin_string_split(fe_Context *ctx, fe_Object *args) {
     fe_Object *delim = fe_nextarg(ctx, &args);
     
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "split");
+    FEX_CHECK_TYPE(ctx, delim, FE_TSTRING, "split");
+    
+    size_t str_len = fe_strlen(ctx, str);
+    size_t delim_len = fe_strlen(ctx, delim);
+    
+    if (str_len >= 1024 || delim_len >= 64) {
+        fe_error(ctx, "split: string too long");
+        return fe_nil(ctx);
+    }
     
     char buffer[1024], delimiter[64];
     fe_tostring(ctx, str, buffer, sizeof(buffer));
@@ -375,7 +407,7 @@ static fe_Object* builtin_string_split(fe_Context *ctx, fe_Object *args) {
     
     char *token = strtok(buffer, delimiter);
     while (token != NULL) {
-        *tail = fe_cons(ctx, fe_string(ctx, token), fe_nil(ctx));
+        *tail = fe_cons(ctx, fe_string(ctx, token, strlen(token)), fe_nil(ctx));
         tail = fe_cdr_ptr(ctx, *tail);
         token = strtok(NULL, delimiter);
     }
@@ -387,6 +419,12 @@ static fe_Object* builtin_string_trim(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "trim");
     fe_Object *str = fe_nextarg(ctx, &args);
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "trim");
+    
+    size_t str_len = fe_strlen(ctx, str);
+    if (str_len >= 1024) {
+        fe_error(ctx, "trim: string too long");
+        return fe_nil(ctx);
+    }
     
     char buffer[1024];
     fe_tostring(ctx, str, buffer, sizeof(buffer));
@@ -400,7 +438,8 @@ static fe_Object* builtin_string_trim(fe_Context *ctx, fe_Object *args) {
     while (end > start && isspace(*end)) end--;
     
     *(end + 1) = '\0';
-    return fe_string(ctx, start);
+    size_t trimmed_len = (size_t)(end - start + 1);
+    return fe_string(ctx, start, trimmed_len);
 }
 
 static fe_Object* builtin_string_contains(fe_Context *ctx, fe_Object *args) {
@@ -411,11 +450,48 @@ static fe_Object* builtin_string_contains(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "contains");
     FEX_CHECK_TYPE(ctx, substr, FE_TSTRING, "contains");
     
+    size_t str_len = fe_strlen(ctx, str);
+    size_t substr_len = fe_strlen(ctx, substr);
+    
+    if (str_len >= 1024 || substr_len >= 256) {
+        fe_error(ctx, "contains: string too long");
+        return fe_nil(ctx);
+    }
+    
     char buffer[1024], search[256];
     fe_tostring(ctx, str, buffer, sizeof(buffer));
     fe_tostring(ctx, substr, search, sizeof(search));
     
     return fe_bool(ctx, strstr(buffer, search) != NULL);
+}
+
+static fe_Object* builtin_make_string(fe_Context *ctx, fe_Object *args) {
+    FEX_CHECK_ARGS(ctx, args, 2, "makestring");
+    fe_Object *length_obj = fe_nextarg(ctx, &args);
+    fe_Object *fill_obj = fe_nextarg(ctx, &args);
+    FEX_CHECK_TYPE(ctx, length_obj, FE_TNUMBER, "makestring");
+    FEX_CHECK_TYPE(ctx, fill_obj, FE_TSTRING, "makestring");
+    fe_Number length_num = fe_tonumber(ctx, length_obj);
+    
+    int length = (int)length_num;
+    
+    if (length == 0) {
+        return fe_string(ctx, "", 0);
+    }
+    
+    char fill_buffer[64];
+    fe_tostring(ctx, fill_obj, fill_buffer, sizeof(fill_buffer));
+    
+    if (strlen(fill_buffer) == 0) {
+        fe_error(ctx, "makestring: fill character cannot be empty");
+        return fe_nil(ctx);
+    }
+    
+    char fill_char = fill_buffer[0];  /* Use first character only */
+    
+    fe_Object *obj = fe_string_raw(ctx, length, fill_char);
+    
+    return obj;
 }
 
 /*
@@ -580,6 +656,13 @@ static fe_Object* builtin_fold(fe_Context *ctx, fe_Object *args) {
 static fe_Object* builtin_read_file(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "readfile");
     fe_Object *filename_obj = fe_nextarg(ctx, &args);
+    FEX_CHECK_TYPE(ctx, filename_obj, FE_TSTRING, "readfile");
+    
+    size_t filename_len = fe_strlen(ctx, filename_obj);
+    if (filename_len >= 1024) {
+        fe_error(ctx, "readfile: filename too long");
+        return fe_nil(ctx);
+    }
     
     char filename[1024];
     fe_tostring(ctx, filename_obj, filename, sizeof(filename));
@@ -626,7 +709,7 @@ static fe_Object* builtin_read_file(fe_Context *ctx, fe_Object *args) {
     buffer[bytes_read] = '\0';
     fclose(file);
     
-    fe_Object *result = fe_string(ctx, buffer);
+    fe_Object *result = fe_string(ctx, buffer, bytes_read);
     free(buffer);
     
     return result;
@@ -636,6 +719,21 @@ static fe_Object* builtin_write_file(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 2, "writefile");
     fe_Object *filename_obj = fe_nextarg(ctx, &args);
     fe_Object *content_obj = fe_nextarg(ctx, &args);
+    FEX_CHECK_TYPE(ctx, filename_obj, FE_TSTRING, "writefile");
+    FEX_CHECK_TYPE(ctx, content_obj, FE_TSTRING, "writefile");
+    
+    size_t filename_len = fe_strlen(ctx, filename_obj);
+    size_t content_len = fe_strlen(ctx, content_obj);
+    
+    if (filename_len >= 1024) {
+        fe_error(ctx, "writefile: filename too long");
+        return fe_nil(ctx);
+    }
+    
+    if (content_len >= 4096) {
+        fe_error(ctx, "writefile: content too long");
+        return fe_nil(ctx);
+    }
     
     char filename[1024];
     char content[4096];
@@ -648,7 +746,7 @@ static fe_Object* builtin_write_file(fe_Context *ctx, fe_Object *args) {
         return fe_nil(ctx);
     }
     
-    size_t written = fwrite(content, 1, strlen(content), file);
+    size_t written = fwrite(content, 1, content_len, file);
     fclose(file);
     
     return fe_make_number(ctx, (fe_Number)written);
@@ -679,6 +777,13 @@ static fe_Object* builtin_exit(fe_Context *ctx, fe_Object *args) {
 static fe_Object* builtin_system(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "system");
     fe_Object *command_obj = fe_nextarg(ctx, &args);
+    FEX_CHECK_TYPE(ctx, command_obj, FE_TSTRING, "system");
+    
+    size_t command_len = fe_strlen(ctx, command_obj);
+    if (command_len >= 1024) {
+        fe_error(ctx, "system: command too long");
+        return fe_nil(ctx);
+    }
     
     char command[1024];
     fe_tostring(ctx, command_obj, command, sizeof(command));
@@ -713,7 +818,7 @@ static fe_Object* builtin_type_of(fe_Context *ctx, fe_Object *args) {
         default: type_name = "unknown"; break;
     }
     
-    return fe_string(ctx, type_name);
+    return fe_string(ctx, type_name, strlen(type_name));
 }
 
 static fe_Object* builtin_to_string(fe_Context *ctx, fe_Object *args) {
@@ -721,9 +826,9 @@ static fe_Object* builtin_to_string(fe_Context *ctx, fe_Object *args) {
     fe_Object *obj = fe_nextarg(ctx, &args);
     
     char buffer[1024];
-    fe_tostring(ctx, obj, buffer, sizeof(buffer));
+    int len = fe_tostring(ctx, obj, buffer, sizeof(buffer));
     
-    return fe_string(ctx, buffer);
+    return fe_string(ctx, buffer, len);
 }
 
 static fe_Object* builtin_to_number(fe_Context *ctx, fe_Object *args) {
@@ -817,6 +922,7 @@ static void register_string_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "split"), fe_cfunc(ctx, builtin_string_split));
     fe_set(ctx, fe_symbol(ctx, "trim"), fe_cfunc(ctx, builtin_string_trim));
     fe_set(ctx, fe_symbol(ctx, "contains"), fe_cfunc(ctx, builtin_string_contains));
+    fe_set(ctx, fe_symbol(ctx, "makestring"), fe_cfunc(ctx, builtin_make_string));
     
     fe_restoregc(ctx, gc_save);
 }

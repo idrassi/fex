@@ -617,7 +617,7 @@ static uint32_t str_slab_alloc(fe_Context *ctx) {
     return offset;
 }
 
-static uint32_t str_alloc(fe_Context *ctx, const char *src, size_t len) {
+static uint32_t str_alloc(fe_Context *ctx, const char *src, size_t len, char fill_char) {
     if (len == 0) {
         return FE_SLAB_NULL;
     }
@@ -634,8 +634,15 @@ static uint32_t str_alloc(fe_Context *ctx, const char *src, size_t len) {
 
     while (remaining > 0) {
         size_t to_copy = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
-        memcpy(current_slab->data, p, to_copy);
-        p += to_copy;
+        if (p)
+        {
+          memcpy(current_slab->data, p, to_copy);
+          p += to_copy;
+        }
+        else
+        {
+          memset(current_slab->data, fill_char, to_copy); /* Fill with fill_char if p is NULL */
+        }
         remaining -= to_copy;
 
         if (remaining > 0) {
@@ -655,28 +662,41 @@ static uint32_t str_alloc(fe_Context *ctx, const char *src, size_t len) {
 
 static fe_Object* make_string_obj(fe_Context *ctx,
                                   const char   *src,
-                                  size_t        len)
+                                  size_t        len,
+                                  char fill_char)
 {
     fe_Object *o = object(ctx);
     settype(o, FE_TSTRING);
     car(o) = FE_FIXNUM((intptr_t)len);
 
 #ifdef FE_OPT_NO_MALLOC_STRINGS
-    o->cdr.u32 = str_alloc(ctx, src, len);
+    o->cdr.u32 = str_alloc(ctx, src, len, fill_char);
 #else
     char *buf = malloc(len+1);
     if (!buf) fe_error(ctx, "out of memory (string)");
     ctx->bytes_since_gc += len + 1;
-    memcpy(buf, src, len);
+    if (p)
+    {
+      memcpy(buf, src, len);
+    }
+    else
+    {
+      memset(buf, fill_char, len); /* Fill with fill_char if src is NULL */
+    }
     buf[len]='\0';
     o->cdr.s = buf;
 #endif
     return o;
 }
 
-fe_Object* fe_string(fe_Context *ctx, const char *str)
+fe_Object* fe_string(fe_Context *ctx, const char *str, size_t len)
 {
-    return make_string_obj(ctx, str, strlen(str));
+    return make_string_obj(ctx, str, len, 0);
+}
+
+fe_Object* fe_string_raw(fe_Context *ctx, size_t len, char fill_char)
+{
+    return make_string_obj(ctx, NULL, len, fill_char);
 }
 
 
@@ -691,7 +711,7 @@ fe_Object* fe_symbol(fe_Context *ctx, const char *name) {
   /* create new object, push to symlist and return */
   obj = object(ctx);
   settype(obj, FE_TSYMBOL);
-  cdr(obj) = fe_cons(ctx, fe_string(ctx, name), &nil);
+  cdr(obj) = fe_cons(ctx, fe_string(ctx, name, strlen(name)), &nil);
   ctx->symlist = fe_cons(ctx, obj, ctx->symlist);
   return obj;
 }
@@ -852,6 +872,15 @@ int fe_tostring(fe_Context *ctx, fe_Object *obj, char *dst, int size) {
   return size - x.n - 1;
 }
 
+size_t fe_strlen(fe_Context *ctx, fe_Object *obj)
+{
+  /* caller must ensure obj is a string */
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+  return FE_STR_LEN(obj);
+#else
+  return strlen(FE_STR_DATA(ctx, obj));
+#endif
+}
 
 fe_Number fe_tonumber(fe_Context *ctx, fe_Object *obj) {
     unused(ctx);
@@ -973,7 +1002,7 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
             s_buf[len++] = chr;
             chr = fn(ctx, udata);
         }
-        return make_string_obj(ctx, s_buf, len);
+        return make_string_obj(ctx, s_buf, len, 0);
 #else
         size_t cap = GROW_STEP, len = 0;
         char *s_buf = malloc(cap);
