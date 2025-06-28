@@ -43,10 +43,8 @@
 #define number(x)     ( (x)->cdr.n )
 #define prim(x)       ( (x)->cdr.c )
 #define cfunc(x)      ( (x)->cdr.f )
-#define strbuf(x)     ( &(x)->car.c + 1 )
 #define nval(o)       fe_num_value(o)
 
-#define STRBUFSIZE    ( (int) sizeof(fe_Object*) - 1 )
 #define GCMARKBIT     ( 0x2 )
 #define GCSTACKSIZE   ( 1024 )
 
@@ -78,7 +76,7 @@ static const char *typenames[] = {
   "boolean"
 };
 
-typedef union { fe_Object *o; fe_CFunc f; fe_Number n; char c; } Value;
+typedef union { fe_Object *o; fe_CFunc f; fe_Number n; char c;  char *s;} Value;
 
 struct fe_Object {
   Value car, cdr;
@@ -386,6 +384,9 @@ static void collectgarbage(fe_Context *ctx) {
     fe_Object *obj = &ctx->objects[i];
     if (type(obj) == FE_TFREE) { continue; }
     if (~tag(obj) & GCMARKBIT) {
+      if (type(obj)==FE_TSTRING && FE_STR_DATA(obj)) {
+          free(FE_STR_DATA(obj));
+      }
       if (type(obj) == FE_TPTR && ctx->handlers.gc) {
         ctx->handlers.gc(ctx, obj);
       }
@@ -421,25 +422,15 @@ static int equal(fe_Object *a, fe_Object *b) {
   if (type(a) != type(b)) { return 0; }
   if (type(a) == FE_TNUMBER) { return nval(a) == nval(b); }
   if (type(a) == FE_TSTRING) {
-    for (; !isnil(a); a = cdr(a), b = cdr(b)) {
-      if (car(a) != car(b)) { return 0; }
-    }
-    return a == b;
+    return FE_STR_LEN(a)==FE_STR_LEN(b) &&
+           memcmp(FE_STR_DATA(a), FE_STR_DATA(b), FE_STR_LEN(a))==0;
   }
   return 0;
 }
 
 
 static int streq(fe_Object *obj, const char *str) {
-  while (!isnil(obj)) {
-    int i;
-    for (i = 0; i < STRBUFSIZE; i++) {
-      if (strbuf(obj)[i] != *str) { return 0; }
-      if (*str) { str++; }
-    }
-    obj = cdr(obj);
-  }
-  return *str == '\0';
+  return strcmp(FE_STR_DATA(obj), str)==0;
 }
 
 
@@ -492,29 +483,28 @@ fe_Object* fe_number(fe_Context *ctx, fe_Number n) {
   return obj;
 }
 
+#define GROW_STEP 64
 
-static fe_Object* buildstring(fe_Context *ctx, fe_Object *tail, int chr) {
-  if (!tail || strbuf(tail)[STRBUFSIZE - 1] != '\0') {
-    fe_Object *obj = fe_cons(ctx, NULL, &nil);
-    settype(obj, FE_TSTRING);
-    if (tail) {
-      cdr(tail) = obj;
-      ctx->gcstack_idx--;
-    }
-    tail = obj;
-  }
-  strbuf(tail)[strlen(strbuf(tail))] = chr;
-  return tail;
+static fe_Object* make_string_obj(fe_Context *ctx,
+                                  const char   *src,
+                                  size_t        len)
+{
+    fe_Object *o = object(ctx);
+    settype(o, FE_TSTRING);
+
+    char *buf = malloc(len+1);
+    if (!buf) fe_error(ctx, "out of memory (string)");
+    memcpy(buf, src, len);
+    buf[len]='\0';
+
+    car(o) = FE_FIXNUM((intptr_t)len);
+    FE_STR_DATA(o) = buf;
+    return o;
 }
 
-
-fe_Object* fe_string(fe_Context *ctx, const char *str) {
-  fe_Object *obj = buildstring(ctx, NULL, '\0');
-  fe_Object *tail = obj;
-  while (*str) {
-    tail = buildstring(ctx, tail, *str++);
-  }
-  return obj;
+fe_Object* fe_string(fe_Context *ctx, const char *str)
+{
+    return make_string_obj(ctx, str, strlen(str));
 }
 
 
@@ -626,16 +616,13 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
       break;
 
     case FE_TSTRING:
-      if (qt) { fn(ctx, udata, '"'); }
-      while (!isnil(obj)) {
-        int i;
-        for (i = 0; i < STRBUFSIZE && strbuf(obj)[i]; i++) {
-          if (qt && strbuf(obj)[i] == '"') { fn(ctx, udata, '\\'); }
-          fn(ctx, udata, strbuf(obj)[i]);
-        }
-        obj = cdr(obj);
+      if (qt) fn(ctx, udata, '"');
+      const char *p = FE_STR_DATA(obj);
+      while (*p) {
+          if (qt && *p=='"') fn(ctx, udata, '\\');
+          fn(ctx, udata, *p++);
       }
-      if (qt) { fn(ctx, udata, '"'); }
+      if (qt) fn(ctx, udata, '"');
       break;
 
     default:
@@ -774,19 +761,26 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
       return fe_cons(ctx, fe_symbol(ctx, "quote"), fe_cons(ctx, v, &nil));
 
     case '"':
-      res = buildstring(ctx, NULL, '\0');
-      v = res;
-      chr = fn(ctx, udata);
-      while (chr != '"') {
-        if (chr == '\0') { fe_error(ctx, "unclosed string"); }
-        if (chr == '\\') {
-          chr = fn(ctx, udata);
-          if (strchr("nrt", chr)) { chr = strchr("n\nr\rt\t", chr)[1]; }
-        }
-        v = buildstring(ctx, v, chr);
+      {
+        size_t cap = GROW_STEP, len = 0;
+        char *buf = malloc(cap);
+        if (!buf) fe_error(ctx, "out of memory (string)");
+
         chr = fn(ctx, udata);
+        while (chr!='"') {
+          if (chr=='\0') fe_error(ctx, "unclosed string");
+          if (chr=='\\') {
+              chr = fn(ctx, udata);
+              if (chr=='n') chr='\n';
+              else if (chr=='r') chr='\r';
+              else if (chr=='t') chr='\t';
+          }
+          if (len+1>=cap) { cap+=GROW_STEP; buf=realloc(buf,cap); }
+          buf[len++]=chr;
+          chr = fn(ctx, udata);
+        }
+        return make_string_obj(ctx, buf, len); /* duplicates & keeps */
       }
-      return res;
 
     default:
       p = buf;

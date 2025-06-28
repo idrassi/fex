@@ -33,6 +33,10 @@ typedef struct { fe_ErrorFn error; fe_CFunc mark, gc; } fe_Handlers;
 #define FE_FIXNUM(n)       ((fe_Object*)(((intptr_t)(n) << 1) | 1))
 #define FE_UNBOX_FIXNUM(x) ((intptr_t)(x) >> 1)
 #define fe_fixnum(n)       FE_FIXNUM(n)          /* public alias – convenience */
+/* Forward macro for native strings */
+#define FE_STR_DATA(o)   ((o)->cdr.s)
+#define FE_STR_LEN(obj)    (FE_UNBOX_FIXNUM((obj)->car.o))
+#define FE_IS_STRING(o)    (!FE_IS_FIXNUM(o) && ((o)->flags>>2)==FE_TSTRING)
 
 
 /* Boolean: ...xxx0010 -> false, ...xxx0110 -> true  */
