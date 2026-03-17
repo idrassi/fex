@@ -69,6 +69,27 @@ CASES = [
         ),
     },
     {
+        "name": "maps",
+        "script": ROOT / "scripts" / "test_maps.fex",
+        "args": ["--builtins"],
+        "exit_code": 0,
+        "stdout": (
+            "--- Map Regression ---\n"
+            "cfg.env:prod\n"
+            "cfg.port:8080\n"
+            "cfg.host:localhost\n"
+            "mapget host:localhost\n"
+            "maphas missing:false\n"
+            "cfg.env updated:stage\n"
+            "mapcount(cfg):3\n"
+            "typeof(cfg):map\n"
+            "ismap(cfg):true\n"
+            "typeof(settings):map\n"
+            "settings.mode:debug\n"
+            "mapget version:1.0\n"
+            "settings.missing:nil\n"
+        ),
+    },    {
         "name": "bad module syntax",
         "source": 'module(123) {\n    export let y = 20;\n}\n',
         "exit_code": 65,

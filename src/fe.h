@@ -60,7 +60,7 @@ fe_Number fe_num_value(fe_Object *o);
 
 enum {
   FE_TPAIR, FE_TFREE, FE_TNIL, FE_TNUMBER, FE_TSYMBOL, FE_TSTRING,
-  FE_TFUNC, FE_TMACRO, FE_TPRIM, FE_TCFUNC, FE_TPTR,
+  FE_TFUNC, FE_TMACRO, FE_TPRIM, FE_TCFUNC, FE_TPTR, FE_TMAP,
   FE_TBOOLEAN
 };
 
@@ -86,6 +86,13 @@ fe_Object* fe_symbol(fe_Context *ctx, const char *name);
 int fe_symbol_name_eq(fe_Context *ctx, fe_Object *sym, const char *str);
 fe_Object* fe_cfunc(fe_Context *ctx, fe_CFunc fn);
 fe_Object* fe_ptr(fe_Context *ctx, void *ptr);
+fe_Object* fe_map(fe_Context *ctx);
+int fe_map_set(fe_Context *ctx, fe_Object *map, fe_Object *key, fe_Object *value);
+int fe_map_has(fe_Context *ctx, fe_Object *map, fe_Object *key);
+fe_Object* fe_map_get(fe_Context *ctx, fe_Object *map, fe_Object *key);
+int fe_map_delete(fe_Context *ctx, fe_Object *map, fe_Object *key);
+int fe_map_count(fe_Context *ctx, fe_Object *map);
+fe_Object* fe_map_keys(fe_Context *ctx, fe_Object *map);
 fe_Object* fe_list(fe_Context *ctx, fe_Object **objs, int n);
 fe_Object* fe_car(fe_Context *ctx, fe_Object *obj);
 fe_Object* fe_cdr(fe_Context *ctx, fe_Object *obj);

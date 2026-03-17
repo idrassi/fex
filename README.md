@@ -28,9 +28,9 @@ FeX provides a familiar "curly-brace" syntax front-end that compiles down to the
 
 *   **Modern Syntax**: Familiar C-like syntax for functions, variables (`let`), `if`/`else`, `while` loops, and operators.
 *   **Powerful Core**: Supports first-class functions, lexical scoping, closures, and macros inherited from its `fe` backend.
-*   **Rich Data Types**: Numbers (doubles and fixnums), Strings, `nil`, Booleans, and Pairs (for lists).
+*   **Rich Data Types**: Numbers (doubles and fixnums), Strings, `nil`, Booleans, Pairs (for lists), and Maps for associative data.
 *   **Pair Sugar**: `::` builds pairs, `.head`/`.first` and `.tail`/`.rest` read them, and pair selectors can be assigned.
-*   **Zero-Malloc Runtime**: Operates within a single, fixed-size memory arena. No `malloc`/`free` calls are made during script execution, making it highly predictable.
+*   **Arena-Based Core Runtime**: Core values live in a fixed-size interpreter arena, while higher-level features such as source spans, import bookkeeping, and maps may use auxiliary heap storage.
 *   **Garbage Collection**: A simple and fast mark-and-sweep garbage collector manages the memory arena.
 *   **Recoverable Diagnostics**: The CLI and C API can surface structured compile, runtime, and file I/O errors without terminating the host process.
 *   **Embeddable C API**: A clean API allows you to easily embed FeX into your C projects, call FeX functions from C, and expose C functions to FeX.
@@ -160,6 +160,22 @@ println(pair.tail.head); // 2
 pair.head = 10;
 println(pair);           // (10 2 3)
 ```
+
+### Maps
+
+When extended builtins are enabled, FeX also supports mutable string/symbol-keyed maps for configuration-style data and module-like objects:
+
+```c
+let cfg = makemap("host", "localhost", "port", 8080);
+
+println(cfg.host);                 // localhost
+cfg.host = "127.0.0.1";
+println(mapget(cfg, "host"));      // 127.0.0.1
+println(maphas(cfg, "port"));      // true
+println(mapcount(cfg));            // 2
+```
+
+Module exports now use the same map representation internally, so `settings.mode = "debug";` updates an imported module property directly.
 
 ## Embedding API
 

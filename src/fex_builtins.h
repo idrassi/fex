@@ -44,7 +44,8 @@ typedef enum {
     FEX_BUILTINS_IO = 1 << 3,          /* File I/O operations */
     FEX_BUILTINS_SYSTEM = 1 << 4,      /* System operations */
     FEX_BUILTINS_TYPE = 1 << 5,        /* Type checking and conversion */
-    FEX_BUILTINS_ALL = 0x3F            /* All builtins */
+    FEX_BUILTINS_DATA = 1 << 6,        /* Map/object operations */
+    FEX_BUILTINS_ALL = 0x7F            /* All builtins */
 } FexBuiltinsConfig;
 
 /* Error handling utilities */

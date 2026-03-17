@@ -75,7 +75,7 @@ typedef struct {
 
 enum {
  P_LET, P_SET, P_IF, P_FN, P_MAC, P_WHILE,
- P_RETURN, P_MODULE, P_EXPORT, P_IMPORT, P_GET,
+ P_RETURN, P_MODULE, P_EXPORT, P_IMPORT, P_GET, P_PUT,
  P_QUOTE, P_AND, P_OR, P_DO, P_CONS,
  P_CAR, P_CDR, P_SETCAR, P_SETCDR, P_LIST, P_NOT, P_IS, P_ATOM, P_PRINT, P_LT,
  P_LTE, P_ADD, P_SUB, P_MUL, P_DIV, P_MAX
@@ -83,7 +83,7 @@ enum {
 
 static const char *primnames[] = {
   "let", "=", "if", "fn", "mac", "while", "return",
-  "module", "export", "import", "get",
+  "module", "export", "import", "get", "put",
   "quote", "and", "or", "do", "cons",
   "car", "cdr", "setcar", "setcdr", "list", "not", "is", "atom", "print", "<",
   "<=", "+", "-", "*", "/"
@@ -91,11 +91,20 @@ static const char *primnames[] = {
 
 static const char *typenames[] = {
   "pair", "free", "nil", "number", "symbol", "string",
-  "func", "macro", "prim", "cfunc", "ptr",
+  "func", "macro", "prim", "cfunc", "ptr", "map",
   "boolean"
 };
 
-typedef union { fe_Object *o; fe_CFunc f; fe_Number n; char c; char *s; uint32_t u32; } Value;
+typedef struct {
+  int count;
+  int used;
+  int capacity;
+  fe_Object **keys;
+  fe_Object **values;
+  unsigned char *states;
+} fe_Map;
+
+typedef union { fe_Object *o; fe_CFunc f; fe_Number n; char c; char *s; void *p; uint32_t u32; } Value;
 
 struct fe_Object {
   Value car, cdr;
@@ -153,6 +162,15 @@ static fe_Object *quote_sym = NULL;
 static fe_Object *fn_sym = NULL;
 static fe_Object *mac_sym = NULL;
 
+#define MAP_EMPTY 0
+#define MAP_USED 1
+#define MAP_TOMBSTONE 2
+
+static fe_Map* mapdata(fe_Object *obj);
+static fe_Object* normalize_map_key(fe_Context *ctx, fe_Object *key);
+static int map_find_slot(fe_Context *ctx, fe_Map *map, fe_Object *key, int *found);
+static fe_Object* object(fe_Context *ctx);
+
 static int list_has(fe_Object *list, fe_Object *item) {
   for (; !isnil(list); list = cdr(list)) {
     if (car(list) == item) { return 1; }
@@ -163,6 +181,10 @@ static int list_has(fe_Object *list, fe_Object *item) {
 /* Truth test that all new code should use                               */
 static int fe_truthy(fe_Object *o) {
     return !FE_IS_FALSE(o) && !isnil(o);
+}
+
+static fe_Map* mapdata(fe_Object *obj) {
+  return (fe_Map*)obj->cdr.p;
 }
 
 static void analyze(fe_Context *ctx, fe_Object *node, fe_Object *bound, fe_Object **free_vars) {
@@ -657,6 +679,18 @@ void fe_mark(fe_Context *ctx, fe_Object *obj) {
         case FE_TPTR:
             if (ctx->handlers.mark) ctx->handlers.mark(ctx, obj);
             /* fall-through */
+        case FE_TMAP: {
+            fe_Map *map = mapdata(obj);
+            int i;
+            if (!map) return;
+            for (i = 0; i < map->capacity; i++) {
+              if (map->states[i] == MAP_USED) {
+                fe_mark(ctx, map->keys[i]);
+                fe_mark(ctx, map->values[i]);
+              }
+            }
+            return;
+        }
         default:
             return;                 /* nothing more to traverse */
         }
@@ -708,6 +742,13 @@ static void collectgarbage(fe_Context *ctx) {
           free(FE_STR_DATA(ctx, obj));
       }
 #endif
+      if (type(obj) == FE_TMAP && mapdata(obj)) {
+        fe_Map *map = mapdata(obj);
+        free(map->keys);
+        free(map->values);
+        free(map->states);
+        free(map);
+      }
       if (type(obj) == FE_TPTR && ctx->handlers.gc) {
         ctx->handlers.gc(ctx, obj);
       }
@@ -818,6 +859,278 @@ int fe_symbol_name_eq(fe_Context *ctx, fe_Object *sym, const char *str) {
   (void)ctx;
   if (type(sym) != FE_TSYMBOL) { return 0; }
   return streq(ctx, car(cdr(sym)), str);
+}
+
+static fe_Object* normalize_map_key(fe_Context *ctx, fe_Object *key) {
+  if (type(key) == FE_TSYMBOL) {
+    return car(cdr(key));
+  }
+  if (type(key) == FE_TSTRING) {
+    return key;
+  }
+  fe_error(ctx, "map keys must be strings or symbols");
+  return &nil;
+}
+
+static unsigned long hash_string_obj(fe_Context *ctx, fe_Object *obj) {
+  unsigned long hash = 2166136261u;
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+  size_t remaining = FE_STR_LEN(obj);
+  uint32_t offset = obj->cdr.u32;
+  while (offset != FE_SLAB_NULL && remaining > 0) {
+    fe_Slab *slab = (fe_Slab*)(ctx->str_base + offset);
+    size_t to_hash = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
+    size_t i;
+    for (i = 0; i < to_hash; i++) {
+      hash ^= (unsigned char)slab->data[i];
+      hash *= 16777619u;
+    }
+    remaining -= to_hash;
+    offset = slab->next;
+  }
+#else
+  const unsigned char *p = (const unsigned char*)FE_STR_DATA(ctx, obj);
+  size_t i;
+  size_t len = FE_STR_LEN(obj);
+  for (i = 0; i < len; i++) {
+    hash ^= p[i];
+    hash *= 16777619u;
+  }
+#endif
+  return hash;
+}
+
+static fe_Map* map_alloc(int capacity) {
+  fe_Map *map;
+  map = malloc(sizeof(*map));
+  if (!map) {
+    return NULL;
+  }
+  map->count = 0;
+  map->used = 0;
+  map->capacity = capacity;
+  map->keys = malloc(sizeof(fe_Object*) * capacity);
+  map->values = malloc(sizeof(fe_Object*) * capacity);
+  map->states = malloc(sizeof(unsigned char) * capacity);
+  if (!map->keys || !map->values || !map->states) {
+    free(map->keys);
+    free(map->values);
+    free(map->states);
+    free(map);
+    return NULL;
+  }
+  memset(map->keys, 0, sizeof(fe_Object*) * capacity);
+  memset(map->values, 0, sizeof(fe_Object*) * capacity);
+  memset(map->states, 0, sizeof(unsigned char) * capacity);
+  return map;
+}
+
+static int map_resize(fe_Context *ctx, fe_Map *map, int capacity) {
+  fe_Map *grown;
+  int i;
+
+  grown = map_alloc(capacity);
+  if (!grown) {
+    return 0;
+  }
+
+  for (i = 0; i < map->capacity; i++) {
+    int found;
+    int slot;
+    if (map->states[i] != MAP_USED) {
+      continue;
+    }
+    slot = map_find_slot(ctx, grown, map->keys[i], &found);
+    if (slot < 0) {
+      free(grown->keys);
+      free(grown->values);
+      free(grown->states);
+      free(grown);
+      return 0;
+    }
+    grown->states[slot] = MAP_USED;
+    grown->keys[slot] = map->keys[i];
+    grown->values[slot] = map->values[i];
+    grown->count++;
+    grown->used++;
+  }
+
+  free(map->keys);
+  free(map->values);
+  free(map->states);
+  map->keys = grown->keys;
+  map->values = grown->values;
+  map->states = grown->states;
+  map->count = grown->count;
+  map->used = grown->used;
+  map->capacity = grown->capacity;
+  free(grown);
+  return 1;
+}
+
+static int map_ensure_capacity(fe_Context *ctx, fe_Map *map) {
+  int min_capacity = 8;
+  int target = map->capacity;
+  if (target < min_capacity) {
+    target = min_capacity;
+  }
+  if ((map->used + 1) * 4 < target * 3) {
+    return 1;
+  }
+  while ((map->used + 1) * 4 >= target * 3) {
+    target *= 2;
+  }
+  return map_resize(ctx, map, target);
+}
+
+static int map_find_slot(fe_Context *ctx, fe_Map *map, fe_Object *key, int *found) {
+  unsigned long hash;
+  int index;
+  int first_tombstone = -1;
+  int steps;
+
+  *found = 0;
+  if (map->capacity <= 0) {
+    return -1;
+  }
+
+  hash = hash_string_obj(ctx, key);
+  index = (int)(hash % (unsigned long)map->capacity);
+
+  for (steps = 0; steps < map->capacity; steps++) {
+    int slot = (index + steps) % map->capacity;
+    if (map->states[slot] == MAP_EMPTY) {
+      return (first_tombstone >= 0) ? first_tombstone : slot;
+    }
+    if (map->states[slot] == MAP_TOMBSTONE) {
+      if (first_tombstone < 0) {
+        first_tombstone = slot;
+      }
+      continue;
+    }
+    if (equal(ctx, map->keys[slot], key)) {
+      *found = 1;
+      return slot;
+    }
+  }
+
+  return first_tombstone;
+}
+
+fe_Object* fe_map(fe_Context *ctx) {
+  fe_Object *obj = object(ctx);
+  fe_Map *map = map_alloc(8);
+  if (!map) {
+    fe_error(ctx, "out of memory (map)");
+  }
+  settype(obj, FE_TMAP);
+  car(obj) = &nil;
+  obj->cdr.p = map;
+  return obj;
+}
+
+int fe_map_set(fe_Context *ctx, fe_Object *map_obj, fe_Object *key, fe_Object *value) {
+  fe_Map *map;
+  int found;
+  int slot;
+
+  checktype(ctx, map_obj, FE_TMAP);
+  key = normalize_map_key(ctx, key);
+  if (type(key) != FE_TSTRING) {
+    return 0;
+  }
+
+  map = mapdata(map_obj);
+  if (!map_ensure_capacity(ctx, map)) {
+    fe_error(ctx, "out of memory (map)");
+  }
+
+  slot = map_find_slot(ctx, map, key, &found);
+  if (slot < 0) {
+    fe_error(ctx, "out of memory (map)");
+  }
+  if (!found) {
+    if (map->states[slot] == MAP_EMPTY) {
+      map->used++;
+    }
+    map->states[slot] = MAP_USED;
+    map->keys[slot] = key;
+    map->count++;
+  }
+  map->values[slot] = value;
+  return 1;
+}
+
+int fe_map_has(fe_Context *ctx, fe_Object *map_obj, fe_Object *key) {
+  fe_Map *map;
+  int found;
+  checktype(ctx, map_obj, FE_TMAP);
+  key = normalize_map_key(ctx, key);
+  if (type(key) != FE_TSTRING) {
+    return 0;
+  }
+  map = mapdata(map_obj);
+  map_find_slot(ctx, map, key, &found);
+  return found;
+}
+
+fe_Object* fe_map_get(fe_Context *ctx, fe_Object *map_obj, fe_Object *key) {
+  fe_Map *map;
+  int found;
+  int slot;
+  checktype(ctx, map_obj, FE_TMAP);
+  key = normalize_map_key(ctx, key);
+  if (type(key) != FE_TSTRING) {
+    return &nil;
+  }
+  map = mapdata(map_obj);
+  slot = map_find_slot(ctx, map, key, &found);
+  if (!found || slot < 0) {
+    return &nil;
+  }
+  return map->values[slot];
+}
+
+int fe_map_delete(fe_Context *ctx, fe_Object *map_obj, fe_Object *key) {
+  fe_Map *map;
+  int found;
+  int slot;
+  checktype(ctx, map_obj, FE_TMAP);
+  key = normalize_map_key(ctx, key);
+  if (type(key) != FE_TSTRING) {
+    return 0;
+  }
+  map = mapdata(map_obj);
+  slot = map_find_slot(ctx, map, key, &found);
+  if (!found || slot < 0) {
+    return 0;
+  }
+  map->states[slot] = MAP_TOMBSTONE;
+  map->keys[slot] = NULL;
+  map->values[slot] = NULL;
+  map->count--;
+  return 1;
+}
+
+int fe_map_count(fe_Context *ctx, fe_Object *map_obj) {
+  fe_Map *map;
+  checktype(ctx, map_obj, FE_TMAP);
+  map = mapdata(map_obj);
+  return map->count;
+}
+
+fe_Object* fe_map_keys(fe_Context *ctx, fe_Object *map_obj) {
+  fe_Map *map;
+  fe_Object *result = &nil;
+  int i;
+  checktype(ctx, map_obj, FE_TMAP);
+  map = mapdata(map_obj);
+  for (i = map->capacity - 1; i >= 0; i--) {
+    if (map->states[i] == MAP_USED) {
+      result = fe_cons(ctx, map->keys[i], result);
+    }
+  }
+  return result;
 }
 
 
@@ -1082,32 +1395,59 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
     case FE_TSTRING:
       if (qt) fn(ctx, udata, '"');
 #ifdef FE_OPT_NO_MALLOC_STRINGS
-      size_t len = FE_STR_LEN(obj);
-      if (len > 0) {
-          uint32_t offset = obj->cdr.u32;
-          size_t remaining = len;
-          while (offset != FE_SLAB_NULL && remaining > 0) {
-              fe_Slab *slab = (fe_Slab*)(ctx->str_base + offset);
-              size_t to_write = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
-              size_t i;
-              for (i = 0; i < to_write; i++) {
-                  char c = slab->data[i];
-                  if (qt && c == '"') fn(ctx, udata, '\\');
-                  fn(ctx, udata, c);
+      {
+          size_t len = FE_STR_LEN(obj);
+          if (len > 0) {
+              uint32_t offset = obj->cdr.u32;
+              size_t remaining = len;
+              while (offset != FE_SLAB_NULL && remaining > 0) {
+                  fe_Slab *slab = (fe_Slab*)(ctx->str_base + offset);
+                  size_t to_write = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
+                  size_t i;
+                  for (i = 0; i < to_write; i++) {
+                      char c = slab->data[i];
+                      if (qt && c == '"') fn(ctx, udata, '\\');
+                      fn(ctx, udata, c);
+                  }
+                  remaining -= to_write;
+                  offset = slab->next;
               }
-              remaining -= to_write;
-              offset = slab->next;
           }
       }
 #else
-      const char *p = FE_STR_DATA(ctx, obj);
-      while (*p) {
-          if (qt && *p=='"') fn(ctx, udata, '\\');
-          fn(ctx, udata, *p++);
+      {
+          const char *p = FE_STR_DATA(ctx, obj);
+          while (*p) {
+              if (qt && *p=='"') fn(ctx, udata, '\\');
+              fn(ctx, udata, *p++);
+          }
       }
 #endif
       if (qt) fn(ctx, udata, '"');
       break;
+
+    case FE_TMAP: {
+      fe_Map *map = mapdata(obj);
+      int i;
+      int first = 1;
+      fn(ctx, udata, '{');
+      if (map) {
+        for (i = 0; i < map->capacity; i++) {
+          if (map->states[i] != MAP_USED) {
+            continue;
+          }
+          if (!first) {
+            writestr(ctx, fn, udata, ", ");
+          }
+          fe_write(ctx, map->keys[i], fn, udata, 1);
+          writestr(ctx, fn, udata, ": ");
+          fe_write(ctx, map->values[i], fn, udata, 1);
+          first = 0;
+        }
+      }
+      fn(ctx, udata, '}');
+      break;
+    }
 
     default:
       sprintf(buf, "[%s %p]", typenames[type(obj)], (void*) obj);
@@ -1489,7 +1829,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           char name_buf[128];
 
           /* Create and push module's export table */
-          fe_Object *exports = &nil;
+          fe_Object *exports = fe_map(ctx);
           fe_pushgc(ctx, exports);
           ctx->modulestack = fe_cons(ctx, exports, ctx->modulestack);
 
@@ -1519,16 +1859,14 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
 
           fe_Object *decl = fe_nextarg(ctx, &arg);
           fe_Object *name_sym = fe_car(ctx, fe_cdr(ctx, decl));
+          fe_Object *exports = fe_car(ctx, ctx->modulestack);
           checktype(ctx, name_sym, FE_TSYMBOL);
 
           /* Evaluate declaration to bind it and get value */
           res = eval(ctx, decl, env, &env);
 
           /* Add to current module's export table */
-          fe_Object *binding = fe_cons(ctx, name_sym, res);
-          fe_Object *exports = fe_car(ctx, ctx->modulestack);
-          exports = fe_cons(ctx, binding, exports);
-          car(ctx->modulestack) = exports;
+          fe_map_set(ctx, exports, name_sym, res);
           break;
         }
         case P_IMPORT:
@@ -1545,6 +1883,10 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
             int is_table;
 
             checktype(ctx, vb, FE_TSYMBOL);
+            if (type(va) == FE_TMAP) {
+              res = fe_map_get(ctx, va, vb);
+              break;
+            }
             is_table = find_assoc_binding(vb, va, &binding);
             if (binding != NULL) {
               res = cdr(binding);
@@ -1559,10 +1901,21 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
                   { res = cdr(va); break; }
               fe_error(ctx, "Only .head, .first, .tail, and .rest are valid on pairs");
             }
+            if (is_table) {
+              res = &nil;
+              break;
+            }
           }
           res = cdr(getbound(vb, va)); /* fallback: Re-use getbound for assoc list lookup */
           break;
         }
+        case P_PUT:
+          /* form: (put object property value) */
+          va = evalarg();
+          vb = fe_nextarg(ctx, &arg);
+          res = evalarg();
+          fe_map_set(ctx, va, vb, res);
+          break;
         case P_RETURN: {
             /* evaluate argument, defaulting to nil */
             va  = isnil(arg) ? &nil : evalarg();

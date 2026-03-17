@@ -727,6 +727,26 @@ static fe_Object* make_binary(const char* op, fe_Object* left, fe_Object* right)
     return res;
 }
 
+static fe_Object* make_ternary(const char* op, fe_Object* a, fe_Object* b, fe_Object* cobj) {
+    fe_Context *c = P.ctx;
+    int guard = fe_savegc(c);
+    fe_pushgc(c, a);
+    fe_pushgc(c, b);
+    fe_pushgc(c, cobj);
+    {
+        fe_Object *op_s = fe_symbol(c, op);
+        fe_Object *tmp;
+        fe_Object *res;
+        fe_pushgc(c, op_s);
+        tmp = fe_cons(c, cobj, fex_nil(c));
+        tmp = fe_cons(c, b, tmp);
+        tmp = fe_cons(c, a, tmp);
+        res = CONS1(op_s, tmp);
+        fe_restoregc(c, guard);
+        return res;
+    }
+}
+
 static fe_Object* parse_grouping() {
   fe_Object* expr = expression();
   consume(TOKEN_RPAREN, "Expect ')' after expression.");
@@ -823,8 +843,7 @@ static fe_Object* parse_precedence_new(Precedence precedence) {
                     if (setter != NULL) {
                         left = make_binary(setter, target, right);
                     } else {
-                        error("Only .head, .first, .tail, and .rest may appear on left side of '='.");
-                        return nil_obj;
+                        left = make_ternary("put", target, prop, right);
                     }
                 } else {
                     error("Invalid assignment target.");

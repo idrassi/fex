@@ -2,7 +2,7 @@
 
 ## Introduction
 
-FeX is a small embeddable scripting language implemented in ANSI C. It builds on the Lisp-like `fe` core and adds a modern surface syntax, source spans, and optional extended builtins.
+FeX is a small embeddable scripting language implemented in ANSI C. It builds on the Lisp-like `fe` core and adds a modern surface syntax, source spans, maps, and optional extended builtins.
 
 This document covers the public C API used to create an interpreter, run FeX code, exchange values with C, and extend the runtime with host functions.
 
@@ -203,6 +203,7 @@ Useful constructors include:
 - `fe_make_number(ctx, fe_Number n)` for a fixnum when possible, otherwise a boxed double
 - `fe_string(ctx, const char *s, size_t len)`
 - `fe_symbol(ctx, const char *s)`
+- `fe_map(ctx)` for a mutable string/symbol-keyed map
 - `fe_list(ctx, fe_Object **objs, int n)`
 - `fe_cfunc(ctx, fe_CFunc fn)`
 - `fe_ptr(ctx, void *ptr)`
@@ -225,6 +226,26 @@ For numbers, `fe_type()` returns `FE_TNUMBER` for both fixnums and boxed doubles
 `fe_car(ctx, obj)` and `fe_cdr(ctx, obj)` are nil-safe: if `obj` is `nil`, they return `nil`.
 
 > `fe_cdr_ptr(ctx, obj)` is different: it throws an error on `nil`, because returning a writable pointer to nothing would be unsafe.
+
+### Maps
+
+Maps are mutable associative containers keyed by strings or symbols. They are a good fit for configuration objects, JSON-like data, and module-style exports.
+
+```c
+fe_Object *map = fe_map(ctx);
+fe_map_set(ctx, map, fe_symbol(ctx, "host"), fe_string(ctx, "localhost", 9));
+```
+
+Useful helpers include:
+
+- `fe_map_set(ctx, map, key, value)`
+- `fe_map_get(ctx, map, key)`
+- `fe_map_has(ctx, map, key)`
+- `fe_map_delete(ctx, map, key)`
+- `fe_map_count(ctx, map)`
+- `fe_map_keys(ctx, map)`
+
+Map keys must be strings or symbols. Symbols are normalized to their name strings, so `fe_map_set(ctx, map, fe_symbol(ctx, "host"), v)` and `fe_map_get(ctx, map, fe_string(ctx, "host", 4))` refer to the same entry.
 
 ## Calling FeX Functions from C
 
@@ -291,7 +312,7 @@ Use `fe_handlers(ctx)` to install lifecycle hooks:
 
 ### Modules
 
-FeX modules are ordinary runtime values, so you can access them from C like any other binding.
+FeX modules are ordinary runtime values backed by maps, so you can access them from C like any other binding.
 
 ```c
 int gc_idx = fe_savegc(ctx);

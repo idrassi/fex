@@ -15,6 +15,9 @@ static int fail(const char *message) {
 int main(void) {
     void *memory;
     fe_Context *ctx;
+    fe_Object *map;
+    fe_Object *name_key;
+    fe_Object *name_value;
     fe_Object *result;
     FexError error;
     FexStatus status;
@@ -42,6 +45,26 @@ int main(void) {
         fe_close(ctx);
         free(memory);
         return fail("expected 40 + 2 to equal 42");
+    }
+
+    map = fe_map(ctx);
+    name_key = fe_symbol(ctx, "name");
+    name_value = fe_string(ctx, "fex", 3);
+    if (!fe_map_set(ctx, map, name_key, name_value)) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected fe_map_set to succeed");
+    }
+    if (!fe_map_has(ctx, map, fe_string(ctx, "name", 4))) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected fe_map_has to find a stored key");
+    }
+    result = fe_map_get(ctx, map, fe_symbol(ctx, "name"));
+    if (fe_strlen(ctx, result) != 3) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected fe_map_get to return the stored value");
     }
 
     status = fex_try_do_string(ctx, "let x = ;", &result, &error);
@@ -78,6 +101,20 @@ int main(void) {
         fe_close(ctx);
         free(memory);
         return fail("expected file I/O error");
+    }
+
+    fex_init_with_config(ctx, FEX_CONFIG_ENABLE_SPANS | FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
+    status = fex_try_do_string(
+        ctx,
+        "let cfg = makemap(\"env\", \"prod\");\n"
+        "cfg.host = \"localhost\";\n"
+        "mapget(cfg, \"host\");\n",
+        &result, &error
+    );
+    if (status != FEX_STATUS_OK || fe_strlen(ctx, result) != 9) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected map property assignment to succeed");
     }
 
     status = fex_try_do_string(ctx, "41 + 1;", &result, &error);

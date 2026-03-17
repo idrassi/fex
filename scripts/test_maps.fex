@@ -1,0 +1,29 @@
+println("--- Map Regression ---");
+
+let cfg = makemap("env", "prod", "port", 8080);
+println("cfg.env:", cfg.env);
+println("cfg.port:", cfg.port);
+
+cfg.host = "localhost";
+println("cfg.host:", cfg.host);
+println("mapget host:", mapget(cfg, "host"));
+println("maphas missing:", maphas(cfg, "missing"));
+
+mapset(cfg, "env", "stage");
+println("cfg.env updated:", cfg.env);
+println("mapcount(cfg):", mapcount(cfg));
+println("typeof(cfg):", typeof(cfg));
+println("ismap(cfg):", ismap(cfg));
+
+module("settings") {
+  export let version = "1.0";
+  export let mode = "release";
+}
+
+import settings;
+
+println("typeof(settings):", typeof(settings));
+settings.mode = "debug";
+println("settings.mode:", settings.mode);
+println("mapget version:", mapget(settings, "version"));
+println("settings.missing:", settings.missing);

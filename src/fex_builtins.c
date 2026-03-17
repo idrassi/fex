@@ -29,6 +29,7 @@
 ** - Mathematical functions (sin, cos, sqrt, etc.)
 ** - String manipulation (length, substring, split, etc.)
 ** - List operations (map, filter, reduce, etc.)
+** - Map/object operations (makemap, mapget, mapset, etc.)
 ** - File I/O operations (readfile, writefile, etc.)
 ** - System operations (time, exit, etc.)
 ** - Type checking and conversion (typeof, tostring, etc.)
@@ -649,6 +650,96 @@ static fe_Object* builtin_fold(fe_Context *ctx, fe_Object *args) {
 
 /*
 ================================================================================
+|                              DATA FUNCTIONS                                 |
+================================================================================
+*/
+
+static fe_Object* builtin_make_map(fe_Context *ctx, fe_Object *args) {
+    fe_Object *map = fe_map(ctx);
+
+    while (!fe_isnil(ctx, args)) {
+        fe_Object *key = fe_nextarg(ctx, &args);
+        fe_Object *value;
+        if (fe_isnil(ctx, args)) {
+            fe_error(ctx, "makemap: expected an even number of arguments");
+            return fe_nil(ctx);
+        }
+        value = fe_nextarg(ctx, &args);
+        fe_map_set(ctx, map, key, value);
+    }
+
+    return map;
+}
+
+static fe_Object* builtin_map_set(fe_Context *ctx, fe_Object *args) {
+    fe_Object *map;
+    fe_Object *key;
+    fe_Object *value;
+
+    FEX_CHECK_ARGS(ctx, args, 3, "mapset");
+    map = fe_nextarg(ctx, &args);
+    key = fe_nextarg(ctx, &args);
+    value = fe_nextarg(ctx, &args);
+    fe_map_set(ctx, map, key, value);
+    return value;
+}
+
+static fe_Object* builtin_map_get(fe_Context *ctx, fe_Object *args) {
+    fe_Object *map;
+    fe_Object *key;
+    fe_Object *default_value = fe_nil(ctx);
+
+    FEX_CHECK_ARGS(ctx, args, 2, "mapget");
+    map = fe_nextarg(ctx, &args);
+    key = fe_nextarg(ctx, &args);
+    if (!fe_isnil(ctx, args)) {
+        default_value = fe_nextarg(ctx, &args);
+    }
+
+    if (!fe_map_has(ctx, map, key)) {
+        return default_value;
+    }
+    return fe_map_get(ctx, map, key);
+}
+
+static fe_Object* builtin_map_has(fe_Context *ctx, fe_Object *args) {
+    fe_Object *map;
+    fe_Object *key;
+
+    FEX_CHECK_ARGS(ctx, args, 2, "maphas");
+    map = fe_nextarg(ctx, &args);
+    key = fe_nextarg(ctx, &args);
+    return fe_bool(ctx, fe_map_has(ctx, map, key));
+}
+
+static fe_Object* builtin_map_delete(fe_Context *ctx, fe_Object *args) {
+    fe_Object *map;
+    fe_Object *key;
+
+    FEX_CHECK_ARGS(ctx, args, 2, "mapdelete");
+    map = fe_nextarg(ctx, &args);
+    key = fe_nextarg(ctx, &args);
+    return fe_bool(ctx, fe_map_delete(ctx, map, key));
+}
+
+static fe_Object* builtin_map_keys(fe_Context *ctx, fe_Object *args) {
+    fe_Object *map;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "mapkeys");
+    map = fe_nextarg(ctx, &args);
+    return fe_map_keys(ctx, map);
+}
+
+static fe_Object* builtin_map_count(fe_Context *ctx, fe_Object *args) {
+    fe_Object *map;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "mapcount");
+    map = fe_nextarg(ctx, &args);
+    return fe_make_number(ctx, (fe_Number)fe_map_count(ctx, map));
+}
+
+/*
+================================================================================
 |                               I/O FUNCTIONS                                 |
 ================================================================================
 */
@@ -814,6 +905,7 @@ static fe_Object* builtin_type_of(fe_Context *ctx, fe_Object *args) {
         case FE_TMACRO: type_name = "macro"; break;
         case FE_TCFUNC: type_name = "cfunction"; break;
         case FE_TPTR: type_name = "pointer"; break;
+        case FE_TMAP: type_name = "map"; break;
         case FE_TBOOLEAN: type_name = "boolean"; break;
         default: type_name = "unknown"; break;
     }
@@ -880,6 +972,11 @@ static fe_Object* builtin_is_list(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "islist");
     fe_Object *obj = fe_nextarg(ctx, &args);
     return fe_bool(ctx, fe_type(ctx, obj) == FE_TPAIR || fe_isnil(ctx, obj));
+}
+
+static fe_Object* builtin_is_map(fe_Context *ctx, fe_Object *args) {
+    FEX_CHECK_ARGS(ctx, args, 1, "ismap");
+    return fe_bool(ctx, fe_type(ctx, fe_nextarg(ctx, &args)) == FE_TMAP);
 }
 
 /*
@@ -950,6 +1047,20 @@ static void register_io_functions(fe_Context *ctx) {
     fe_restoregc(ctx, gc_save);
 }
 
+static void register_data_functions(fe_Context *ctx) {
+    int gc_save = fe_savegc(ctx);
+
+    fe_set(ctx, fe_symbol(ctx, "makemap"), fe_cfunc(ctx, builtin_make_map));
+    fe_set(ctx, fe_symbol(ctx, "mapset"), fe_cfunc(ctx, builtin_map_set));
+    fe_set(ctx, fe_symbol(ctx, "mapget"), fe_cfunc(ctx, builtin_map_get));
+    fe_set(ctx, fe_symbol(ctx, "maphas"), fe_cfunc(ctx, builtin_map_has));
+    fe_set(ctx, fe_symbol(ctx, "mapdelete"), fe_cfunc(ctx, builtin_map_delete));
+    fe_set(ctx, fe_symbol(ctx, "mapkeys"), fe_cfunc(ctx, builtin_map_keys));
+    fe_set(ctx, fe_symbol(ctx, "mapcount"), fe_cfunc(ctx, builtin_map_count));
+
+    fe_restoregc(ctx, gc_save);
+}
+
 static void register_system_functions(fe_Context *ctx) {
     int gc_save = fe_savegc(ctx);
     
@@ -970,7 +1081,8 @@ static void register_type_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "isnumber"), fe_cfunc(ctx, builtin_is_number));
     fe_set(ctx, fe_symbol(ctx, "isstring"), fe_cfunc(ctx, builtin_is_string));
     fe_set(ctx, fe_symbol(ctx, "islist"), fe_cfunc(ctx, builtin_is_list));
-    
+    fe_set(ctx, fe_symbol(ctx, "ismap"), fe_cfunc(ctx, builtin_is_map));
+
     fe_restoregc(ctx, gc_save);
 }
 
@@ -984,23 +1096,27 @@ void fex_init_extended_builtins(fe_Context *ctx, FexBuiltinsConfig config) {
     if (config & FEX_BUILTINS_MATH) {
         register_math_functions(ctx);
     }
-    
+
     if (config & FEX_BUILTINS_STRING) {
         register_string_functions(ctx);
     }
-    
+
     if (config & FEX_BUILTINS_LIST) {
         register_list_functions(ctx);
     }
-    
+
     if (config & FEX_BUILTINS_IO) {
         register_io_functions(ctx);
     }
-    
+
+    if (config & FEX_BUILTINS_DATA) {
+        register_data_functions(ctx);
+    }
+
     if (config & FEX_BUILTINS_SYSTEM) {
         register_system_functions(ctx);
     }
-    
+
     if (config & FEX_BUILTINS_TYPE) {
         register_type_functions(ctx);
     }

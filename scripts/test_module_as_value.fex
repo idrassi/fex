@@ -19,6 +19,6 @@ let app_config = config;
 println("Accessing alias app_config.version: ", app_config.version);
 println("Accessing alias app_config.author: ", app_config.author);
 
-// Check if they are the same underlying object (association list)
+// Check if they are the same underlying module object
 println("Is 'config' the same as 'app_config'? ", is(config, app_config));
 println("");
