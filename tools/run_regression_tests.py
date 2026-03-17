@@ -89,7 +89,28 @@ CASES = [
             "mapget version:1.0\n"
             "settings.missing:nil\n"
         ),
-    },    {
+    },
+    {
+        "name": "json and path helpers",
+        "script": ROOT / "scripts" / "test_json_path_helpers.fex",
+        "args": ["--builtins"],
+        "exit_code": 0,
+        "stdout": (
+            "--- JSON Path Regression ---\n"
+            "typeof(doc):map\n"
+            "doc.name:fex\n"
+            "doc.enabled:true\n"
+            "doc.items.head:1\n"
+            "doc.meta.env:prod\n"
+            "array json:[1,2,3]\n"
+            "pathjoin:config/app.json\n"
+            "dirname:config\n"
+            "basename:app.json\n"
+            "loaded.meta.env:prod\n"
+            "loaded.items.tail.head:2\n"
+        ),
+    },
+    {
         "name": "bad module syntax",
         "source": 'module(123) {\n    export let y = 20;\n}\n',
         "exit_code": 65,

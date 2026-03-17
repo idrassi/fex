@@ -74,7 +74,7 @@ void fex_init_with_config(fe_Context *ctx, FexConfig config);
 Like `fex_init()`, but enables optional features through flags:
 
 - `FEX_CONFIG_ENABLE_SPANS` enables source span tracking.
-- `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` registers the optional extended builtins set, including helpers such as `sqrt`, `map`, `filter`, and `makestring`.
+- `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` registers the optional extended builtins set, including helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, and `pathjoin`.
 
 ### fe_close()
 
@@ -379,5 +379,5 @@ The interpreter is re-entrant on a single context: a host `fe_CFunc` may call ba
 - Forgetting GC protection for temporary objects across further allocations.
 - Returning `NULL` from a `fe_CFunc`.
 - Passing a compiled AST or other `fe_Object *` from one context into another.
-- Assuming optional helpers such as `sqrt` or `map` are always present. They require `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` or the CLI `--builtins` flag.
+- Assuming optional helpers such as `sqrt`, `map`, or `parsejson` are always present. They require `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` or the CLI `--builtins` flag.
 - Using `fe_cdr_ptr()` without first ensuring the target is non-nil.

@@ -1,0 +1,32 @@
+println("--- JSON Path Regression ---");
+
+let q = substring(tojson("x"), 0, 1);
+let raw = concat(
+  "{",
+  q, "name", q, ":", q, "fex", q, ",",
+  q, "enabled", q, ":", "true", ",",
+  q, "items", q, ":[1,2,3],",
+  q, "meta", q, ":{", q, "env", q, ":", q, "prod", q, "}",
+  "}"
+);
+
+let doc = parsejson(raw);
+
+println("typeof(doc):", typeof(doc));
+println("doc.name:", doc.name);
+println("doc.enabled:", doc.enabled);
+println("doc.items.head:", doc.items.head);
+println("doc.meta.env:", doc.meta.env);
+println("array json:", tojson([1, 2, 3]));
+
+let sample_path = pathjoin("config", "app.json");
+println("pathjoin:", sample_path);
+println("dirname:", dirname(sample_path));
+println("basename:", basename(sample_path));
+
+let out_path = "tmp_config.json";
+writejson(out_path, doc);
+let loaded = readjson(out_path);
+
+println("loaded.meta.env:", loaded.meta.env);
+println("loaded.items.tail.head:", loaded.items.tail.head);

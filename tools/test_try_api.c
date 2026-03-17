@@ -21,6 +21,7 @@ int main(void) {
     fe_Object *result;
     FexError error;
     FexStatus status;
+    char buffer[64];
 
     memory = malloc(TEST_MEM_SIZE);
     if (!memory) {
@@ -115,6 +116,27 @@ int main(void) {
         fe_close(ctx);
         free(memory);
         return fail("expected map property assignment to succeed");
+    }
+
+    status = fex_try_do_string(
+        ctx,
+        "let q = substring(tojson(\"x\"), 0, 1);\n"
+        "let raw = concat(\"{\", q, \"name\", q, \":\", q, \"fex\", q, \"}\");\n"
+        "let doc = parsejson(raw);\n"
+        "pathjoin(\"build\", doc.name);\n",
+        &result,
+        &error
+    );
+    if (status != FEX_STATUS_OK) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected JSON and path helpers to succeed");
+    }
+    fe_tostring(ctx, result, buffer, sizeof(buffer));
+    if (strcmp(buffer, "build/fex") != 0) {
+        fe_close(ctx);
+        free(memory);
+        return fail("unexpected JSON/path helper result");
     }
 
     status = fex_try_do_string(ctx, "41 + 1;", &result, &error);

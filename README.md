@@ -177,6 +177,19 @@ println(mapcount(cfg));            // 2
 
 Module exports now use the same map representation internally, so `settings.mode = "debug";` updates an imported module property directly.
 
+### JSON And Path Helpers
+
+The extended builtins set also includes lightweight JSON and path/file helpers for scripting and config loading:
+
+```c
+let cfg = makemap("env", "prod", "port", 8080);
+println(tojson([1, 2, 3]));              // [1,2,3]
+
+let path = pathjoin("config", "app.json");
+writejson(path, cfg);
+println(readjson(path).port);            // 8080
+```
+
 ## Embedding API
 
 FeX is easy to embed. For host applications, prefer the recoverable `fex_try_*` APIs so script failures stay in-process and return structured diagnostics.
@@ -223,7 +236,7 @@ int main(void) {
 
 `fex_do_string()` and `fex_do_file()` are still available for simple tools, but on runtime faults they go through the installed error handler. The default FeX handler prints a traceback and exits.
 
-If you want optional helpers such as `sqrt`, `map`, `filter`, and `makestring`, initialize with `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` instead of plain `fex_init(ctx)`.
+If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, and `pathjoin`, initialize with `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` instead of plain `fex_init(ctx)`.
 
 ## Architecture
 

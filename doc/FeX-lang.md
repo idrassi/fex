@@ -142,7 +142,7 @@ The base FeX environment always includes:
 
 Pair selectors such as `.head` and `.tail`, and the `::` operator, are syntax sugar over these primitives rather than separate runtime functions.
 
-Optional helpers such as `sqrt`, `map`, `filter`, and `makestring` are part of the extended builtins set. In the CLI, enable them with `--builtins`. In embedded use, call:
+Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, and `pathjoin` are part of the extended builtins set. In the CLI, enable them with `--builtins`. In embedded use, call:
 
 ```c
 fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
@@ -189,6 +189,16 @@ module ("config") {
 
 println(config.host);
 println(config.port);
+```
+
+### JSON And Config Files
+
+```fex
+let cfg = makemap("mode", "prod", "workers", 4);
+let path = pathjoin("build", "app.json");
+
+writejson(path, cfg);
+println(readjson(path).workers);
 ```
 
 ### REPL Workflow

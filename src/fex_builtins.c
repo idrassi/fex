@@ -48,6 +48,110 @@
 #include "fex_builtins.h"
 #include "sfc32.h"
 
+typedef struct {
+    char *data;
+    size_t len;
+    size_t cap;
+} TextBuffer;
+
+static int buf_reserve(TextBuffer *buf, size_t extra) {
+    size_t needed;
+    size_t new_cap;
+    char *new_data;
+
+    needed = buf->len + extra + 1;
+    if (needed <= buf->cap) {
+        return 1;
+    }
+
+    new_cap = (buf->cap > 0) ? buf->cap : 64;
+    while (new_cap < needed) {
+        new_cap *= 2;
+    }
+
+    new_data = realloc(buf->data, new_cap);
+    if (!new_data) {
+        return 0;
+    }
+    buf->data = new_data;
+    buf->cap = new_cap;
+    return 1;
+}
+
+static int buf_append_mem(TextBuffer *buf, const char *data, size_t len) {
+    if (!buf_reserve(buf, len)) {
+        return 0;
+    }
+    memcpy(buf->data + buf->len, data, len);
+    buf->len += len;
+    buf->data[buf->len] = '\0';
+    return 1;
+}
+
+static int buf_append_str(TextBuffer *buf, const char *str) {
+    return buf_append_mem(buf, str, strlen(str));
+}
+
+static int buf_append_char(TextBuffer *buf, char chr) {
+    if (!buf_reserve(buf, 1)) {
+        return 0;
+    }
+    buf->data[buf->len++] = chr;
+    buf->data[buf->len] = '\0';
+    return 1;
+}
+
+static int buf_append_utf8(TextBuffer *buf, unsigned codepoint) {
+    char bytes[3];
+    if (codepoint <= 0x7F) {
+        return buf_append_char(buf, (char)codepoint);
+    }
+    if (codepoint <= 0x7FF) {
+        bytes[0] = (char)(0xC0 | ((codepoint >> 6) & 0x1F));
+        bytes[1] = (char)(0x80 | (codepoint & 0x3F));
+        return buf_append_mem(buf, bytes, 2);
+    }
+    if (codepoint <= 0xFFFF) {
+        bytes[0] = (char)(0xE0 | ((codepoint >> 12) & 0x0F));
+        bytes[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        bytes[2] = (char)(0x80 | (codepoint & 0x3F));
+        return buf_append_mem(buf, bytes, 3);
+    }
+    return 0;
+}
+
+static void buf_free(TextBuffer *buf) {
+    free(buf->data);
+    buf->data = NULL;
+    buf->len = 0;
+    buf->cap = 0;
+}
+
+static char* string_to_cstr(fe_Context *ctx, fe_Object *str_obj, const char *func_name) {
+    size_t len;
+    char *buffer;
+    char msg[128];
+
+    if (fe_type(ctx, str_obj) != FE_TSTRING) {
+        sprintf(msg, "%s: type mismatch", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    len = fe_strlen(ctx, str_obj);
+    buffer = malloc(len + 1);
+    if (!buffer) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    fe_tostring(ctx, str_obj, buffer, (int)(len + 1));
+    return buffer;
+}
+
+static int is_path_separator_char(char chr) {
+    return chr == '/' || chr == '\\';
+}
+
 /*
 ================================================================================
 |                            MATHEMATICAL FUNCTIONS                            |
@@ -740,69 +844,586 @@ static fe_Object* builtin_map_count(fe_Context *ctx, fe_Object *args) {
 
 /*
 ================================================================================
+|                              JSON FUNCTIONS                                 |
+================================================================================
+*/
+
+typedef struct {
+    fe_Context *ctx;
+    const char *current;
+} JsonParser;
+
+static void json_skip_ws(JsonParser *parser) {
+    while (*parser->current &&
+           (*parser->current == ' ' || *parser->current == '\t' ||
+            *parser->current == '\n' || *parser->current == '\r')) {
+        parser->current++;
+    }
+}
+
+static int json_hex_value(char chr) {
+    if (chr >= '0' && chr <= '9') return chr - '0';
+    if (chr >= 'a' && chr <= 'f') return 10 + (chr - 'a');
+    if (chr >= 'A' && chr <= 'F') return 10 + (chr - 'A');
+    return -1;
+}
+
+static fe_Object* json_parse_value(JsonParser *parser);
+
+static fe_Object* json_parse_string(JsonParser *parser) {
+    TextBuffer buf;
+    fe_Object *result;
+    int hi, lo, hi2, lo2;
+
+    buf.data = NULL;
+    buf.len = 0;
+    buf.cap = 0;
+
+    if (*parser->current != '"') {
+        fe_error(parser->ctx, "parsejson: expected string");
+        return fe_nil(parser->ctx);
+    }
+    parser->current++;
+
+    while (*parser->current && *parser->current != '"') {
+        unsigned codepoint;
+        char chr = *parser->current++;
+        if (chr == '\\') {
+            chr = *parser->current++;
+            switch (chr) {
+                case '"': if (!buf_append_char(&buf, '"')) goto oom; break;
+                case '\\': if (!buf_append_char(&buf, '\\')) goto oom; break;
+                case '/': if (!buf_append_char(&buf, '/')) goto oom; break;
+                case 'b': if (!buf_append_char(&buf, '\b')) goto oom; break;
+                case 'f': if (!buf_append_char(&buf, '\f')) goto oom; break;
+                case 'n': if (!buf_append_char(&buf, '\n')) goto oom; break;
+                case 'r': if (!buf_append_char(&buf, '\r')) goto oom; break;
+                case 't': if (!buf_append_char(&buf, '\t')) goto oom; break;
+                case 'u':
+                    hi = json_hex_value(parser->current[0]);
+                    lo = json_hex_value(parser->current[1]);
+                    hi2 = json_hex_value(parser->current[2]);
+                    lo2 = json_hex_value(parser->current[3]);
+                    if (hi < 0 || lo < 0 || hi2 < 0 || lo2 < 0) {
+                        buf_free(&buf);
+                        fe_error(parser->ctx, "parsejson: invalid unicode escape");
+                        return fe_nil(parser->ctx);
+                    }
+                    codepoint = (unsigned)((hi << 12) | (lo << 8) | (hi2 << 4) | lo2);
+                    parser->current += 4;
+                    if (codepoint >= 0xD800 && codepoint <= 0xDFFF) {
+                        buf_free(&buf);
+                        fe_error(parser->ctx, "parsejson: surrogate pairs are not supported");
+                        return fe_nil(parser->ctx);
+                    }
+                    if (!buf_append_utf8(&buf, codepoint)) goto oom;
+                    break;
+                default:
+                    buf_free(&buf);
+                    fe_error(parser->ctx, "parsejson: invalid escape sequence");
+                    return fe_nil(parser->ctx);
+            }
+        } else {
+            if ((unsigned char)chr < 0x20) {
+                buf_free(&buf);
+                fe_error(parser->ctx, "parsejson: unescaped control character");
+                return fe_nil(parser->ctx);
+            }
+            if (!buf_append_char(&buf, chr)) goto oom;
+        }
+    }
+
+    if (*parser->current != '"') {
+        buf_free(&buf);
+        fe_error(parser->ctx, "parsejson: unterminated string");
+        return fe_nil(parser->ctx);
+    }
+    parser->current++;
+    result = fe_string(parser->ctx, buf.data ? buf.data : "", buf.len);
+    buf_free(&buf);
+    return result;
+
+oom:
+    buf_free(&buf);
+    fe_error(parser->ctx, "parsejson: out of memory");
+    return fe_nil(parser->ctx);
+}
+
+static fe_Object* json_parse_number(JsonParser *parser) {
+    char *endptr;
+    double value = strtod(parser->current, &endptr);
+    if (endptr == parser->current) {
+        fe_error(parser->ctx, "parsejson: invalid number");
+        return fe_nil(parser->ctx);
+    }
+    parser->current = endptr;
+    return fe_make_number(parser->ctx, value);
+}
+
+static fe_Object* json_parse_array(JsonParser *parser) {
+    fe_Object *result;
+    fe_Object **tail;
+
+    parser->current++;
+    json_skip_ws(parser);
+    result = fe_nil(parser->ctx);
+    tail = &result;
+
+    if (*parser->current == ']') {
+        parser->current++;
+        return result;
+    }
+
+    for (;;) {
+        fe_Object *item = json_parse_value(parser);
+        *tail = fe_cons(parser->ctx, item, fe_nil(parser->ctx));
+        tail = fe_cdr_ptr(parser->ctx, *tail);
+        json_skip_ws(parser);
+        if (*parser->current == ']') {
+            parser->current++;
+            return result;
+        }
+        if (*parser->current != ',') {
+            fe_error(parser->ctx, "parsejson: expected ',' or ']'");
+            return fe_nil(parser->ctx);
+        }
+        parser->current++;
+        json_skip_ws(parser);
+    }
+}
+
+static fe_Object* json_parse_object(JsonParser *parser) {
+    fe_Object *map = fe_map(parser->ctx);
+
+    parser->current++;
+    json_skip_ws(parser);
+    if (*parser->current == '}') {
+        parser->current++;
+        return map;
+    }
+
+    for (;;) {
+        fe_Object *key;
+        fe_Object *value;
+
+        if (*parser->current != '"') {
+            fe_error(parser->ctx, "parsejson: expected object key string");
+            return fe_nil(parser->ctx);
+        }
+        key = json_parse_string(parser);
+        json_skip_ws(parser);
+        if (*parser->current != ':') {
+            fe_error(parser->ctx, "parsejson: expected ':' after object key");
+            return fe_nil(parser->ctx);
+        }
+        parser->current++;
+        json_skip_ws(parser);
+        value = json_parse_value(parser);
+        fe_map_set(parser->ctx, map, key, value);
+        json_skip_ws(parser);
+        if (*parser->current == '}') {
+            parser->current++;
+            return map;
+        }
+        if (*parser->current != ',') {
+            fe_error(parser->ctx, "parsejson: expected ',' or '}'");
+            return fe_nil(parser->ctx);
+        }
+        parser->current++;
+        json_skip_ws(parser);
+    }
+}
+
+static fe_Object* json_parse_value(JsonParser *parser) {
+    json_skip_ws(parser);
+    switch (*parser->current) {
+        case '"': return json_parse_string(parser);
+        case '{': return json_parse_object(parser);
+        case '[': return json_parse_array(parser);
+        case 't':
+            if (strncmp(parser->current, "true", 4) == 0) {
+                parser->current += 4;
+                return fe_bool(parser->ctx, 1);
+            }
+            break;
+        case 'f':
+            if (strncmp(parser->current, "false", 5) == 0) {
+                parser->current += 5;
+                return fe_bool(parser->ctx, 0);
+            }
+            break;
+        case 'n':
+            if (strncmp(parser->current, "null", 4) == 0) {
+                parser->current += 4;
+                return fe_nil(parser->ctx);
+            }
+            break;
+        default:
+            if (*parser->current == '-' || (*parser->current >= '0' && *parser->current <= '9')) {
+                return json_parse_number(parser);
+            }
+            break;
+    }
+    fe_error(parser->ctx, "parsejson: invalid value");
+    return fe_nil(parser->ctx);
+}
+
+static int json_is_proper_list(fe_Context *ctx, fe_Object *obj) {
+    while (!fe_isnil(ctx, obj)) {
+        if (fe_type(ctx, obj) != FE_TPAIR) {
+            return 0;
+        }
+        obj = fe_cdr(ctx, obj);
+    }
+    return 1;
+}
+
+static int json_write_string(fe_Context *ctx, fe_Object *obj, TextBuffer *buf) {
+    char *text;
+    size_t i;
+
+    text = string_to_cstr(ctx, obj, "tojson");
+    if (!text) {
+        return 0;
+    }
+    if (!buf_append_char(buf, '"')) {
+        free(text);
+        return 0;
+    }
+    for (i = 0; text[i] != '\0'; i++) {
+        unsigned char chr = (unsigned char)text[i];
+        switch (chr) {
+            case '"': if (!buf_append_str(buf, "\\\"")) goto fail; break;
+            case '\\': if (!buf_append_str(buf, "\\\\")) goto fail; break;
+            case '\b': if (!buf_append_str(buf, "\\b")) goto fail; break;
+            case '\f': if (!buf_append_str(buf, "\\f")) goto fail; break;
+            case '\n': if (!buf_append_str(buf, "\\n")) goto fail; break;
+            case '\r': if (!buf_append_str(buf, "\\r")) goto fail; break;
+            case '\t': if (!buf_append_str(buf, "\\t")) goto fail; break;
+            default:
+                if (chr < 0x20) {
+                    char hexbuf[7];
+                    sprintf(hexbuf, "\\u%04x", chr);
+                    if (!buf_append_str(buf, hexbuf)) goto fail;
+                } else if (!buf_append_char(buf, (char)chr)) {
+                    goto fail;
+                }
+                break;
+        }
+    }
+    free(text);
+    return buf_append_char(buf, '"');
+
+fail:
+    free(text);
+    return 0;
+}
+
+static int json_write_value(fe_Context *ctx, fe_Object *obj, TextBuffer *buf) {
+    char number_buf[64];
+    switch (fe_type(ctx, obj)) {
+        case FE_TNIL:
+            return buf_append_str(buf, "null");
+        case FE_TBOOLEAN:
+            return buf_append_str(buf, (obj == fe_bool(ctx, 1)) ? "true" : "false");
+        case FE_TNUMBER:
+            sprintf(number_buf, "%.15g", fe_tonumber(ctx, obj));
+            return buf_append_str(buf, number_buf);
+        case FE_TSTRING:
+            return json_write_string(ctx, obj, buf);
+        case FE_TMAP: {
+            fe_Object *keys = fe_map_keys(ctx, obj);
+            int first = 1;
+            if (!buf_append_char(buf, '{')) return 0;
+            while (!fe_isnil(ctx, keys)) {
+                fe_Object *key = fe_car(ctx, keys);
+                if (!first && !buf_append_char(buf, ',')) return 0;
+                if (!json_write_string(ctx, key, buf)) return 0;
+                if (!buf_append_char(buf, ':')) return 0;
+                if (!json_write_value(ctx, fe_map_get(ctx, obj, key), buf)) return 0;
+                first = 0;
+                keys = fe_cdr(ctx, keys);
+            }
+            return buf_append_char(buf, '}');
+        }
+        case FE_TPAIR: {
+            if (!json_is_proper_list(ctx, obj)) {
+                fe_error(ctx, "tojson: cannot serialize dotted pair");
+                return 0;
+            }
+            if (!buf_append_char(buf, '[')) return 0;
+            {
+                int first = 1;
+                fe_Object *list = obj;
+                while (!fe_isnil(ctx, list)) {
+                    if (!first && !buf_append_char(buf, ',')) return 0;
+                    if (!json_write_value(ctx, fe_car(ctx, list), buf)) return 0;
+                    first = 0;
+                    list = fe_cdr(ctx, list);
+                }
+            }
+            return buf_append_char(buf, ']');
+        }
+        default:
+            fe_error(ctx, "tojson: unsupported value type");
+            return 0;
+    }
+}
+
+static fe_Object* builtin_parse_json(fe_Context *ctx, fe_Object *args) {
+    JsonParser parser;
+    fe_Object *input;
+    char *text;
+    fe_Object *result;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "parsejson");
+    input = fe_nextarg(ctx, &args);
+    text = string_to_cstr(ctx, input, "parsejson");
+    if (!text) {
+        return fe_nil(ctx);
+    }
+
+    parser.ctx = ctx;
+    parser.current = text;
+    result = json_parse_value(&parser);
+    json_skip_ws(&parser);
+    if (*parser.current != '\0') {
+        free(text);
+        fe_error(ctx, "parsejson: trailing characters");
+        return fe_nil(ctx);
+    }
+    free(text);
+    return result;
+}
+
+static fe_Object* builtin_to_json(fe_Context *ctx, fe_Object *args) {
+    TextBuffer buf;
+    fe_Object *value;
+    fe_Object *result;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "tojson");
+    value = fe_nextarg(ctx, &args);
+
+    buf.data = NULL;
+    buf.len = 0;
+    buf.cap = 0;
+    if (!json_write_value(ctx, value, &buf)) {
+        buf_free(&buf);
+        return fe_nil(ctx);
+    }
+
+    result = fe_string(ctx, buf.data ? buf.data : "", buf.len);
+    buf_free(&buf);
+    return result;
+}
+
+/*
+================================================================================
 |                               I/O FUNCTIONS                                 |
 ================================================================================
 */
 
-static fe_Object* builtin_read_file(fe_Context *ctx, fe_Object *args) {
-    FEX_CHECK_ARGS(ctx, args, 1, "readfile");
-    fe_Object *filename_obj = fe_nextarg(ctx, &args);
-    FEX_CHECK_TYPE(ctx, filename_obj, FE_TSTRING, "readfile");
-    
-    size_t filename_len = fe_strlen(ctx, filename_obj);
-    if (filename_len >= 1024) {
-        fe_error(ctx, "readfile: filename too long");
-        return fe_nil(ctx);
-    }
-    
-    char filename[1024];
-    fe_tostring(ctx, filename_obj, filename, sizeof(filename));
-    
-    FILE *file = fopen(filename, "rb");
+static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max_size, size_t *out_size, const char *func_name) {
+    FILE *file;
+    long size;
+    char *buffer;
+    size_t bytes_read;
+    char msg[160];
+
+    file = fopen(filename, "rb");
     if (!file) {
-        fe_error(ctx, "readfile: could not open file");
-        return fe_nil(ctx);
+        sprintf(msg, "%s: could not open file", func_name);
+        fe_error(ctx, msg);
+        return NULL;
     }
-    
-    fseek(file, 0, SEEK_END);
-    long size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    
-    /* size validation and error handling */
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        sprintf(msg, "%s: could not determine file size", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    size = ftell(file);
     if (size < 0) {
         fclose(file);
-        fe_error(ctx, "readfile: could not determine file size");
-        return fe_nil(ctx);
+        sprintf(msg, "%s: could not determine file size", func_name);
+        fe_error(ctx, msg);
+        return NULL;
     }
-    
-    if (size > 8 * 1024) { /* 8KB limit */
+    if ((size_t)size > max_size) {
         fclose(file);
-        fe_error(ctx, "readfile: file too large (max 8KB)");
-        return fe_nil(ctx);
+        sprintf(msg, "%s: file too large", func_name);
+        fe_error(ctx, msg);
+        return NULL;
     }
-    
-    char *buffer = malloc(size + 1);
+    rewind(file);
+
+    buffer = malloc((size_t)size + 1);
     if (!buffer) {
         fclose(file);
-        fe_error(ctx, "readfile: out of memory");
-        return fe_nil(ctx);
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return NULL;
     }
-    
-    size_t bytes_read = fread(buffer, 1, size, file);
-    /* Check for read errors */
+
+    bytes_read = fread(buffer, 1, (size_t)size, file);
     if (ferror(file)) {
         free(buffer);
         fclose(file);
-        fe_error(ctx, "readfile: error reading file");
+        sprintf(msg, "%s: error reading file", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+
+    fclose(file);
+    buffer[bytes_read] = '\0';
+    if (out_size) {
+        *out_size = bytes_read;
+    }
+    return buffer;
+}
+
+static fe_Object* builtin_path_join(fe_Context *ctx, fe_Object *args) {
+    TextBuffer buf;
+    int need_sep = 0;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "pathjoin");
+    buf.data = NULL;
+    buf.len = 0;
+    buf.cap = 0;
+
+    while (!fe_isnil(ctx, args)) {
+        fe_Object *part_obj = fe_nextarg(ctx, &args);
+        char *part = string_to_cstr(ctx, part_obj, "pathjoin");
+        size_t i;
+        size_t start = 0;
+        size_t end;
+
+        if (!part) {
+            buf_free(&buf);
+            return fe_nil(ctx);
+        }
+
+        end = strlen(part);
+        while (start < end && is_path_separator_char(part[start]) && buf.len > 0) {
+            start++;
+        }
+        while (end > start && is_path_separator_char(part[end - 1])) {
+            end--;
+        }
+
+        if (need_sep && start < end && buf.len > 0 && buf.data[buf.len - 1] != '/') {
+            if (!buf_append_char(&buf, '/')) {
+                free(part);
+                buf_free(&buf);
+                fe_error(ctx, "pathjoin: out of memory");
+                return fe_nil(ctx);
+            }
+        }
+
+        for (i = start; i < end; i++) {
+            char chr = is_path_separator_char(part[i]) ? '/' : part[i];
+            if (!buf_append_char(&buf, chr)) {
+                free(part);
+                buf_free(&buf);
+                fe_error(ctx, "pathjoin: out of memory");
+                return fe_nil(ctx);
+            }
+        }
+        need_sep = buf.len > 0;
+        free(part);
+    }
+
+    if (buf.len == 0 && !buf_append_char(&buf, '.')) {
+        buf_free(&buf);
+        fe_error(ctx, "pathjoin: out of memory");
         return fe_nil(ctx);
     }
-    
-    buffer[bytes_read] = '\0';
-    fclose(file);
-    
-    fe_Object *result = fe_string(ctx, buffer, bytes_read);
+
+    {
+        fe_Object *result = fe_string(ctx, buf.data, buf.len);
+        buf_free(&buf);
+        return result;
+    }
+}
+
+static fe_Object* builtin_dirname(fe_Context *ctx, fe_Object *args) {
+    fe_Object *path_obj;
+    char *path;
+    size_t end;
+    size_t i;
+    fe_Object *result;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "dirname");
+    path_obj = fe_nextarg(ctx, &args);
+    path = string_to_cstr(ctx, path_obj, "dirname");
+    if (!path) return fe_nil(ctx);
+
+    end = strlen(path);
+    while (end > 1 && is_path_separator_char(path[end - 1])) {
+        end--;
+    }
+    for (i = end; i > 0; i--) {
+        if (is_path_separator_char(path[i - 1])) {
+            while (i > 1 && is_path_separator_char(path[i - 2])) {
+                i--;
+            }
+            if (i == 1) {
+                result = fe_string(ctx, "/", 1);
+            } else {
+                result = fe_string(ctx, path, i - 1);
+            }
+            free(path);
+            return result;
+        }
+    }
+
+    free(path);
+    return fe_string(ctx, ".", 1);
+}
+
+static fe_Object* builtin_basename(fe_Context *ctx, fe_Object *args) {
+    fe_Object *path_obj;
+    char *path;
+    size_t end;
+    size_t start;
+    fe_Object *result;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "basename");
+    path_obj = fe_nextarg(ctx, &args);
+    path = string_to_cstr(ctx, path_obj, "basename");
+    if (!path) return fe_nil(ctx);
+
+    end = strlen(path);
+    while (end > 1 && is_path_separator_char(path[end - 1])) {
+        end--;
+    }
+    start = end;
+    while (start > 0 && !is_path_separator_char(path[start - 1])) {
+        start--;
+    }
+    result = fe_string(ctx, path + start, end - start);
+    free(path);
+    return result;
+}
+
+static fe_Object* builtin_read_file(fe_Context *ctx, fe_Object *args) {
+    FEX_CHECK_ARGS(ctx, args, 1, "readfile");
+    fe_Object *filename_obj = fe_nextarg(ctx, &args);
+    char *filename = string_to_cstr(ctx, filename_obj, "readfile");
+    char *buffer;
+    size_t bytes_read;
+    fe_Object *result;
+
+    if (!filename) {
+        return fe_nil(ctx);
+    }
+
+    buffer = read_file_dynamic(ctx, filename, 256 * 1024, &bytes_read, "readfile");
+    free(filename);
+    if (!buffer) return fe_nil(ctx);
+
+    result = fe_string(ctx, buffer, bytes_read);
     free(buffer);
-    
     return result;
 }
 
@@ -810,36 +1431,115 @@ static fe_Object* builtin_write_file(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 2, "writefile");
     fe_Object *filename_obj = fe_nextarg(ctx, &args);
     fe_Object *content_obj = fe_nextarg(ctx, &args);
-    FEX_CHECK_TYPE(ctx, filename_obj, FE_TSTRING, "writefile");
-    FEX_CHECK_TYPE(ctx, content_obj, FE_TSTRING, "writefile");
-    
-    size_t filename_len = fe_strlen(ctx, filename_obj);
-    size_t content_len = fe_strlen(ctx, content_obj);
-    
-    if (filename_len >= 1024) {
-        fe_error(ctx, "writefile: filename too long");
+    char *filename = string_to_cstr(ctx, filename_obj, "writefile");
+    char *content = string_to_cstr(ctx, content_obj, "writefile");
+    size_t content_len;
+    FILE *file;
+    size_t written;
+
+    if (!filename || !content) {
+        free(filename);
+        free(content);
         return fe_nil(ctx);
     }
-    
-    if (content_len >= 4096) {
-        fe_error(ctx, "writefile: content too long");
-        return fe_nil(ctx);
-    }
-    
-    char filename[1024];
-    char content[4096];
-    fe_tostring(ctx, filename_obj, filename, sizeof(filename));
-    fe_tostring(ctx, content_obj, content, sizeof(content));
-    
-    FILE *file = fopen(filename, "wb");
+
+    content_len = strlen(content);
+    file = fopen(filename, "wb");
     if (!file) {
+        free(filename);
+        free(content);
         fe_error(ctx, "writefile: could not open file for writing");
         return fe_nil(ctx);
     }
-    
-    size_t written = fwrite(content, 1, content_len, file);
+
+    written = fwrite(content, 1, content_len, file);
+    if (written != content_len || ferror(file)) {
+        fclose(file);
+        free(filename);
+        free(content);
+        fe_error(ctx, "writefile: error writing file");
+        return fe_nil(ctx);
+    }
+
     fclose(file);
-    
+    free(filename);
+    free(content);
+    return fe_make_number(ctx, (fe_Number)written);
+}
+
+static fe_Object* builtin_read_json(fe_Context *ctx, fe_Object *args) {
+    fe_Object *filename_obj;
+    char *filename;
+    char *buffer;
+    JsonParser parser;
+    fe_Object *result;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "readjson");
+    filename_obj = fe_nextarg(ctx, &args);
+    filename = string_to_cstr(ctx, filename_obj, "readjson");
+    if (!filename) return fe_nil(ctx);
+
+    buffer = read_file_dynamic(ctx, filename, 256 * 1024, NULL, "readjson");
+    free(filename);
+    if (!buffer) return fe_nil(ctx);
+
+    parser.ctx = ctx;
+    parser.current = buffer;
+    result = json_parse_value(&parser);
+    json_skip_ws(&parser);
+    if (*parser.current != '\0') {
+        free(buffer);
+        fe_error(ctx, "readjson: trailing characters");
+        return fe_nil(ctx);
+    }
+    free(buffer);
+    return result;
+}
+
+static fe_Object* builtin_write_json(fe_Context *ctx, fe_Object *args) {
+    fe_Object *filename_obj;
+    fe_Object *value;
+    char *filename;
+    TextBuffer buf;
+    FILE *file;
+    size_t written;
+
+    FEX_CHECK_ARGS(ctx, args, 2, "writejson");
+    filename_obj = fe_nextarg(ctx, &args);
+    value = fe_nextarg(ctx, &args);
+
+    filename = string_to_cstr(ctx, filename_obj, "writejson");
+    if (!filename) return fe_nil(ctx);
+
+    buf.data = NULL;
+    buf.len = 0;
+    buf.cap = 0;
+    if (!json_write_value(ctx, value, &buf)) {
+        free(filename);
+        buf_free(&buf);
+        return fe_nil(ctx);
+    }
+
+    file = fopen(filename, "wb");
+    if (!file) {
+        free(filename);
+        buf_free(&buf);
+        fe_error(ctx, "writejson: could not open file for writing");
+        return fe_nil(ctx);
+    }
+
+    written = fwrite(buf.data, 1, buf.len, file);
+    if (written != buf.len || ferror(file)) {
+        fclose(file);
+        free(filename);
+        buf_free(&buf);
+        fe_error(ctx, "writejson: error writing file");
+        return fe_nil(ctx);
+    }
+
+    fclose(file);
+    free(filename);
+    buf_free(&buf);
     return fe_make_number(ctx, (fe_Number)written);
 }
 
@@ -1041,8 +1741,13 @@ static void register_list_functions(fe_Context *ctx) {
 static void register_io_functions(fe_Context *ctx) {
     int gc_save = fe_savegc(ctx);
     
+    fe_set(ctx, fe_symbol(ctx, "pathjoin"), fe_cfunc(ctx, builtin_path_join));
+    fe_set(ctx, fe_symbol(ctx, "dirname"), fe_cfunc(ctx, builtin_dirname));
+    fe_set(ctx, fe_symbol(ctx, "basename"), fe_cfunc(ctx, builtin_basename));
     fe_set(ctx, fe_symbol(ctx, "readfile"), fe_cfunc(ctx, builtin_read_file));
     fe_set(ctx, fe_symbol(ctx, "writefile"), fe_cfunc(ctx, builtin_write_file));
+    fe_set(ctx, fe_symbol(ctx, "readjson"), fe_cfunc(ctx, builtin_read_json));
+    fe_set(ctx, fe_symbol(ctx, "writejson"), fe_cfunc(ctx, builtin_write_json));
     
     fe_restoregc(ctx, gc_save);
 }
@@ -1057,6 +1762,8 @@ static void register_data_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "mapdelete"), fe_cfunc(ctx, builtin_map_delete));
     fe_set(ctx, fe_symbol(ctx, "mapkeys"), fe_cfunc(ctx, builtin_map_keys));
     fe_set(ctx, fe_symbol(ctx, "mapcount"), fe_cfunc(ctx, builtin_map_count));
+    fe_set(ctx, fe_symbol(ctx, "parsejson"), fe_cfunc(ctx, builtin_parse_json));
+    fe_set(ctx, fe_symbol(ctx, "tojson"), fe_cfunc(ctx, builtin_to_json));
 
     fe_restoregc(ctx, gc_save);
 }
