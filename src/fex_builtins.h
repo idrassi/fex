@@ -45,7 +45,16 @@ typedef enum {
     FEX_BUILTINS_SYSTEM = 1 << 4,      /* System operations */
     FEX_BUILTINS_TYPE = 1 << 5,        /* Type checking and conversion */
     FEX_BUILTINS_DATA = 1 << 6,        /* Map/object operations */
-    FEX_BUILTINS_ALL = 0x7F            /* All builtins */
+    FEX_BUILTINS_SAFE =
+        FEX_BUILTINS_MATH |
+        FEX_BUILTINS_STRING |
+        FEX_BUILTINS_LIST |
+        FEX_BUILTINS_TYPE |
+        FEX_BUILTINS_DATA,             /* All categories except I/O and system */
+    FEX_BUILTINS_ALL =
+        FEX_BUILTINS_SAFE |
+        FEX_BUILTINS_IO |
+        FEX_BUILTINS_SYSTEM            /* All builtins */
 } FexBuiltinsConfig;
 
 /* Error handling utilities */

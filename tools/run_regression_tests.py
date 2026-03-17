@@ -111,6 +111,29 @@ CASES = [
         ),
     },
     {
+        "name": "builtin categories",
+        "source": "let q = substring(tojson(\"x\"), 0, 1);\nlet raw = concat(\"{\", q, \"name\", q, \":\", q, \"fex\", q, \"}\");\nprintln(parsejson(raw).name);\n",
+        "args": ["--builtin", "string,data"],
+        "exit_code": 0,
+        "stdout": "fex\n",
+    },
+    {
+        "name": "builtin safe blocks io",
+        "source": "pathjoin(\"a\", \"b\");\n",
+        "args": ["--builtin", "safe", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: tried to call non-callable value",
+        ],
+    },
+    {
+        "name": "builtin safe plus io",
+        "source": "println(pathjoin(\"a\", \"b\"));\n",
+        "args": ["--builtin", "safe", "--builtin", "io"],
+        "exit_code": 0,
+        "stdout": "a/b\n",
+    },
+    {
         "name": "bad module syntax",
         "source": 'module(123) {\n    export let y = 20;\n}\n',
         "exit_code": 65,

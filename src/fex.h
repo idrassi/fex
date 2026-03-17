@@ -75,6 +75,14 @@ void fex_init(fe_Context *ctx);
  */
 void fex_init_with_config(fe_Context *ctx, FexConfig config);
 
+/*
+ * Initializes the FeX environment with configuration options and a selective
+ * extended-builtin mask. If `builtins` is `FEX_BUILTINS_NONE`, the legacy
+ * `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` flag still enables all builtins.
+ */
+void fex_init_with_builtins(fe_Context *ctx, FexConfig config,
+                            FexBuiltinsConfig builtins);
+
 /* 
  * Compiles a string of source code in the modern syntax into an
  * evaluatable fe_Object.

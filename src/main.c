@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "fe.h"
 #include "fex.h"
@@ -41,6 +42,75 @@ static int exit_code_for_status(FexStatus status) {
     default:
       return 1;
   }
+}
+
+static int builtin_mask_from_name(const char *name, FexBuiltinsConfig *out_mask) {
+  if (strcmp(name, "math") == 0) {
+    *out_mask = FEX_BUILTINS_MATH;
+  } else if (strcmp(name, "string") == 0) {
+    *out_mask = FEX_BUILTINS_STRING;
+  } else if (strcmp(name, "list") == 0) {
+    *out_mask = FEX_BUILTINS_LIST;
+  } else if (strcmp(name, "io") == 0) {
+    *out_mask = FEX_BUILTINS_IO;
+  } else if (strcmp(name, "system") == 0) {
+    *out_mask = FEX_BUILTINS_SYSTEM;
+  } else if (strcmp(name, "type") == 0) {
+    *out_mask = FEX_BUILTINS_TYPE;
+  } else if (strcmp(name, "data") == 0) {
+    *out_mask = FEX_BUILTINS_DATA;
+  } else if (strcmp(name, "safe") == 0) {
+    *out_mask = FEX_BUILTINS_SAFE;
+  } else if (strcmp(name, "all") == 0) {
+    *out_mask = FEX_BUILTINS_ALL;
+  } else {
+    return 0;
+  }
+  return 1;
+}
+
+static int add_builtin_spec(FexBuiltinsConfig *mask, const char *spec) {
+  char *copy;
+  char *token;
+  size_t len;
+
+  len = strlen(spec);
+  copy = malloc(len + 1);
+  if (!copy) {
+    return 0;
+  }
+  memcpy(copy, spec, len + 1);
+
+  token = copy;
+  while (token != NULL) {
+    FexBuiltinsConfig token_mask;
+    char *start = token;
+    char *end;
+    char *next = strchr(token, ',');
+
+    if (next != NULL) {
+      *next = '\0';
+    }
+
+    while (*start != '\0' && isspace((unsigned char)*start)) {
+      start++;
+    }
+    end = start + strlen(start);
+    while (end > start && isspace((unsigned char)end[-1])) {
+      end--;
+    }
+    *end = '\0';
+
+    if (*start == '\0' || !builtin_mask_from_name(start, &token_mask)) {
+      free(copy);
+      return 0;
+    }
+    *mask |= token_mask;
+    token = (next != NULL) ? next + 1 : NULL;
+  }
+
+  free(copy);
+  return 1;
 }
 
 static void run_repl(fe_Context *ctx) {
@@ -87,7 +157,10 @@ static void print_usage(const char *program_name) {
   fprintf(stderr, "Usage: %s [options] [file]\n", program_name);
   fprintf(stderr, "Options:\n");
   fprintf(stderr, "  --spans       Enable detailed error reporting with source spans\n");
-  fprintf(stderr, "  --builtins    Enable extended built-in functions\n");
+  fprintf(stderr, "  --builtins    Enable all extended built-in functions\n");
+  fprintf(stderr, "  --builtin NAME  Enable a builtin category or preset (may repeat, comma-separated)\n");
+  fprintf(stderr, "                Categories: math, string, list, io, system, type, data\n");
+  fprintf(stderr, "                Presets: safe, all\n");
   fprintf(stderr, "  --module-path PATH  Add a module search directory (may be repeated)\n");
   fprintf(stderr, "  -I PATH       Alias for --module-path\n");
   fprintf(stderr, "  --memory-pool-size SIZE  Set memory pool size in MB (default: 5MB)\n");
@@ -97,7 +170,7 @@ static void print_usage(const char *program_name) {
 }
 
 int main(int argc, char **argv) {
-  int enable_spans = 0, enable_builtins = 0, i, module_path_count = 0;
+  int enable_spans = 0, i, module_path_count = 0;
   int exit_code = 0;
   size_t memory_pool_size = MEMORY_POOL_SIZE;
   const char *filename = NULL;
@@ -105,6 +178,7 @@ int main(int argc, char **argv) {
   void *mem;
   fe_Context *ctx;
   FexConfig config;
+  FexBuiltinsConfig builtins = FEX_BUILTINS_NONE;
 
   module_paths = malloc((size_t)((argc > 0) ? argc : 1) * sizeof(*module_paths));
   if (!module_paths) {
@@ -116,7 +190,21 @@ int main(int argc, char **argv) {
     if (strcmp(argv[i], "--spans") == 0) {
       enable_spans = 1;
     } else if (strcmp(argv[i], "--builtins") == 0) {
-      enable_builtins = 1;
+      builtins |= FEX_BUILTINS_ALL;
+    } else if (strcmp(argv[i], "--builtin") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --builtin requires a category or preset name\n");
+        print_usage(argv[0]);
+        free(module_paths);
+        return 64;
+      }
+      i++;
+      if (!add_builtin_spec(&builtins, argv[i])) {
+        fprintf(stderr, "Error: Unknown builtin category or preset '%s'\n", argv[i]);
+        print_usage(argv[0]);
+        free(module_paths);
+        return 64;
+      }
     } else if (strcmp(argv[i], "--module-path") == 0 || strcmp(argv[i], "-I") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: %s requires a path argument\n", argv[i]);
@@ -182,10 +270,7 @@ int main(int argc, char **argv) {
   if (enable_spans) {
     config |= FEX_CONFIG_ENABLE_SPANS;
   }
-  if (enable_builtins) {
-    config |= FEX_CONFIG_ENABLE_EXTENDED_BUILTINS;
-  }
-  fex_init_with_config(ctx, config);
+  fex_init_with_builtins(ctx, config, builtins);
 
   for (i = 0; i < module_path_count; i++) {
     if (!fex_add_import_path(ctx, module_paths[i])) {

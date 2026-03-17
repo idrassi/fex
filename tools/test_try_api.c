@@ -104,7 +104,8 @@ int main(void) {
         return fail("expected file I/O error");
     }
 
-    fex_init_with_config(ctx, FEX_CONFIG_ENABLE_SPANS | FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
+    fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS,
+        FEX_BUILTINS_STRING | FEX_BUILTINS_DATA);
     status = fex_try_do_string(
         ctx,
         "let cfg = makemap(\"env\", \"prod\");\n"
@@ -122,21 +123,41 @@ int main(void) {
         ctx,
         "let q = substring(tojson(\"x\"), 0, 1);\n"
         "let raw = concat(\"{\", q, \"name\", q, \":\", q, \"fex\", q, \"}\");\n"
-        "let doc = parsejson(raw);\n"
-        "pathjoin(\"build\", doc.name);\n",
+        "parsejson(raw).name;\n",
         &result,
         &error
     );
     if (status != FEX_STATUS_OK) {
         fe_close(ctx);
         free(memory);
-        return fail("expected JSON and path helpers to succeed");
+        return fail("expected selective JSON helpers to succeed");
+    }
+    fe_tostring(ctx, result, buffer, sizeof(buffer));
+    if (strcmp(buffer, "fex") != 0) {
+        fe_close(ctx);
+        free(memory);
+        return fail("unexpected selective JSON helper result");
+    }
+
+    status = fex_try_do_string(ctx, "pathjoin(\"build\", \"fex\");", &result, &error);
+    if (status != FEX_STATUS_RUNTIME_ERROR || strstr(error.message, "tried to call non-callable value") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected pathjoin to stay unavailable without I/O builtins");
+    }
+
+    fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS, FEX_BUILTINS_IO);
+    status = fex_try_do_string(ctx, "pathjoin(\"build\", \"fex\");", &result, &error);
+    if (status != FEX_STATUS_OK) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected I/O builtins to be addable later");
     }
     fe_tostring(ctx, result, buffer, sizeof(buffer));
     if (strcmp(buffer, "build/fex") != 0) {
         fe_close(ctx);
         free(memory);
-        return fail("unexpected JSON/path helper result");
+        return fail("unexpected pathjoin result after enabling I/O builtins");
     }
 
     status = fex_try_do_string(ctx, "41 + 1;", &result, &error);

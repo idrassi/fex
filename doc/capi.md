@@ -76,6 +76,26 @@ Like `fex_init()`, but enables optional features through flags:
 - `FEX_CONFIG_ENABLE_SPANS` enables source span tracking.
 - `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` registers the optional extended builtins set, including helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, and `pathjoin`.
 
+### fex_init_with_builtins()
+
+```c
+void fex_init_with_builtins(fe_Context *ctx, FexConfig config,
+                            FexBuiltinsConfig builtins);
+```
+
+Like `fex_init_with_config()`, but lets the host choose specific builtin categories instead of enabling the full extended set.
+
+- Categories: `FEX_BUILTINS_MATH`, `FEX_BUILTINS_STRING`, `FEX_BUILTINS_LIST`, `FEX_BUILTINS_IO`, `FEX_BUILTINS_SYSTEM`, `FEX_BUILTINS_TYPE`, `FEX_BUILTINS_DATA`
+- Presets: `FEX_BUILTINS_SAFE` (all categories except I/O and system) and `FEX_BUILTINS_ALL`
+
+Example:
+
+```c
+fex_init_with_builtins(ctx,
+    FEX_CONFIG_ENABLE_SPANS,
+    FEX_BUILTINS_STRING | FEX_BUILTINS_DATA);
+```
+
 ### fe_close()
 
 ```c
@@ -379,5 +399,5 @@ The interpreter is re-entrant on a single context: a host `fe_CFunc` may call ba
 - Forgetting GC protection for temporary objects across further allocations.
 - Returning `NULL` from a `fe_CFunc`.
 - Passing a compiled AST or other `fe_Object *` from one context into another.
-- Assuming optional helpers such as `sqrt`, `map`, or `parsejson` are always present. They require `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` or the CLI `--builtins` flag.
+- Assuming optional helpers such as `sqrt`, `map`, or `parsejson` are always present. They require `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS`, `fex_init_with_builtins(...)`, `--builtins`, or `--builtin NAME`.
 - Using `fe_cdr_ptr()` without first ensuring the target is non-nil.

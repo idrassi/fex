@@ -142,10 +142,17 @@ The base FeX environment always includes:
 
 Pair selectors such as `.head` and `.tail`, and the `::` operator, are syntax sugar over these primitives rather than separate runtime functions.
 
-Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, and `pathjoin` are part of the extended builtins set. In the CLI, enable them with `--builtins`. In embedded use, call:
+Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, and `pathjoin` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe` or `--builtin string,data`. In embedded use, call:
 
 ```c
 fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
+```
+
+For finer-grained embedding, use:
+
+```c
+fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS,
+    FEX_BUILTINS_STRING | FEX_BUILTINS_DATA);
 ```
 
 ## 9. Execution and Memory
@@ -162,7 +169,8 @@ fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
 | Open a VM | `ctx = fe_open(buf, size); fex_init(ctx);` |
 | Run source once | `fex_do_string(ctx, "code");` |
 | Compile then reuse | `fe_Object *ast = fex_compile(ctx, src); fe_eval(ctx, ast);` |
-| Enable optional builtins | `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);` |
+| Enable all optional builtins | `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);` |
+| Enable selected builtin groups | `fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS, FEX_BUILTINS_SAFE);` |
 | Install custom error behavior | Replace `fe_handlers(ctx)->error` before running code. |
 
 Compiled ASTs belong to the `fe_Context` that created them. Reuse them within that same context; do not pass them to another context or thread.

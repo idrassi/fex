@@ -261,11 +261,20 @@ static fe_Object* builtin_read_number(fe_Context *ctx, fe_Object *args) {
  * Registers all our custom C functions into the fe environment.
  */
 void fex_init(fe_Context *ctx) {
-    fex_init_with_config(ctx, FEX_CONFIG_NONE);
+    fex_init_with_builtins(ctx, FEX_CONFIG_NONE, FEX_BUILTINS_NONE);
 }
 
 void fex_init_with_config(fe_Context *ctx, FexConfig config) {
+    fex_init_with_builtins(ctx, config, FEX_BUILTINS_NONE);
+}
+
+void fex_init_with_builtins(fe_Context *ctx, FexConfig config,
+                            FexBuiltinsConfig builtins) {
     fe_handlers(ctx)->error = fex_on_error;
+    if (builtins == FEX_BUILTINS_NONE &&
+        (config & FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)) {
+        builtins = FEX_BUILTINS_ALL;
+    }
 
     /* Configure spans */
     fex_span_set_enabled(config & FEX_CONFIG_ENABLE_SPANS);
@@ -292,8 +301,8 @@ void fex_init_with_config(fe_Context *ctx, FexConfig config) {
     );
 
     /* Initialize extended builtins if requested */
-    if (config & FEX_CONFIG_ENABLE_EXTENDED_BUILTINS) {
-        fex_init_all_builtins(ctx);
+    if (builtins != FEX_BUILTINS_NONE) {
+        fex_init_extended_builtins(ctx, builtins);
     }
 
     fe_restoregc(ctx, gc_save);
