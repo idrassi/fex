@@ -29,6 +29,7 @@ FeX provides a familiar "curly-brace" syntax front-end that compiles down to the
 *   **Modern Syntax**: Familiar C-like syntax for functions, variables (`let`), `if`/`else`, `while` loops, and operators.
 *   **Powerful Core**: Supports first-class functions, lexical scoping, closures, and macros inherited from its `fe` backend.
 *   **Rich Data Types**: Numbers (doubles and fixnums), Strings, `nil`, Booleans, and Pairs (for lists).
+*   **Pair Sugar**: `::` builds pairs, `.head`/`.first` and `.tail`/`.rest` read them, and pair selectors can be assigned.
 *   **Zero-Malloc Runtime**: Operates within a single, fixed-size memory arena. No `malloc`/`free` calls are made during script execution, making it highly predictable.
 *   **Garbage Collection**: A simple and fast mark-and-sweep garbage collector manages the memory arena.
 *   **Great Error Reporting**: The parser provides precise error messages with source file line and column numbers.
@@ -38,33 +39,27 @@ FeX provides a familiar "curly-brace" syntax front-end that compiles down to the
 
 ## Building
 
-FeX uses CMake for building. You will need `cmake` and a C89-compatible compiler (like GCC or Clang).
+FeX uses CMake for building. You will need `cmake` and a C compiler supported by CMake, such as GCC, Clang, or MSVC.
 
 ```bash
-# 1. Create a build directory
-mkdir build
-cd build
-
-# 2. Configure the project
-cmake ..
-
-# 3. Build the project
-make
+cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build build --config Debug
+ctest --test-dir build -C Debug --output-on-failure
 ```
 
-This will create an executable named `fex` in the `build` directory.
+On single-config generators such as Ninja or Unix Makefiles, omit `--config Debug`. The executable is typically `build/fex` on single-config generators and `build/Debug/fex.exe` on Visual Studio generators.
 
 ## Usage
 
-The `fex` can be used to run a script file or to start an interactive Read-Eval-Print Loop (REPL).
+The `fex` executable can be used to run a script file or to start an interactive Read-Eval-Print Loop (REPL). The examples below use `<path-to-fex>` to stand in for your generator-specific executable path.
 
 ### REPL
 
 To start the REPL, run `fex` with no arguments:
 
 ```bash
-./build/fex
-FeX v1.0 (Modern Syntax Layer for fe)
+<path-to-fex>
+FeX v1.0 (Modern Syntax Layer for enhanced Fe code)
 > let x = 10 * 2;
 20
 > println("Hello, value is " + x);
@@ -78,8 +73,10 @@ nil
 To execute a script file, pass the file path as an argument:
 
 ```bash
-./build/fex your_script.fex
+<path-to-fex> your_script.fex
 ```
+
+Pass `--builtins` to enable the optional extended builtins set, and `--spans` for richer source-location diagnostics.
 
 ## Language Quick Tour
 
@@ -154,6 +151,16 @@ let new_items = cons("z", items);
 println(new_items); // (z a b c)
 ```
 
+Pairs also support right-associative `::` sugar plus selector syntax:
+
+```c
+let pair = 1 :: 2 :: 3 :: nil;
+println(pair.head);      // 1
+println(pair.tail.head); // 2
+pair.head = 10;
+println(pair);           // (10 2 3)
+```
+
 ## Embedding API
 
 FeX is easy to embed. Here is a minimal example of running a FeX script from C.
@@ -179,7 +186,7 @@ int main() {
     fex_init(ctx);
 
     // 4. Compile and run a string of code.
-    const char *script = "println('Hello from embedded FeX!');";
+    const char *script = "println(\"Hello from embedded FeX!\");";
     fex_do_string(ctx, script);
 
     // 5. Clean up.
@@ -189,6 +196,8 @@ int main() {
     return 0;
 }
 ```
+
+If you want optional helpers such as `sqrt`, `map`, `filter`, and `makestring`, initialize with `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` instead of plain `fex_init(ctx)`.
 
 ## Architecture
 

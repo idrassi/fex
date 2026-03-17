@@ -1,119 +1,111 @@
 # FeX Programming Language
 
-*A tiny, modern-syntax, self-hosting language with a two-kilobyte ANSI C runtime.*
+*A small curly-brace language that compiles to the Fe core AST.*
 
----
+## 1. Overview
 
-## 1 A Bird’s-Eye View
+FeX is a front-end for the `fe` runtime. Its job is to turn a modern surface syntax into ordinary `fe_Object *` lists that the core evaluator already understands.
 
-FeX (pronounced *“fecks”*) asks a simple question:
+Key properties:
 
-> **What is the smallest curly-brace language that still feels “grown-up”?**
+- Everything is an expression.
+- Lists and ASTs are built from pairs.
+- Dot syntax compiles to `get`, with pair-specific selector sugar for `.head`, `.first`, `.tail`, and `.rest`.
+- The `::` operator is right-associative sugar for `cons`.
 
-The answer turned out to be a handful of grammar rules, an immutable cons-cell heap, and a dash of syntactic sugar. Feed the sugar to the *fex* compiler and you obtain portable C objects ready to run in any embedding—desktop, microcontroller, or web assembly alike.
+## 2. Lexical Grammar
 
-With FeX:
+| Category | Examples | Notes |
+| --- | --- | --- |
+| Identifiers | `snake_case`, `Point3D`, `_private` | Letters, digits, and `_` after the first character. |
+| Keywords | `module`, `export`, `import`, `let`, `fn`, `return`, `if`, `else`, `while`, `true`, `false`, `nil`, `and`, `or` | Reserved words. |
+| Numbers | `42`, `-3`, `0xFF`, `3.14`, `6.022e23` | Hex uses `0x`; decimals support exponent notation. |
+| Strings | `"hello\nworld"` | Double quotes with C-style escapes. |
+| Comments | `// until end-of-line` | Ignored by the parser. |
+| Punctuation | `()[]{},;.:` | `:` only appears as part of `::`. |
 
-* **Everything is an expression.** Every construct returns a value, so REPL play feels natural.
-* **Homoiconicity re-imagined.** Source code compiles straight into the same pair objects your programs manipulate, enabling powerful metaprogramming without macros that mutate global state.
-* **Host-agnostic.** A single call `fex_do_string(ctx, source)` interprets code inside your application; or pre-compile once, ship the AST, and evaluate it many times with `fe_eval`.
+Whitespace is otherwise insignificant.
 
----
+## 3. Values and Data Shapes
 
-## 2 Lexical Grammar — Quick Reference
+FeX has one mutable heap object: the pair `(car . cdr)`. Higher-level structures are layered on top of it.
 
-| Category        | Example                                                                                                         | Notes                                                         |
-| --------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| **Identifiers** | `snake_case`, `Point3D`, `_private`                                                                             | Unicode letters allowed.                                      |
-| **Keywords**    | `module`, `export`, `import`, `let`, `fn`, `return`, `if`, `else`, `while`, `true`, `false`, `nil`, `and`, `or` | Lower-case; reserved.                                         |
-| **Numbers**     | `42`, `-3`, `0xFF`, `3.14`, `6.022e23`                                                                          | Hex prefixed with `0x`; decimals may use scientific notation. |
-| **Strings**     | `"hello\nworld"`                                                                                                | Double quotes; C-style escapes.                               |
-| **Comments**    | `// until end-of-line`                                                                                          | Ignored by compiler.                                          |
-| **Punctuation** | `()[]{},;.`                                                                                                     | Familiar C-family set.                                        |
+| Value | Example | Notes |
+| --- | --- | --- |
+| `nil` | `nil` | Singleton value and empty list. |
+| Boolean | `true`, `false` | Only `false` and `nil` are falsey. |
+| Fixnum | `123` | Pointer-tagged integer when it fits. |
+| Double | `3.14` | Boxed number when not representable as a fixnum. |
+| String | `"FeX"` | Arena-backed string object; the default build stores string bytes in slabs. |
+| Pair | `1 :: 2` | Equivalent to `cons(1, 2)`. |
+| List | `[1, 2, 3]` | Equivalent to `list(1, 2, 3)`. |
+| Symbol | implicit | Identifiers become interned symbols in compiled forms. |
 
-Whitespace separates tokens and terminates single-line comments; otherwise insignificant.
+## 4. Expressions and Operators
 
----
+| Category | Example | Internal Form |
+| --- | --- | --- |
+| Primary | `x`, `42`, `"hi"` | literal or symbol |
+| Grouping | `(expr)` | `expr` |
+| List | `[a, b]` | `(list a b)` |
+| Cons | `a :: b` | `(cons a b)` |
+| Unary | `-n`, `!cond` | `(- n)`, `(not cond)` |
+| Binary | `a + b * c` | nested arithmetic calls |
+| Equality | `a == b`, `a != b` | `(is a b)`, `(not (is a b))` |
+| Compare | `< <= > >=` | `>` and `>=` flip operands into `<` and `<=` |
+| Logical | `and`, `or` | `(and ...)`, `(or ...)` |
+| Assign | `x = y` | `(= x y)` |
+| Call | `f(a, b)` | `(f a b)` |
+| Member | `obj.field` | `(get obj field)` |
 
-## 3 Literals & Core Data Shapes
+On pair values, the following selector names are special:
 
-FeX has exactly one mutable heap object—**the pair** `(car . cdr)`. Every other structure is a pattern layered on top.
-
-| Literal | Example                   | Behaviour                                                 |
-| ------- | ------------------------- | --------------------------------------------------------- |
-| `nil`   | `nil`                     | Singleton object, **falsey**, also the empty list.        |
-| Boolean | `true`, `false`           | Only `false` and `nil` are false.                         |
-| Fixnum  | `123`                     | Pointer-tagged small integer, fits native word width.     |
-| Double  | `3.14`                    | Boxed on heap if not representable as fixnum.             |
-| String  | `"FeX"`                   | Rope of 7-byte segments; zero-copy slices.                |
-| List    | `[1, 2, 3]`               | Syntactic sugar for pairs: equivalent to `list(1, 2, 3)`. |
-| Symbol  | Implicit from identifiers | Interned globally, pointer equality.                      |
-
-> **Thought experiment:**
-> If you took away the list literal syntax, you could still build arrays, hash-tables, and ASTs—just cons them together.
-
----
-
-## 4 Expressions & Operators
-
-FeX borrows JavaScript-style precedence but **evaluates strictly left-to-right**.
-
-| Category | Example            | Internal Form\*                                                  |
-| -------- | ------------------ | ---------------------------------------------------------------- |
-| Primary  | `x`, `42`, `"hi"`  | –                                                                |
-| Grouping | `(expr)`           | `(expr)`                                                         |
-| List     | `[a, b]`           | `(list a b)`                                                     |
-| Unary    | `-n`, `!cond`      | `(- n)`, `(not cond)`                                            |
-| Binary   | `a + b * c`        | Nested `(+ ...)` `(* ...)`                                           |
-| Equality | `a == b`, `a != b` | `(is a b)`, `(not (is a b))`                                     |
-| Compare  | `< <= > >=`        | `<` and `<=` as-is; `>` flips operands into `<`, `>=` into `<=`. |
-| Logical  | `and`, `or`        | Short-circuiting `(and ...)` / `(or ...)`                            |
-| Assign   | `x = y`            | `(= x y)`                                                        |
-| Call     | `fn(a, b)`         | `(fn a b)`                                                       |
-| Member   | `obj.field`        | `(get obj 'field)`                                               |
-
-\*Internal forms are shown to illustrate semantics; you rarely see them unless you inspect the runtime AST.
-
----
-
-## 5 Statements
-
-Statements are expressions with a semicolon—or blocks that delimit themselves.
-
-| Syntax                       | Purpose                                                      | Notes                                                                       |
-| ---------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| `expr ;`                     | Evaluate for side-effects.                                   | Value is discarded unless at REPL.                                          |
-| `let x = expr ;`             | Bind fresh local (inside function) or global (at top level). | Recursion works: the binding exists while `expr` is evaluated.              |
-| `fn name(params) { body }`   | Named function declaration.                                  | Functions are first-class values.                                           |
-| `return expr ;`              | Exit nearest function, yielding `expr`.                      | If omitted, returns `nil`.                                                  |
-| `if (cond) stmt1 else stmt2` | Conditional; else is optional.                               | Both branches are expressions, so they can appear inside other expressions. |
-| `while (cond) stmt`          | Loop while `cond` remains truthy.                            | Tail-call optimisation is not required—plain loops are faster.              |
-| `{ ... }`                      | Block; result is last inner expression.                      | Enables let-scoped temporaries.                                             |
-
----
-
-## 6 Functions & Closures
-
-### 6.1 Literal Syntax
+- `.head` and `.first` read the first element.
+- `.tail` and `.rest` read the cdr.
+- The same selectors may appear on the left side of `=`:
 
 ```fex
-let add = fn (x, y) { x + y };
-println(add(2, 3));  // -> 5
+let pair = 1 :: 2 :: nil;
+pair.head = 10;
+pair.tail = 20 :: nil;
 ```
 
-Parameters are positional. A missing argument becomes `nil`; extras are ignored.
+## 5. Statements
 
-### 6.2 Capturing Rules
+Statements are expressions terminated by `;`, except for blocks and declarations whose syntax already delimits them.
 
-Free variables are captured **by reference**, producing an *up-value list* stored in the function object. Mutating the outer binding mutates what the closure observes.
+| Syntax | Meaning |
+| --- | --- |
+| `expr;` | Evaluate for side effects. |
+| `let x = expr;` | Declare a local or top-level binding. |
+| `fn name(params) { body }` | Declare a named function. |
+| `return expr;` | Exit the current function with `expr`. |
+| `if (cond) stmt else stmt` | Conditional expression. |
+| `while (cond) stmt` | Loop while `cond` stays truthy. |
+| `{ ... }` | Block expression whose value is the last inner expression. |
 
-### 6.3 `return`
+If `return` is omitted, a function returns `nil`.
 
-`return` unwinds directly to the most recent function frame—no extra C stack is introduced—so it is cheap and deterministic.
+## 6. Functions and Closures
 
----
+Functions are first-class and capture lexical bindings by reference.
 
-## 7 Modules
+```fex
+fn make_counter() {
+  let count = 0;
+
+  fn counter() {
+    count = count + 1;
+    return count;
+  }
+
+  return counter;
+}
+```
+
+Parameters are positional. Missing arguments evaluate as `nil`; extra arguments are ignored.
+
+## 7. Modules
 
 ```fex
 module ("math") {
@@ -123,95 +115,82 @@ module ("math") {
 
 import math;
 
-println(math.square(9)); // 81
-println(math.pi);        // 3.14159
+println(math.square(9));
+println(math.pi);
 ```
 
-* **`module("name") { ... }`** – Executes body once; its export table is a plain association list and is registered globally under `'name'`.
-* **`export decl`** – Any `let` or `fn` may be marked for export inside a module.
-* **`import ident ;`** – Compile-time directive; at run-time you access members with dot syntax (`math.pi`) or `get`.
+Module behavior:
 
-Because a module is just a list of `(symbol . value)` pairs, you can create alternative loaders—lazy, remote, or version-pinned—in FeX itself.
+- `module("name") { ... }` executes the body and binds the resulting export table under `name`.
+- `export` may decorate `let` and `fn` declarations inside a module.
+- `import ident;` is a compile-time directive that makes the module name available in source.
 
----
+At runtime, a module is still just a value. Dot access uses `get`.
 
-## 8 Standard Library Snapshot
+## 8. Builtins
 
-All primitives live in the global environment; add your own with `fe_cfunc`.
+The base FeX environment always includes:
 
-| Name                    | Signature                    | Behaviour                                       |
-| ----------------------- | ---------------------------- | ----------------------------------------------- |
-| `print`                 | `v₁, ... vₙ -> nil`             | Writes values separated by spaces (no newline). |
-| `println`               | `v₁, ... vₙ -> nil`             | Same as `print` plus trailing newline.          |
-| Arithmetic & comparison | `+ - * / < <=` etc.          | Operate on numbers (fixnum or double).          |
-| List ops                | `list`, `car`, `cdr`, `cons` | Standard pair manipulation.                     |
-| Predicates              | `atom`, `is`, `not`          | Truthiness as described earlier.                |
+| Name | Meaning |
+| --- | --- |
+| `print` | Print values without a trailing newline. |
+| `println` | Print values followed by a newline. |
+| `list`, `car`, `cdr`, `cons` | Pair and list primitives. |
+| `setcar`, `setcdr` | Pair mutation primitives. |
+| `atom`, `is`, `not` | Basic predicates. |
+| `+`, `-`, `*`, `/`, `<`, `<=` | Numeric primitives. |
 
-Feel free to shadow or extend any of these in user space.
+Pair selectors such as `.head` and `.tail`, and the `::` operator, are syntax sugar over these primitives rather than separate runtime functions.
 
----
+Optional helpers such as `sqrt`, `map`, `filter`, and `makestring` are part of the extended builtins set. In the CLI, enable them with `--builtins`. In embedded use, call:
 
-## 9 Execution & Memory at a Glance
+```c
+fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
+```
 
-* **Evaluation strategy** – Eager, left-to-right. Special forms (`if`, `and`, `or`, `fn`, etc.) control when their arguments are evaluated.
-* **Garbage collection** – Incremental mark-and-sweep; pairs never move, so native pointers into the heap stay valid.
-* **Truthiness** – Only `false` and `nil` are false. Zero, empty strings, and empty lists are *true*.
-* **Tail calls** – Ordinary function calls use the C stack; expect ≈ 1000 recursive levels on typical systems. Prefer `while` for unbounded loops.
-* **Error handling** – Default handler prints a back-trace annotated with source spans. Override `fe_handlers(ctx)->error` to integrate with your host.
+## 9. Execution and Memory
 
----
+- Evaluation is eager and left-to-right, except for special forms such as `if`, `and`, `or`, `fn`, and `while`.
+- Only `false` and `nil` are falsey.
+- The collector is mark-and-sweep, and objects do not move after allocation.
+- Ordinary function calls use the C stack. Prefer `while` for unbounded loops.
 
-## 10 Embedding Cheat-Sheet
+## 10. Embedding Cheat Sheet
 
-| Goal                             | API Call                                                           |
-| -------------------------------- | ------------------------------------------------------------------ |
-| **Open VM**                      | `fe_open(buf, size); fex_init(ctx);`                               |
-| **Run source once**              | `fex_do_string(ctx, "code");`                                      |
-| **Compile, then run many times** | `fe_Object* ast = fex_compile(ctx, src); fe_eval(ctx, ast);`       |
-| **Expose C function**            | `fe_set(ctx, fe_symbol(ctx,"read_file"), fe_cfunc(ctx,&my_c_fn));` |
-| **Custom error spans**           | Provide your own `fe_Handlers.error` before `fex_init`.            |
+| Goal | API |
+| --- | --- |
+| Open a VM | `ctx = fe_open(buf, size); fex_init(ctx);` |
+| Run source once | `fex_do_string(ctx, "code");` |
+| Compile then reuse | `fe_Object *ast = fex_compile(ctx, src); fe_eval(ctx, ast);` |
+| Enable optional builtins | `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);` |
+| Install custom error behavior | Replace `fe_handlers(ctx)->error` before running code. |
 
-The compiler is **re-entrant**; you may compile on one thread, ship the AST to another, and evaluate there—objects never relocate.
+Compiled ASTs belong to the `fe_Context` that created them. Reuse them within that same context; do not pass them to another context or thread.
 
----
+## 11. Examples
 
-## 11 Idiomatic Patterns
+### Pair Selectors
 
-* **Pipelines**
+```fex
+let pair = 1 :: 2 :: 3 :: nil;
+println(pair.head);
+println(pair.tail.head);
+pair.head = 10;
+println(pair);
+```
 
-  ```fex
-  [1,2,3]
-    .map(fn (x){ x + 1 })
-    .filter(fn (x){ x > 2 });
-  ```
+### Modules as Namespaces
 
-* **Domain objects as tables**
+```fex
+module ("config") {
+  export let host = "localhost";
+  export let port = 8080;
+}
 
-  ```fex
-  module ("vec2") {
-    export fn dot(a, b) { a.x * b.x + a.y * b.y }
-    export fn len(v)   { sqrt(dot(v, v)) }
-  }
-  ```
+println(config.host);
+println(config.port);
+```
 
-* **Live REPL**
+### REPL Workflow
 
-  Every block returns its last value, so you can paste any snippet and immediately see the result without wrapping it in `print`.
-
----
-
-## 12 Glossary
-
-> **Pair** – Two-slot heap object `(car . cdr)`; the only mutable container.
-> **Fixnum** – Pointer-tagged signed integer stored in one machine word.
-> **Special form** – Operator whose arguments are *not* automatically evaluated.
-> **Up-value** – Closed-over binding carried inside a function object.
-> **Homoiconic** – Code and data share the same representation; the compiler rearranges concrete syntax around identical pair structures.
-
----
-
-### One Last Thought
-
-Languages often grow by accretion—keywords piled on keywords. FeX chooses subtraction: start with a core small enough to *see in full*, then add syntax that makes newcomers feel at home without taking away the power to reshape the language from within.
-
-May your programs be **small, sharp, and joyful**.
+Every block returns its last value, so short experiments work naturally at the REPL without wrapping everything in `print`.
