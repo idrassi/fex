@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
 project(fex C)
 
+if(POLICY CMP0148)
+    cmake_policy(SET CMP0148 OLD)
+endif()
+
 include(CTest)
 
 set(CMAKE_C_STANDARD 90)

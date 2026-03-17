@@ -1,0 +1,12 @@
+# Generated build trees
+/build/
+/cmake-build-*/
+/compile_commands.json
+
+# Editor settings
+/.vscode/
+
+# Generated binaries and outputs
+/src/*.exe
+/src/*.pgm
+/src/workspace_concatenated.txt

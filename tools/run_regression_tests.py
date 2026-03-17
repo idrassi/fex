@@ -57,13 +57,13 @@ CASES = [
     },
     {
         "name": "bad module syntax",
-        "script": ROOT / "scripts" / "test_error_bad_syntax.fex",
+        "source": 'module(123) {\n    export let y = 20;\n}\n',
         "exit_code": 65,
-        "stderr": "[line 9] Error at '123': Expect module name string.\n",
+        "stderr": "[line 1] Error at '123': Expect module name string.\n",
     },
     {
         "name": "export outside module",
-        "script": ROOT / "scripts" / "test_error_export_global.fex",
+        "source": "export let x = 10;\n",
         "exit_code": 1,
         "stderr": "error: export outside of module\n[0] (export (let x 10))\n",
     },
