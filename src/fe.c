@@ -27,6 +27,7 @@
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
 #endif
+#include <limits.h>
 #include <string.h>
 #include "fe.h"
 
@@ -1526,9 +1527,10 @@ fe_Object* fe_eval(fe_Context *ctx, fe_Object *obj) {
 }
 
 
-fe_Context* fe_open(void *ptr, int size) {
+fe_Context* fe_open(void *ptr, size_t size) {
   int i, save;
   fe_Context *ctx;
+  size_t object_capacity;
   size_t total_mem = size;
 
   /* init context struct */
@@ -1545,7 +1547,9 @@ fe_Context* fe_open(void *ptr, int size) {
   str_arena_sz -= str_arena_sz % sizeof(void*); /* Align */
   size_t obj_arena_sz = arenas_sz - str_arena_sz;
 
-  ctx->object_count = obj_arena_sz / sizeof(fe_Object);
+  object_capacity = obj_arena_sz / sizeof(fe_Object);
+  if (object_capacity > (size_t)INT_MAX) return NULL;
+  ctx->object_count = (int)object_capacity;
   ctx->objects = (fe_Object*)arenas_ptr;
 
   ctx->str_base = (uint8_t*)ctx->objects + ctx->object_count * sizeof(fe_Object);
@@ -1563,7 +1567,9 @@ fe_Context* fe_open(void *ptr, int size) {
 #else
   /* init objects memory region */
   ctx->objects = (fe_Object*) arenas_ptr;
-  ctx->object_count = arenas_sz / sizeof(fe_Object);
+  object_capacity = arenas_sz / sizeof(fe_Object);
+  if (object_capacity > (size_t)INT_MAX) return NULL;
+  ctx->object_count = (int)object_capacity;
 #endif
 
   /* --- Initialize new GC state --- */

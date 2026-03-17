@@ -64,7 +64,7 @@ enum {
   FE_TBOOLEAN
 };
 
-fe_Context* fe_open(void *ptr, int size);
+fe_Context* fe_open(void *ptr, size_t size);
 void fe_close(fe_Context *ctx);
 fe_Handlers* fe_handlers(fe_Context *ctx);
 void fe_error(fe_Context *ctx, const char *msg);
