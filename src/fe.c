@@ -93,7 +93,7 @@ static const char *primnames[] = {
 };
 
 static const char *typenames[] = {
-  "pair", "free", "nil", "number", "symbol", "string",
+  "pair", "free", "nil", "number", "symbol", "string", "bytes",
   "func", "macro", "prim", "cfunc", "ptr", "map",
   "boolean"
 };
@@ -797,9 +797,11 @@ void fe_mark(fe_Context *ctx, fe_Object *obj) {
 
 #ifdef FE_OPT_NO_MALLOC_STRINGS
         case FE_TSTRING: /* String object holds offset; no further marking from here */
+        case FE_TBYTES:
             return;
 #else
         case FE_TSTRING: /* String object cdr holds a pointer we don't trace */
+        case FE_TBYTES:
             return;
 #endif
 
@@ -861,11 +863,11 @@ static void collectgarbage(fe_Context *ctx) {
     if (type(obj) == FE_TFREE) { continue; }
     if (~tag(obj) & GCMARKBIT) {
 #ifdef FE_OPT_NO_MALLOC_STRINGS
-      if (type(obj) == FE_TSTRING) {
+      if (type(obj) == FE_TSTRING || type(obj) == FE_TBYTES) {
         str_free_chain(ctx, obj->cdr.u32);
       }
 #else
-      if (type(obj)==FE_TSTRING && FE_STR_DATA(ctx, obj)) {
+      if ((type(obj)==FE_TSTRING || type(obj)==FE_TBYTES) && FE_STR_DATA(ctx, obj)) {
           free(FE_STR_DATA(ctx, obj));
       }
 #endif
@@ -940,7 +942,7 @@ static int equal(fe_Context *ctx, fe_Object *a, fe_Object *b) {
   if (a == b) { return 1; }
   if (type(a) != type(b)) { return 0; }
   if (type(a) == FE_TNUMBER) { return nval(a) == nval(b); }
-  if (type(a) == FE_TSTRING) {
+  if (type(a) == FE_TSTRING || type(a) == FE_TBYTES) {
     if (FE_STR_LEN(a) != FE_STR_LEN(b)) return 0;
 #ifdef FE_OPT_NO_MALLOC_STRINGS
     return equal_slab(ctx, a, b);
@@ -1372,13 +1374,14 @@ static uint32_t str_alloc(fe_Context *ctx, const char *src, size_t len, char fil
 }
 #endif
 
-static fe_Object* make_string_obj(fe_Context *ctx,
-                                  const char   *src,
-                                  size_t        len,
-                                  char fill_char)
+static fe_Object* make_data_obj(fe_Context *ctx,
+                                int           type_tag,
+                                const char   *src,
+                                size_t        len,
+                                char fill_char)
 {
     fe_Object *o = object(ctx);
-    settype(o, FE_TSTRING);
+    settype(o, type_tag);
     car(o) = FE_FIXNUM((intptr_t)len);
 
 #ifdef FE_OPT_NO_MALLOC_STRINGS
@@ -1387,7 +1390,7 @@ static fe_Object* make_string_obj(fe_Context *ctx,
     char *buf = malloc(len+1);
     if (!buf) fe_error(ctx, "out of memory (string)");
     ctx->bytes_since_gc += len + 1;
-    if (p)
+    if (src)
     {
       memcpy(buf, src, len);
     }
@@ -1403,12 +1406,22 @@ static fe_Object* make_string_obj(fe_Context *ctx,
 
 fe_Object* fe_string(fe_Context *ctx, const char *str, size_t len)
 {
-    return make_string_obj(ctx, str, len, 0);
+    return make_data_obj(ctx, FE_TSTRING, str, len, 0);
 }
 
 fe_Object* fe_string_raw(fe_Context *ctx, size_t len, char fill_char)
 {
-    return make_string_obj(ctx, NULL, len, fill_char);
+    return make_data_obj(ctx, FE_TSTRING, NULL, len, fill_char);
+}
+
+fe_Object* fe_bytes(fe_Context *ctx, const void *data, size_t len)
+{
+    return make_data_obj(ctx, FE_TBYTES, (const char*)data, len, 0);
+}
+
+fe_Object* fe_bytes_raw(fe_Context *ctx, size_t len, unsigned char fill_byte)
+{
+    return make_data_obj(ctx, FE_TBYTES, NULL, len, (char)fill_byte);
 }
 
 
@@ -1472,6 +1485,12 @@ fe_Object** fe_cdr_ptr(fe_Context *ctx, fe_Object *obj) {
 
 static void writestr(fe_Context *ctx, fe_WriteFn fn, void *udata, const char *s) {
   while (*s) { fn(ctx, udata, *s++); }
+}
+
+static void write_hex_byte(fe_Context *ctx, fe_WriteFn fn, void *udata, unsigned char byte) {
+  static const char hexdigits[] = "0123456789abcdef";
+  fn(ctx, udata, hexdigits[(byte >> 4) & 0x0f]);
+  fn(ctx, udata, hexdigits[byte & 0x0f]);
 }
 
 void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int qt) {
@@ -1553,6 +1572,43 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
       if (qt) fn(ctx, udata, '"');
       break;
 
+    case FE_TBYTES:
+      writestr(ctx, fn, udata, "#bytes[");
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+      {
+          size_t len = FE_STR_LEN(obj);
+          if (len > 0) {
+              uint32_t offset = obj->cdr.u32;
+              size_t remaining = len;
+              int first = 1;
+              while (offset != FE_SLAB_NULL && remaining > 0) {
+                  fe_Slab *slab = (fe_Slab*)(ctx->str_base + offset);
+                  size_t to_write = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
+                  size_t i;
+                  for (i = 0; i < to_write; i++) {
+                      if (!first) fn(ctx, udata, ' ');
+                      write_hex_byte(ctx, fn, udata, (unsigned char)slab->data[i]);
+                      first = 0;
+                  }
+                  remaining -= to_write;
+                  offset = slab->next;
+              }
+          }
+      }
+#else
+      {
+          size_t len = FE_STR_LEN(obj);
+          size_t i;
+          const unsigned char *p = (const unsigned char*)FE_STR_DATA(ctx, obj);
+          for (i = 0; i < len; i++) {
+              if (i > 0) fn(ctx, udata, ' ');
+              write_hex_byte(ctx, fn, udata, p[i]);
+          }
+      }
+#endif
+      fn(ctx, udata, ']');
+      break;
+
     case FE_TMAP: {
       fe_Map *map = mapdata(obj);
       int i;
@@ -1619,6 +1675,63 @@ size_t fe_strlen(fe_Context *ctx, fe_Object *obj)
 #else
   return strlen(FE_STR_DATA(ctx, obj));
 #endif
+}
+
+size_t fe_byteslen(fe_Context *ctx, fe_Object *obj)
+{
+  unused(ctx);
+  return FE_STR_LEN(checktype(ctx, obj, FE_TBYTES));
+}
+
+size_t fe_bytescopy(fe_Context *ctx, fe_Object *obj, size_t offset, void *dst, size_t size)
+{
+  size_t len;
+  unsigned char *out;
+
+  obj = checktype(ctx, obj, FE_TBYTES);
+  len = FE_STR_LEN(obj);
+  if (offset >= len || size == 0) {
+    return 0;
+  }
+  if (size > len - offset) {
+    size = len - offset;
+  }
+  out = (unsigned char*)dst;
+
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+  {
+    uint32_t slab_offset = obj->cdr.u32;
+    size_t remaining_offset = offset;
+    size_t remaining = size;
+
+    while (slab_offset != FE_SLAB_NULL && remaining > 0) {
+      fe_Slab *slab = (fe_Slab*)(ctx->str_base + slab_offset);
+      size_t slab_start = 0;
+      size_t available;
+      size_t to_copy;
+
+      if (remaining_offset >= FE_SLAB_DATA_SIZE) {
+        remaining_offset -= FE_SLAB_DATA_SIZE;
+        slab_offset = slab->next;
+        continue;
+      }
+      slab_start = remaining_offset;
+      available = FE_SLAB_DATA_SIZE - slab_start;
+      if (available > remaining) {
+        available = remaining;
+      }
+      to_copy = available;
+      memcpy(out, slab->data + slab_start, to_copy);
+      out += to_copy;
+      remaining -= to_copy;
+      remaining_offset = 0;
+      slab_offset = slab->next;
+    }
+  }
+#else
+  memcpy(out, FE_STR_DATA(ctx, obj) + offset, size);
+#endif
+  return size;
 }
 
 fe_Number fe_tonumber(fe_Context *ctx, fe_Object *obj) {
@@ -1758,7 +1871,7 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
             s_buf[len++] = chr;
             chr = fn(ctx, udata);
         }
-        return make_string_obj(ctx, s_buf, len, 0);
+        return make_data_obj(ctx, FE_TSTRING, s_buf, len, 0);
 #else
         size_t cap = GROW_STEP, len = 0;
         char *s_buf = malloc(cap);
@@ -1777,7 +1890,7 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
           s_buf[len++]=chr;
           chr = fn(ctx, udata);
         }
-        fe_Object* str_obj = make_string_obj(ctx, s_buf, len);
+        fe_Object* str_obj = make_data_obj(ctx, FE_TSTRING, s_buf, len, 0);
         free(s_buf);
         return str_obj;
 #endif

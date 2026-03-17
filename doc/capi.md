@@ -243,6 +243,7 @@ Useful constructors include:
 - `fe_number(ctx, fe_Number n)` for a boxed double
 - `fe_make_number(ctx, fe_Number n)` for a fixnum when possible, otherwise a boxed double
 - `fe_string(ctx, const char *s, size_t len)`
+- `fe_bytes(ctx, const void *p, size_t len)`
 - `fe_symbol(ctx, const char *s)`
 - `fe_map(ctx)` for a mutable string/symbol-keyed map
 - `fe_list(ctx, fe_Object **objs, int n)`
@@ -261,12 +262,28 @@ Useful inspection helpers include:
 - `fe_tostring(ctx, obj, char *dst, int size)`
 - `fe_toptr(ctx, obj)`
 - `fe_strlen(ctx, obj)`
+- `fe_byteslen(ctx, obj)`
+- `fe_bytescopy(ctx, obj, offset, dst, size)`
 
 For numbers, `fe_type()` returns `FE_TNUMBER` for both fixnums and boxed doubles. Use `FE_IS_FIXNUM(obj)` if you need to distinguish them.
 
 `fe_car(ctx, obj)` and `fe_cdr(ctx, obj)` are nil-safe: if `obj` is `nil`, they return `nil`.
 
 > `fe_cdr_ptr(ctx, obj)` is different: it throws an error on `nil`, because returning a writable pointer to nothing would be unsafe.
+
+### Bytes
+
+`bytes` values are immutable raw byte buffers. Unlike strings, they are intended for binary I/O and preserve embedded zero bytes cleanly.
+
+```c
+static const unsigned char payload[3] = {0x41, 0x00, 0xff};
+unsigned char copy[3];
+fe_Object *bytes = fe_bytes(ctx, payload, sizeof(payload));
+
+fe_bytescopy(ctx, bytes, 0, copy, sizeof(copy));
+```
+
+At the language level, extended builtins expose helpers such as `tobytes`, `makebytes`, `byteslen`, `byteat`, `byteslice`, `readbytes`, and `writebytes`.
 
 ### Maps
 

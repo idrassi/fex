@@ -111,6 +111,24 @@ CASES = [
         ),
     },
     {
+        "name": "bytes",
+        "script": ROOT / "scripts" / "test_bytes.fex",
+        "args": ["--builtins"],
+        "exit_code": 0,
+        "stdout": (
+            "--- Bytes Regression ---\n"
+            "typeof(data):bytes\n"
+            "isbytes(data):true\n"
+            "byteslen(data):3\n"
+            "byteat0:65\n"
+            "byteat2:67\n"
+            "makebytes:#bytes[ff ff ff]\n"
+            "slice:#bytes[42 43]\n"
+            "loaded eq:true\n"
+            "loaded:#bytes[41 42 43]\n"
+        ),
+    },
+    {
         "name": "builtin categories",
         "source": "let q = substring(tojson(\"x\"), 0, 1);\nlet raw = concat(\"{\", q, \"name\", q, \":\", q, \"fex\", q, \"}\");\nprintln(parsejson(raw).name);\n",
         "args": ["--builtin", "string,data"],

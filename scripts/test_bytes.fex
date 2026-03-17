@@ -1,0 +1,21 @@
+println("--- Bytes Regression ---");
+
+let data = tobytes("ABC");
+println("typeof(data):", typeof(data));
+println("isbytes(data):", isbytes(data));
+println("byteslen(data):", byteslen(data));
+println("byteat0:", byteat(data, 0));
+println("byteat2:", byteat(data, 2));
+
+let filled = makebytes(3, 255);
+println("makebytes:", filled);
+
+let slice = byteslice(data, 1, 3);
+println("slice:", slice);
+
+let out_path = "tmp_bytes.bin";
+writebytes(out_path, data);
+let loaded = readbytes(out_path);
+
+println("loaded eq:", is(loaded, data));
+println("loaded:", loaded);

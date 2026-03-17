@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <math.h>
 #include <time.h>
 #include <ctype.h>
@@ -146,6 +147,59 @@ static char* string_to_cstr(fe_Context *ctx, fe_Object *str_obj, const char *fun
     }
     fe_tostring(ctx, str_obj, buffer, (int)(len + 1));
     return buffer;
+}
+
+static unsigned char* bytes_to_buffer(fe_Context *ctx, fe_Object *bytes_obj, const char *func_name, size_t *out_len) {
+    size_t len;
+    unsigned char *buffer;
+    char msg[128];
+
+    if (fe_type(ctx, bytes_obj) != FE_TBYTES) {
+        sprintf(msg, "%s: type mismatch", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    len = fe_byteslen(ctx, bytes_obj);
+    buffer = malloc((len > 0) ? len : 1);
+    if (!buffer) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    if (len > 0) {
+        fe_bytescopy(ctx, bytes_obj, 0, buffer, len);
+    }
+    *out_len = len;
+    return buffer;
+}
+
+static fe_Object* string_to_bytes(fe_Context *ctx, fe_Object *str_obj, const char *func_name) {
+    size_t len;
+    char *buffer;
+    fe_Object *result;
+
+    if (fe_type(ctx, str_obj) != FE_TSTRING) {
+        char msg[128];
+        sprintf(msg, "%s: type mismatch", func_name);
+        fe_error(ctx, msg);
+        return fe_nil(ctx);
+    }
+    len = fe_strlen(ctx, str_obj);
+    if (len > 0 && len + 1 > (size_t)INT_MAX) {
+        fe_error(ctx, "tobytes: string too large");
+        return fe_nil(ctx);
+    }
+    buffer = malloc((len > 0) ? len + 1 : 1);
+    if (!buffer) {
+        fe_error(ctx, "tobytes: out of memory");
+        return fe_nil(ctx);
+    }
+    if (len > 0) {
+        fe_tostring(ctx, str_obj, buffer, (int)(len + 1));
+    }
+    result = fe_bytes(ctx, buffer, len);
+    free(buffer);
+    return result;
 }
 
 static int is_path_separator_char(char chr) {
@@ -597,6 +651,121 @@ static fe_Object* builtin_make_string(fe_Context *ctx, fe_Object *args) {
     fe_Object *obj = fe_string_raw(ctx, length, fill_char);
     
     return obj;
+}
+
+static fe_Object* builtin_make_bytes(fe_Context *ctx, fe_Object *args) {
+    fe_Object *length_obj;
+    fe_Object *fill_obj;
+    fe_Number length_num;
+    int length;
+    int fill = 0;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "makebytes");
+    length_obj = fe_nextarg(ctx, &args);
+    fill_obj = fe_isnil(ctx, args) ? fe_nil(ctx) : fe_nextarg(ctx, &args);
+    FEX_CHECK_TYPE(ctx, length_obj, FE_TNUMBER, "makebytes");
+    if (!fe_isnil(ctx, fill_obj)) {
+        FEX_CHECK_TYPE(ctx, fill_obj, FE_TNUMBER, "makebytes");
+        fill = (int)fe_tonumber(ctx, fill_obj);
+        if (fill < 0 || fill > 255) {
+            fe_error(ctx, "makebytes: fill must be between 0 and 255");
+            return fe_nil(ctx);
+        }
+    }
+
+    length_num = fe_tonumber(ctx, length_obj);
+    length = (int)length_num;
+    if (length < 0) {
+        fe_error(ctx, "makebytes: length must be non-negative");
+        return fe_nil(ctx);
+    }
+    return fe_bytes_raw(ctx, (size_t)length, (unsigned char)fill);
+}
+
+static fe_Object* builtin_to_bytes(fe_Context *ctx, fe_Object *args) {
+    fe_Object *obj;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "tobytes");
+    obj = fe_nextarg(ctx, &args);
+    if (fe_type(ctx, obj) == FE_TBYTES) {
+        return obj;
+    }
+    if (fe_type(ctx, obj) == FE_TSTRING) {
+        return string_to_bytes(ctx, obj, "tobytes");
+    }
+    fe_error(ctx, "tobytes: type mismatch");
+    return fe_nil(ctx);
+}
+
+static fe_Object* builtin_bytes_length(fe_Context *ctx, fe_Object *args) {
+    fe_Object *bytes_obj;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "byteslen");
+    bytes_obj = fe_nextarg(ctx, &args);
+    FEX_CHECK_TYPE(ctx, bytes_obj, FE_TBYTES, "byteslen");
+    return fe_make_number(ctx, (fe_Number)fe_byteslen(ctx, bytes_obj));
+}
+
+static fe_Object* builtin_byte_at(fe_Context *ctx, fe_Object *args) {
+    fe_Object *bytes_obj;
+    fe_Object *index_obj;
+    int index;
+    unsigned char value = 0;
+
+    FEX_CHECK_ARGS(ctx, args, 2, "byteat");
+    bytes_obj = fe_nextarg(ctx, &args);
+    index_obj = fe_nextarg(ctx, &args);
+    FEX_CHECK_TYPE(ctx, bytes_obj, FE_TBYTES, "byteat");
+    FEX_CHECK_TYPE(ctx, index_obj, FE_TNUMBER, "byteat");
+
+    index = (int)fe_tonumber(ctx, index_obj);
+    if (index < 0 || (size_t)index >= fe_byteslen(ctx, bytes_obj)) {
+        fe_error(ctx, "byteat: index out of range");
+        return fe_nil(ctx);
+    }
+    fe_bytescopy(ctx, bytes_obj, (size_t)index, &value, 1);
+    return fe_make_number(ctx, (fe_Number)value);
+}
+
+static fe_Object* builtin_bytes_slice(fe_Context *ctx, fe_Object *args) {
+    fe_Object *bytes_obj;
+    fe_Object *start_obj;
+    fe_Object *end_obj;
+    size_t len;
+    int start;
+    int end;
+    size_t slice_len;
+    unsigned char *buffer;
+    fe_Object *result;
+
+    FEX_CHECK_ARGS(ctx, args, 2, "byteslice");
+    bytes_obj = fe_nextarg(ctx, &args);
+    start_obj = fe_nextarg(ctx, &args);
+    end_obj = fe_isnil(ctx, args) ? fe_nil(ctx) : fe_nextarg(ctx, &args);
+    FEX_CHECK_TYPE(ctx, bytes_obj, FE_TBYTES, "byteslice");
+    FEX_CHECK_TYPE(ctx, start_obj, FE_TNUMBER, "byteslice");
+
+    len = fe_byteslen(ctx, bytes_obj);
+    start = (int)fe_tonumber(ctx, start_obj);
+    end = fe_isnil(ctx, end_obj) ? (int)len : (int)fe_tonumber(ctx, end_obj);
+
+    if (start < 0) start = 0;
+    if (end < 0) end = 0;
+    if (end > (int)len) end = (int)len;
+    if (start >= end) {
+        return fe_bytes(ctx, "", 0);
+    }
+
+    slice_len = (size_t)(end - start);
+    buffer = malloc(slice_len);
+    if (!buffer) {
+        fe_error(ctx, "byteslice: out of memory");
+        return fe_nil(ctx);
+    }
+    fe_bytescopy(ctx, bytes_obj, (size_t)start, buffer, slice_len);
+    result = fe_bytes(ctx, buffer, slice_len);
+    free(buffer);
+    return result;
 }
 
 /*
@@ -1427,6 +1596,27 @@ static fe_Object* builtin_read_file(fe_Context *ctx, fe_Object *args) {
     return result;
 }
 
+static fe_Object* builtin_read_bytes(fe_Context *ctx, fe_Object *args) {
+    fe_Object *filename_obj;
+    char *filename;
+    char *buffer;
+    size_t bytes_read;
+    fe_Object *result;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "readbytes");
+    filename_obj = fe_nextarg(ctx, &args);
+    filename = string_to_cstr(ctx, filename_obj, "readbytes");
+    if (!filename) return fe_nil(ctx);
+
+    buffer = read_file_dynamic(ctx, filename, 256 * 1024, &bytes_read, "readbytes");
+    free(filename);
+    if (!buffer) return fe_nil(ctx);
+
+    result = fe_bytes(ctx, buffer, bytes_read);
+    free(buffer);
+    return result;
+}
+
 static fe_Object* builtin_write_file(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 2, "writefile");
     fe_Object *filename_obj = fe_nextarg(ctx, &args);
@@ -1458,6 +1648,50 @@ static fe_Object* builtin_write_file(fe_Context *ctx, fe_Object *args) {
         free(filename);
         free(content);
         fe_error(ctx, "writefile: error writing file");
+        return fe_nil(ctx);
+    }
+
+    fclose(file);
+    free(filename);
+    free(content);
+    return fe_make_number(ctx, (fe_Number)written);
+}
+
+static fe_Object* builtin_write_bytes(fe_Context *ctx, fe_Object *args) {
+    fe_Object *filename_obj;
+    fe_Object *content_obj;
+    char *filename;
+    unsigned char *content;
+    size_t content_len;
+    FILE *file;
+    size_t written;
+
+    FEX_CHECK_ARGS(ctx, args, 2, "writebytes");
+    filename_obj = fe_nextarg(ctx, &args);
+    content_obj = fe_nextarg(ctx, &args);
+    filename = string_to_cstr(ctx, filename_obj, "writebytes");
+    if (!filename) return fe_nil(ctx);
+
+    content = bytes_to_buffer(ctx, content_obj, "writebytes", &content_len);
+    if (!content) {
+        free(filename);
+        return fe_nil(ctx);
+    }
+
+    file = fopen(filename, "wb");
+    if (!file) {
+        free(filename);
+        free(content);
+        fe_error(ctx, "writebytes: could not open file for writing");
+        return fe_nil(ctx);
+    }
+
+    written = fwrite(content, 1, content_len, file);
+    if (written != content_len || ferror(file)) {
+        fclose(file);
+        free(filename);
+        free(content);
+        fe_error(ctx, "writebytes: error writing file");
         return fe_nil(ctx);
     }
 
@@ -1599,6 +1833,7 @@ static fe_Object* builtin_type_of(fe_Context *ctx, fe_Object *args) {
         case FE_TNIL: type_name = "nil"; break;
         case FE_TNUMBER: type_name = "number"; break;
         case FE_TSTRING: type_name = "string"; break;
+        case FE_TBYTES: type_name = "bytes"; break;
         case FE_TSYMBOL: type_name = "symbol"; break;
         case FE_TPAIR: type_name = "pair"; break;
         case FE_TFUNC: type_name = "function"; break;
@@ -1666,6 +1901,11 @@ static fe_Object* builtin_is_string(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "isstring");
     fe_Object *obj = fe_nextarg(ctx, &args);
     return fe_bool(ctx, fe_type(ctx, obj) == FE_TSTRING);
+}
+
+static fe_Object* builtin_is_bytes(fe_Context *ctx, fe_Object *args) {
+    FEX_CHECK_ARGS(ctx, args, 1, "isbytes");
+    return fe_bool(ctx, fe_type(ctx, fe_nextarg(ctx, &args)) == FE_TBYTES);
 }
 
 static fe_Object* builtin_is_list(fe_Context *ctx, fe_Object *args) {
@@ -1745,7 +1985,9 @@ static void register_io_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "dirname"), fe_cfunc(ctx, builtin_dirname));
     fe_set(ctx, fe_symbol(ctx, "basename"), fe_cfunc(ctx, builtin_basename));
     fe_set(ctx, fe_symbol(ctx, "readfile"), fe_cfunc(ctx, builtin_read_file));
+    fe_set(ctx, fe_symbol(ctx, "readbytes"), fe_cfunc(ctx, builtin_read_bytes));
     fe_set(ctx, fe_symbol(ctx, "writefile"), fe_cfunc(ctx, builtin_write_file));
+    fe_set(ctx, fe_symbol(ctx, "writebytes"), fe_cfunc(ctx, builtin_write_bytes));
     fe_set(ctx, fe_symbol(ctx, "readjson"), fe_cfunc(ctx, builtin_read_json));
     fe_set(ctx, fe_symbol(ctx, "writejson"), fe_cfunc(ctx, builtin_write_json));
     
@@ -1762,6 +2004,11 @@ static void register_data_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "mapdelete"), fe_cfunc(ctx, builtin_map_delete));
     fe_set(ctx, fe_symbol(ctx, "mapkeys"), fe_cfunc(ctx, builtin_map_keys));
     fe_set(ctx, fe_symbol(ctx, "mapcount"), fe_cfunc(ctx, builtin_map_count));
+    fe_set(ctx, fe_symbol(ctx, "makebytes"), fe_cfunc(ctx, builtin_make_bytes));
+    fe_set(ctx, fe_symbol(ctx, "tobytes"), fe_cfunc(ctx, builtin_to_bytes));
+    fe_set(ctx, fe_symbol(ctx, "byteslen"), fe_cfunc(ctx, builtin_bytes_length));
+    fe_set(ctx, fe_symbol(ctx, "byteat"), fe_cfunc(ctx, builtin_byte_at));
+    fe_set(ctx, fe_symbol(ctx, "byteslice"), fe_cfunc(ctx, builtin_bytes_slice));
     fe_set(ctx, fe_symbol(ctx, "parsejson"), fe_cfunc(ctx, builtin_parse_json));
     fe_set(ctx, fe_symbol(ctx, "tojson"), fe_cfunc(ctx, builtin_to_json));
 
@@ -1787,6 +2034,7 @@ static void register_type_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "isnil"), fe_cfunc(ctx, builtin_is_nil));
     fe_set(ctx, fe_symbol(ctx, "isnumber"), fe_cfunc(ctx, builtin_is_number));
     fe_set(ctx, fe_symbol(ctx, "isstring"), fe_cfunc(ctx, builtin_is_string));
+    fe_set(ctx, fe_symbol(ctx, "isbytes"), fe_cfunc(ctx, builtin_is_bytes));
     fe_set(ctx, fe_symbol(ctx, "islist"), fe_cfunc(ctx, builtin_is_list));
     fe_set(ctx, fe_symbol(ctx, "ismap"), fe_cfunc(ctx, builtin_is_map));
 

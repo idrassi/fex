@@ -190,6 +190,19 @@ writejson(path, cfg);
 println(readjson(path).port);            // 8080
 ```
 
+### Bytes And Binary I/O
+
+FeX now also has a native `bytes` type for binary-safe file handling:
+
+```c
+let payload = tobytes("ABC");
+println(payload);                        // #bytes[41 42 43]
+println(byteat(payload, 1));             // 66
+
+writebytes("payload.bin", payload);
+println(readbytes("payload.bin"));       // #bytes[41 42 43]
+```
+
 ## Embedding API
 
 FeX is easy to embed. For host applications, prefer the recoverable `fex_try_*` APIs so script failures stay in-process and return structured diagnostics.

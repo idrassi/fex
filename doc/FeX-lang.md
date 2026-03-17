@@ -142,7 +142,7 @@ The base FeX environment always includes:
 
 Pair selectors such as `.head` and `.tail`, and the `::` operator, are syntax sugar over these primitives rather than separate runtime functions.
 
-Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, and `pathjoin` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe` or `--builtin string,data`. For runaway-script protection, the CLI also supports `--max-steps N` and `--timeout-ms N`. In embedded use, call:
+Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `tobytes`, and `readbytes` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe` or `--builtin string,data`. For runaway-script protection, the CLI also supports `--max-steps N` and `--timeout-ms N`. In embedded use, call:
 
 ```c
 fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
@@ -209,6 +209,17 @@ let path = pathjoin("build", "app.json");
 
 writejson(path, cfg);
 println(readjson(path).workers);
+```
+
+### Bytes And Binary Files
+
+```fex
+let payload = tobytes("ABC");
+println(payload);            // #bytes[41 42 43]
+println(byteat(payload, 2)); // 67
+
+writebytes("payload.bin", payload);
+println(readbytes("payload.bin"));
 ```
 
 ### REPL Workflow

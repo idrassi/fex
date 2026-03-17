@@ -47,6 +47,7 @@ typedef struct { fe_ErrorFn error; fe_CFunc mark, gc; } fe_Handlers;
 
 #define FE_STR_LEN(obj)    (FE_UNBOX_FIXNUM((obj)->car.o))
 #define FE_IS_STRING(o)    (!FE_IS_FIXNUM(o) && ((o)->flags>>2)==FE_TSTRING)
+#define FE_IS_BYTES(o)     (!FE_IS_FIXNUM(o) && ((o)->flags>>2)==FE_TBYTES)
 
 
 /* Boolean: ...xxx0010 -> false, ...xxx0110 -> true  */
@@ -60,7 +61,7 @@ typedef struct { fe_ErrorFn error; fe_CFunc mark, gc; } fe_Handlers;
 fe_Number fe_num_value(fe_Object *o);
 
 enum {
-  FE_TPAIR, FE_TFREE, FE_TNIL, FE_TNUMBER, FE_TSYMBOL, FE_TSTRING,
+  FE_TPAIR, FE_TFREE, FE_TNIL, FE_TNUMBER, FE_TSYMBOL, FE_TSTRING, FE_TBYTES,
   FE_TFUNC, FE_TMACRO, FE_TPRIM, FE_TCFUNC, FE_TPTR, FE_TMAP,
   FE_TBOOLEAN
 };
@@ -90,6 +91,8 @@ fe_Object* fe_number(fe_Context *ctx, fe_Number n);
 fe_Object *fe_make_number(fe_Context *ctx, fe_Number v); /* automatic fixnum or boxed double */
 fe_Object* fe_string(fe_Context *ctx, const char *str, size_t len);
 fe_Object* fe_string_raw(fe_Context *ctx, size_t len, char fill_char);
+fe_Object* fe_bytes(fe_Context *ctx, const void *data, size_t len);
+fe_Object* fe_bytes_raw(fe_Context *ctx, size_t len, unsigned char fill_byte);
 fe_Object* fe_symbol(fe_Context *ctx, const char *name);
 int fe_symbol_name_eq(fe_Context *ctx, fe_Object *sym, const char *str);
 fe_Object* fe_cfunc(fe_Context *ctx, fe_CFunc fn);
@@ -109,6 +112,8 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
 void fe_writefp(fe_Context *ctx, fe_Object *obj, FILE *fp);
 int fe_tostring(fe_Context *ctx, fe_Object *obj, char *dst, int size);
 size_t fe_strlen(fe_Context *ctx, fe_Object *obj);/* caller must ensure obj is a string */
+size_t fe_byteslen(fe_Context *ctx, fe_Object *obj);/* caller must ensure obj is bytes */
+size_t fe_bytescopy(fe_Context *ctx, fe_Object *obj, size_t offset, void *dst, size_t size);
 fe_Number fe_tonumber(fe_Context *ctx, fe_Object *obj);
 void* fe_toptr(fe_Context *ctx, fe_Object *obj);
 void fe_set(fe_Context *ctx, fe_Object *sym, fe_Object *v);

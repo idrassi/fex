@@ -111,6 +111,28 @@ int main(void) {
         return fail("expected file I/O error");
     }
 
+    {
+        static const unsigned char raw_bytes[3] = {0x41, 0x00, 0xff};
+        unsigned char copied_bytes[3];
+        fe_Object *bytes = fe_bytes(ctx, raw_bytes, sizeof(raw_bytes));
+        if (fe_byteslen(ctx, bytes) != sizeof(raw_bytes)) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_byteslen to report the stored byte length");
+        }
+        memset(copied_bytes, 0, sizeof(copied_bytes));
+        if (fe_bytescopy(ctx, bytes, 0, copied_bytes, sizeof(copied_bytes)) != sizeof(copied_bytes)) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_bytescopy to copy the requested range");
+        }
+        if (copied_bytes[0] != raw_bytes[0] || copied_bytes[1] != raw_bytes[1] || copied_bytes[2] != raw_bytes[2]) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_bytescopy to preserve raw byte values");
+        }
+    }
+
     fe_set_step_limit(ctx, 64);
     status = fex_try_do_string(
         ctx,
