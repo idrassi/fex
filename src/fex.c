@@ -51,7 +51,7 @@ static void fex_on_error(fe_Context *ctx,const char *msg,fe_Object *cl)
             fex_print_line(sp->source, sp->start_line);
             fputc('\n',stderr);
         } else {
-            /* fallback – same as old printing */
+            /* fallback - same as old printing */
             char buf[64]; fe_tostring(ctx, fe_car(ctx,cl), buf, sizeof buf);
             fprintf(stderr,"[%d] %s\n", depth, buf);
         }
@@ -60,7 +60,7 @@ static void fex_on_error(fe_Context *ctx,const char *msg,fe_Object *cl)
 }
 
 
-/* Convenience: span collapses to the “previous” token only ------------- */
+/* Convenience: span collapses to the previous token only ---------------- */
 #define CONS1(a,d) fex_cons_tok(P.ctx,(a),(d),P.previous,P.previous)
 /*
 ================================================================================
@@ -75,7 +75,7 @@ static void fex_on_error(fe_Context *ctx,const char *msg,fe_Object *cl)
  */
 static fe_Object* builtin_print(fe_Context *ctx, fe_Object *args) {
     while (!fe_isnil(ctx, args)) {
-        
+
         fe_Object* arg = fe_car(ctx, args);
         /* Use fe_writefp to print the fe_Object to stdout.
          * It handles all types correctly (e.g., strings are unquoted).
@@ -153,12 +153,12 @@ void fex_init_with_config(fe_Context *ctx, FexConfig config) {
         fe_symbol(ctx, "readnumber"),
         fe_cfunc(ctx, builtin_read_number)
     );
-    
+
     /* Initialize extended builtins if requested */
     if (config & FEX_CONFIG_ENABLE_EXTENDED_BUILTINS) {
         fex_init_all_builtins(ctx);
     }
-    
+
     fe_restoregc(ctx, gc_save);
 }
 
@@ -189,7 +189,7 @@ typedef enum {
   TOKEN_AND, TOKEN_ELSE, TOKEN_EXPORT, TOKEN_FALSE, TOKEN_FN, TOKEN_IF,
   TOKEN_IMPORT, TOKEN_LET, TOKEN_MODULE, TOKEN_NIL, TOKEN_OR, TOKEN_RETURN,
   TOKEN_TRUE, TOKEN_WHILE,
-
+  TOKEN_COLON_COLON,
   TOKEN_ERROR, TOKEN_EOF
 } TokenType;
 
@@ -212,7 +212,7 @@ typedef struct {
 
 static Lexer L;
 
-/* Build a pair *and* attach the current token’s span ------------------- */
+/* Build a pair and attach the current token span ------------------------ */
 static fe_Object *fex_cons_tok(fe_Context *c,
                                fe_Object *car, fe_Object *cdr,
                                Token start, Token end)
@@ -385,6 +385,8 @@ static Token scan_token() {
     case '=': return make_token(match('=') ? TOKEN_EQUAL_EQUAL : TOKEN_EQUAL);
     case '<': return make_token(match('=') ? TOKEN_LESS_EQUAL : TOKEN_LESS);
     case '>': return make_token(match('=') ? TOKEN_GREATER_EQUAL : TOKEN_GREATER);
+    case ':': return make_token(match(':') ? TOKEN_COLON_COLON
+                                           : TOKEN_ERROR);   /* lone ':' is illegal */
     case '"': return lex_string();
   }
 
@@ -490,6 +492,7 @@ ParseRule rules[] = {
   [TOKEN_RETURN]        = {NULL,           NULL,           PREC_NONE},
   [TOKEN_TRUE]          = {parse_literal,  NULL,           PREC_NONE},
   [TOKEN_WHILE]         = {NULL,           NULL,           PREC_NONE},
+  [TOKEN_COLON_COLON]    = {NULL,           INFIX_MARKER,   PREC_TERM},
   [TOKEN_ERROR]         = {NULL,           NULL,           PREC_NONE},
   [TOKEN_EOF]           = {NULL,           NULL,           PREC_NONE},
 };
@@ -557,7 +560,7 @@ static fe_Object* make_unary(const char* op, fe_Object* right) {
     fe_pushgc(c, op_s);
     fe_Object *list = fe_cons(c, right, fex_nil(c));
     fe_Object *res  = CONS1(op_s, list);
-    fe_restoregc(c, guard);                  /* drop temps – res survives */
+    fe_restoregc(c, guard);                  /* drop temps; res survives */
     return res;
 }
 
@@ -622,6 +625,18 @@ static fe_Object* parse_unary() {
   }
 }
 
+static const char* selector_setter_name(fe_Object *property) {
+    if (fe_symbol_name_eq(P.ctx, property, "head") ||
+        fe_symbol_name_eq(P.ctx, property, "first")) {
+        return "setcar";
+    }
+    if (fe_symbol_name_eq(P.ctx, property, "tail") ||
+        fe_symbol_name_eq(P.ctx, property, "rest")) {
+        return "setcdr";
+    }
+    return NULL;
+}
+
 static fe_Object* parse_precedence_new(Precedence precedence) {
     fe_Object* nil_obj = fe_nil(P.ctx);
     parser_advance();
@@ -639,13 +654,37 @@ static fe_Object* parse_precedence_new(Precedence precedence) {
         ParseRule* rule = &rules[op_type];
 
         if (op_type == TOKEN_EQUAL) { /* Assignment */
-            if (fe_type(P.ctx, left) != FE_TSYMBOL) {
+            fe_Object* right = parse_precedence_new(PREC_ASSIGNMENT);
+
+            /* Variable assignment */
+            if (fe_type(P.ctx, left) == FE_TSYMBOL) {
+                left = make_binary("=", left, right);
+
+            /* Selector assignment, e.g. pair.head = expr */
+            } else if (fe_type(P.ctx, left) == FE_TPAIR) {
+                fe_Object* op = fe_car(P.ctx, left);
+                if (fe_symbol_name_eq(P.ctx, op, "get")) {
+                    const char *setter;
+                    fe_Object* args = fe_cdr(P.ctx, left); /* (target . (prop . nil)) */
+                    fe_Object* target = fe_car(P.ctx, args);
+                    fe_Object* prop = fe_car(P.ctx, fe_cdr(P.ctx, args));
+
+                    setter = selector_setter_name(prop);
+
+                    if (setter != NULL) {
+                        left = make_binary(setter, target, right);
+                    } else {
+                        error("Only .head, .first, .tail, and .rest may appear on left side of '='.");
+                        return nil_obj;
+                    }
+                } else {
+                    error("Invalid assignment target.");
+                    return nil_obj;
+                }
+            } else {
                 error("Invalid assignment target.");
                 return nil_obj;
             }
-            fe_Object* right = parse_precedence_new(PREC_ASSIGNMENT);
-            left = make_binary("=", left, right);
-
         } else if (op_type == TOKEN_LPAREN) { /* Function call */
             fe_Object *nil_obj = fex_nil(P.ctx);
             fe_Object *args_head = nil_obj;
@@ -663,9 +702,16 @@ static fe_Object* parse_precedence_new(Precedence precedence) {
         } else if (op_type == TOKEN_DOT) { /* Member access */
             consume(TOKEN_IDENTIFIER, "Expect property name after '.'.");
             fe_Object* property = symbol_from_token(&P.previous);
+            /* Pair selector sugar is handled by P_GET at runtime. */
             left = make_binary("get", left, property);
         } else { /* Standard binary operator */
+            fe_Object* right;
             const char* op_str;
+            if (op_type == TOKEN_COLON_COLON) {
+                right = parse_precedence_new(rule->precedence);
+                left = make_binary("cons", left, right);
+                continue;
+            }
             switch(op_type) {
                 case TOKEN_PLUS: op_str = "+"; break;
                 case TOKEN_MINUS: op_str = "-"; break;
@@ -681,8 +727,8 @@ static fe_Object* parse_precedence_new(Precedence precedence) {
                 case TOKEN_OR: op_str = "or"; break;
                 default: error("Unhandled infix operator."); return nil_obj;
             }
-            fe_Object* right = parse_precedence_new((Precedence)(rule->precedence + 1));
-            
+            right = parse_precedence_new((Precedence)(rule->precedence + 1));
+
             if (op_type == TOKEN_BANG_EQUAL) {
                 left = make_binary("is", left, right);
                 left = make_unary("not", left);
@@ -717,7 +763,7 @@ static fe_Object* block() {
 
     if (count == 0) return nil_obj;
     if (count == 1) return fe_car(P.ctx, head);
-    
+
     return CONS1(fe_symbol(P.ctx, "do"), head);
 }
 
@@ -857,7 +903,7 @@ static fe_Object* if_statement() {
     if (parser_match(TOKEN_ELSE)) {
         else_branch = statement();
     }
-    
+
     fe_Object* list = fe_cons(P.ctx, else_branch, nil_obj);
     list = fe_cons(P.ctx, then_branch, list);
     list = fe_cons(P.ctx, condition, list);
@@ -870,7 +916,7 @@ static fe_Object* while_statement() {
     fe_Object* condition = expression();
     consume(TOKEN_RPAREN, "Expect ')' after condition.");
     fe_Object* body = statement();
-    
+
     fe_Object* list = fe_cons(P.ctx, body, nil_obj);
     list = fe_cons(P.ctx, condition, list);
     return CONS1(fe_symbol(P.ctx, "while"), list);
@@ -951,7 +997,7 @@ fe_Object* fex_compile(fe_Context *ctx, const char *source) {
     P.had_error = 0;
     P.panic_mode = 0;
     fe_Object* nil_obj = fex_nil(P.ctx);
-    
+
     parser_advance();
 
     fe_Object *head = nil_obj;
@@ -972,7 +1018,7 @@ fe_Object* fex_compile(fe_Context *ctx, const char *source) {
         count++;
         if (P.had_error) break;
     }
-    
+
     if (P.had_error || L.had_error) return NULL;
 
     fe_Object *program;
@@ -980,7 +1026,7 @@ fe_Object* fex_compile(fe_Context *ctx, const char *source) {
     else if (count == 1)  program = fe_car(ctx, head);
     else                  program = CONS1(fe_symbol(ctx, "do"), head);
 
-    /* hand the finished AST back still rooted – caller pushes it again
+    /* hand the finished AST back still rooted - caller pushes it again
        immediately, and later pops the whole frame, so no leak occurs.   */
     fe_pushgc(ctx, program);
     return program;

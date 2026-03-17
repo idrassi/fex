@@ -36,7 +36,7 @@ typedef struct { fe_ErrorFn error; fe_CFunc mark, gc; } fe_Handlers;
 #define FE_IS_FIXNUM(x)    (((uintptr_t)(x) & 1u) != 0)
 #define FE_FIXNUM(n)       ((fe_Object*)(((intptr_t)(n) << 1) | 1))
 #define FE_UNBOX_FIXNUM(x) ((intptr_t)(x) >> 1)
-#define fe_fixnum(n)       FE_FIXNUM(n)          /* public alias – convenience */
+#define fe_fixnum(n)       FE_FIXNUM(n)          /* public alias - convenience */
 
 /* String data access. Under FE_OPT_NO_MALLOC_STRINGS, string data is in a separate
  * arena and requires the context to resolve an offset to a pointer. */
@@ -83,6 +83,7 @@ fe_Object *fe_make_number(fe_Context *ctx, fe_Number v); /* automatic fixnum or 
 fe_Object* fe_string(fe_Context *ctx, const char *str, size_t len);
 fe_Object* fe_string_raw(fe_Context *ctx, size_t len, char fill_char);
 fe_Object* fe_symbol(fe_Context *ctx, const char *name);
+int fe_symbol_name_eq(fe_Context *ctx, fe_Object *sym, const char *str);
 fe_Object* fe_cfunc(fe_Context *ctx, fe_CFunc fn);
 fe_Object* fe_ptr(fe_Context *ctx, void *ptr);
 fe_Object* fe_list(fe_Context *ctx, fe_Object **objs, int n);

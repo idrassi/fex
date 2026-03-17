@@ -145,7 +145,7 @@ static int list_has(fe_Object *list, fe_Object *item) {
 /* Truth test that all new code should use                               */
 static int fe_truthy(fe_Object *o) {
     return !FE_IS_FALSE(o) && !isnil(o);
-} 
+}
 
 static void analyze(fe_Context *ctx, fe_Object *node, fe_Object *bound, fe_Object **free_vars) {
   /* Base case: atom. If it's a symbol not in our bound list, it's free. */
@@ -192,7 +192,7 @@ static void analyze(fe_Context *ctx, fe_Object *node, fe_Object *bound, fe_Objec
     fe_restoregc(ctx, gc);
     return;
   }
-  
+
   if (op == fn_sym || op == mac_sym) {
     fe_Object *params = car(args);
     fe_Object *body = car(cdr(args));
@@ -269,15 +269,15 @@ fe_Object* fe_nextarg(fe_Context *ctx, fe_Object **arg) {
 static fe_Object* checktype(fe_Context *ctx, fe_Object *obj, int type) {
   char buf[64];
   int actual_type = type(obj);
-  
+
   /* Special case: allow fixnums when expecting numbers */
   if (type == FE_TNUMBER && FE_IS_FIXNUM(obj)) {
     return obj;
   }
-  
+
   if (actual_type != type) {
-    sprintf(buf, "expected %s, got %s", 
-            typenames[type], 
+    sprintf(buf, "expected %s, got %s",
+            typenames[type],
             FE_IS_FIXNUM(obj) ? "number" : typenames[actual_type]);
     fe_error(ctx, buf);
   }
@@ -286,7 +286,7 @@ static fe_Object* checktype(fe_Context *ctx, fe_Object *obj, int type) {
 
 static fe_Object* checknum(fe_Context *ctx, fe_Object *obj)
 {
-    if (FE_IS_FIXNUM(obj)) return obj;           /* fine � immediate */
+    if (FE_IS_FIXNUM(obj)) return obj;           /* fine - immediate */
     return checktype(ctx, obj, FE_TNUMBER);      /* boxed double or error */
 }
 
@@ -312,7 +312,7 @@ fe_Object *fe_make_number(fe_Context *ctx, fe_Number v)
         /* 2. Does it fit in the fixnum range for this word size?     */
         intptr_t i = (intptr_t)iv;
         intptr_t shr = i >> (8*sizeof(intptr_t)-2);   /* sign-extend  */
-        if (shr == 0 || shr == -1) {                  /* fits */      
+        if (shr == 0 || shr == -1) {                  /* fits */
             return FE_FIXNUM(i);
         }
     }
@@ -332,7 +332,7 @@ void fe_pushgc(fe_Context *ctx, fe_Object *obj) {
   if (FE_IS_FIXNUM(obj) || FE_IS_BOOLEAN(obj) || obj == &nil) {
     return;
   }
-  
+
   if (ctx->gcstack_idx == GCSTACKSIZE) {
     fe_error(ctx, "gc stack overflow");
   }
@@ -350,7 +350,7 @@ int fe_savegc(fe_Context *ctx) {
 
 
 void fe_mark(fe_Context *ctx, fe_Object *obj) {
-    /*  Tail-recursive mark without �goto', and with a *fresh* check
+    /*  Tail-recursive mark without goto, and with a fresh check
         every time we follow cdr(obj).  That way, if the cdr turned
         out to be an immediate fixnum we bail before dereferencing it. */
 
@@ -478,7 +478,7 @@ static int equal_slab(fe_Context *ctx, fe_Object *a, fe_Object *b) {
     size_t len = FE_STR_LEN(a);
     /* length is pre-checked by caller */
     if (len == 0) return 1;
-    
+
     uint32_t offset_a = a->cdr.u32;
     uint32_t offset_b = b->cdr.u32;
     size_t remaining = len;
@@ -487,7 +487,7 @@ static int equal_slab(fe_Context *ctx, fe_Object *a, fe_Object *b) {
         fe_Slab *slab_a = (fe_Slab*)(ctx->str_base + offset_a);
         fe_Slab *slab_b = (fe_Slab*)(ctx->str_base + offset_b);
         size_t to_cmp = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
-        
+
         if (memcmp(slab_a->data, slab_b->data, to_cmp) != 0) {
             return 0;
         }
@@ -548,6 +548,12 @@ static int streq(fe_Context *ctx, fe_Object *obj, const char *str) {
 #endif
 }
 
+int fe_symbol_name_eq(fe_Context *ctx, fe_Object *sym, const char *str) {
+  (void)ctx;
+  if (type(sym) != FE_TSYMBOL) { return 0; }
+  return streq(ctx, car(cdr(sym)), str);
+}
+
 
 static fe_Object* object(fe_Context *ctx) {
   fe_Object *obj;
@@ -565,7 +571,7 @@ static fe_Object* object(fe_Context *ctx) {
   /* get object from freelist and push to the gcstack */
   obj = ctx->freelist;
   ctx->freelist = cdr(obj);
-  
+
   /* Increment allocation counter and push to GC stack for protection */
   ctx->allocs_since_gc++;
   fe_pushgc(ctx, obj);
@@ -576,7 +582,7 @@ static fe_Object* object(fe_Context *ctx) {
 
 fe_Object* fe_cons(fe_Context *ctx, fe_Object *car, fe_Object *cdr) {
   fe_Object *obj = object(ctx);
-    obj->flags = 0;               /* <- essential:  �I am a pair�        */
+    obj->flags = 0;               /* essential: mark the object as a pair */
     car(obj)  = car;
     cdr(obj)  = cdr;
   return obj;
@@ -621,13 +627,13 @@ static uint32_t str_alloc(fe_Context *ctx, const char *src, size_t len, char fil
     if (len == 0) {
         return FE_SLAB_NULL;
     }
-    
+
     uint32_t head_offset = str_slab_alloc(ctx);
     fe_Slab *head_slab = (fe_Slab*)(ctx->str_base + head_offset);
-    
+
     uint32_t current_offset = head_offset;
     fe_Slab *current_slab = head_slab;
-    
+
     const char *p = src;
     size_t remaining = len;
     size_t bytes_allocated = FE_SLAB_SIZE;
@@ -654,7 +660,7 @@ static uint32_t str_alloc(fe_Context *ctx, const char *src, size_t len, char fil
             current_slab->next = FE_SLAB_NULL;
         }
     }
-    
+
     ctx->bytes_since_gc += bytes_allocated;
     return head_offset;
 }
@@ -892,6 +898,23 @@ void* fe_toptr(fe_Context *ctx, fe_Object *obj) {
   return cdr(checktype(ctx, obj, FE_TPTR));
 }
 
+static int find_assoc_binding(fe_Object *sym, fe_Object *env, fe_Object **binding) {
+  fe_Object *p;
+  *binding = NULL;
+  if (type(env) != FE_TPAIR) { return 0; }
+  for (p = env; !isnil(p); p = cdr(p)) {
+    fe_Object *entry;
+    if (type(p) != FE_TPAIR) { return 0; }
+    entry = car(p);
+    if (type(entry) != FE_TPAIR) { return 0; }
+    if (car(entry) == sym) {
+      *binding = entry;
+      return 1;
+    }
+  }
+  return 1;
+}
+
 static fe_Object* getbound(fe_Object *sym, fe_Object *env) {
   fe_Object *p;
   /* Check for new closure environment frame */
@@ -1038,7 +1061,7 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
       ctx->nextchr = chr;
       n = strtod(buf, &p);  /* try to read as number */
       if (p != buf && strchr(delimiter, *p)) {
-        return fe_make_number(ctx, n); 
+        return fe_make_number(ctx, n);
       }
       if (!strcmp(buf, "nil"))   { return &nil;  }
       if (!strcmp(buf, "true"))  { return FE_TRUE;  }
@@ -1194,14 +1217,33 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           /* form: (get object property) */
           va = evalarg(); /* The module object (or any table) */
           vb = fe_nextarg(ctx, &arg); /* The property symbol (not evaluated) */
-          checktype(ctx, vb, FE_TSYMBOL);
-          res = cdr(getbound(vb, va)); /* Re-use getbound for assoc list lookup */
+          {
+            fe_Object *binding = NULL;
+            int is_table;
+
+            checktype(ctx, vb, FE_TSYMBOL);
+            is_table = find_assoc_binding(vb, va, &binding);
+            if (binding != NULL) {
+              res = cdr(binding);
+              break;
+            }
+            if (!is_table && type(va)==FE_TPAIR) {
+              if (fe_symbol_name_eq(ctx, vb, "head") ||
+                  fe_symbol_name_eq(ctx, vb, "first"))
+                  { res = car(va); break; }
+              if (fe_symbol_name_eq(ctx, vb, "tail") ||
+                  fe_symbol_name_eq(ctx, vb, "rest"))
+                  { res = cdr(va); break; }
+              fe_error(ctx, "Only .head, .first, .tail, and .rest are valid on pairs");
+            }
+          }
+          res = cdr(getbound(vb, va)); /* fallback: Re-use getbound for assoc list lookup */
           break;
         }
         case P_RETURN: {
             /* evaluate argument, defaulting to nil */
             va  = isnil(arg) ? &nil : evalarg();
-            /* (__return__ . value)  � single pair keeps GC simple */
+            /* (__return__ . value) - single pair keeps GC simple */
             res = fe_cons(ctx, return_sym, va);
             break;
         }
@@ -1276,7 +1318,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           fe_pushgc(ctx, free_vars);
           analyze(ctx, body, bound, &free_vars);
           fe_restoregc(ctx, s);
-          
+
           fe_pushgc(ctx, free_vars);
           fe_pushgc(ctx, params);
           fe_pushgc(ctx, body);
@@ -1286,7 +1328,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           va = fe_cons(ctx, params, va);
           va = fe_cons(ctx, free_vars, va);
           va = fe_cons(ctx, env, va); /* Prepend definition env to the list */
-          
+
           res = object(ctx);
           settype(res, prim(fn) == P_FN ? FE_TFUNC : FE_TMACRO);
           cdr(res) = va;
@@ -1371,15 +1413,15 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
         case P_ADD: arithop(+); break;
         case P_SUB:
           /* --------  subtraction / unary minus -------- */
-          if (isnil(arg)) {                 /* (-)  →  0  (Scheme behaviour) */
+          if (isnil(arg)) {                 /* (-) -> 0 (Scheme behavior) */
               res = fe_make_number(ctx, 0);
           } else {
               /* first operand */
               fe_Number x = nval(checknum(ctx, evalarg()));
 
-              if (isnil(arg)) {             /* unary: (- x) → -x */
+              if (isnil(arg)) {             /* unary: (- x) -> -x */
                   res = fe_make_number(ctx, -x);
-              } else {                      /* n-ary: (- x y z …) */
+              } else {                      /* n-ary: (- x y z ...) */
                   while (!isnil(arg)) {
                       x -= nval(checknum(ctx, evalarg()));
                   }
@@ -1457,11 +1499,11 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
         upvals = fe_cons(ctx, binding, upvals);
       }
       fe_restoregc(ctx, s);
-      
+
       fe_Object *locals = argstoenv(ctx, params, arg, &nil);
       fe_Object *frame = fe_cons(ctx, locals, upvals);
       frame = fe_cons(ctx, frame_sym, frame);
-      
+
       *obj = *dolist(ctx, body, frame);
       fe_restoregc(ctx, gc);
       ctx->calllist = cdr(&cl);
@@ -1493,7 +1535,7 @@ fe_Context* fe_open(void *ptr, int size) {
   if (total_mem < sizeof(fe_Context)) return NULL;
   ctx = ptr;
   memset(ctx, 0, sizeof(fe_Context));
-  
+
   void* arenas_ptr = (char*) ptr + sizeof(fe_Context);
   size_t arenas_sz = total_mem - sizeof(fe_Context);
 
@@ -1502,7 +1544,7 @@ fe_Context* fe_open(void *ptr, int size) {
   size_t str_arena_sz = (size_t)(arenas_sz * FE_STR_ARENA_RATIO);
   str_arena_sz -= str_arena_sz % sizeof(void*); /* Align */
   size_t obj_arena_sz = arenas_sz - str_arena_sz;
-  
+
   ctx->object_count = obj_arena_sz / sizeof(fe_Object);
   ctx->objects = (fe_Object*)arenas_ptr;
 

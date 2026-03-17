@@ -1,0 +1,27 @@
+//
+// Regression test for pair selectors and cons sugar.
+//
+
+println("--- Pair Selector Regression ---");
+
+let pair = 1 :: 2 :: 3 :: nil;
+println("pair:", pair);
+println("pair.head:", pair.head);
+println("pair.first:", pair.first);
+println("pair.tail:", pair.tail);
+println("pair.rest.head:", pair.rest.head);
+
+pair.head = 10;
+pair.tail = 20 :: 30 :: nil;
+println("mutated pair:", pair);
+println("mutated pair.head:", pair.head);
+println("mutated pair.tail.head:", pair.tail.head);
+
+module("selector_names") {
+    export let head = "module-head";
+    export let tail = "module-tail";
+}
+
+import selector_names;
+println("selector_names.head:", selector_names.head);
+println("selector_names.tail:", selector_names.tail);
