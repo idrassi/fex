@@ -164,6 +164,7 @@ static void print_usage(const char *program_name) {
   fprintf(stderr, "  --module-path PATH  Add a module search directory (may be repeated)\n");
   fprintf(stderr, "  -I PATH       Alias for --module-path\n");
   fprintf(stderr, "  --max-steps N  Abort evaluation after approximately N eval steps (0 disables)\n");
+  fprintf(stderr, "  --timeout-ms N  Abort evaluation after roughly N milliseconds (0 disables)\n");
   fprintf(stderr, "  --memory-pool-size SIZE  Set memory pool size in MB (default: 5MB)\n");
   fprintf(stderr, "  --help        Show this help message\n");
   fprintf(stderr, "\n");
@@ -175,6 +176,7 @@ int main(int argc, char **argv) {
   int exit_code = 0;
   size_t memory_pool_size = MEMORY_POOL_SIZE;
   size_t max_steps = 0;
+  uint64_t timeout_ms = 0;
   const char *filename = NULL;
   const char **module_paths = NULL;
   void *mem;
@@ -233,6 +235,24 @@ int main(int argc, char **argv) {
         return 64;
       }
       max_steps = (size_t)parsed_steps;
+    } else if (strcmp(argv[i], "--timeout-ms") == 0) {
+      char *endptr;
+      unsigned long long parsed_timeout_ms;
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --timeout-ms requires an integer value\n");
+        print_usage(argv[0]);
+        free(module_paths);
+        return 64;
+      }
+      i++;
+      parsed_timeout_ms = strtoull(argv[i], &endptr, 10);
+      if (*endptr != '\0' || (uint64_t)parsed_timeout_ms != parsed_timeout_ms) {
+        fprintf(stderr, "Error: Invalid timeout '%s'. Must be a non-negative integer in milliseconds.\n", argv[i]);
+        print_usage(argv[0]);
+        free(module_paths);
+        return 64;
+      }
+      timeout_ms = (uint64_t)parsed_timeout_ms;
     } else if (strcmp(argv[i], "--memory-pool-size") == 0) {
       char *endptr;
       long size_mb;
@@ -292,6 +312,7 @@ int main(int argc, char **argv) {
   }
   fex_init_with_builtins(ctx, config, builtins);
   fe_set_step_limit(ctx, max_steps);
+  fe_set_timeout_ms(ctx, timeout_ms);
 
   for (i = 0; i < module_path_count; i++) {
     if (!fex_add_import_path(ctx, module_paths[i])) {

@@ -71,6 +71,8 @@ fe_Handlers* fe_handlers(fe_Context *ctx);
 void fe_set_step_limit(fe_Context *ctx, size_t max_steps);
 size_t fe_get_step_limit(fe_Context *ctx);
 size_t fe_get_steps_executed(fe_Context *ctx);
+void fe_set_timeout_ms(fe_Context *ctx, uint64_t timeout_ms);
+uint64_t fe_get_timeout_ms(fe_Context *ctx);
 void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
                               void *udata, size_t check_interval_steps);
 void fe_error(fe_Context *ctx, const char *msg);

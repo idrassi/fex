@@ -26,6 +26,9 @@
 
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
+#include <windows.h>
+#else
+#include <sys/time.h>
 #endif
 #include <limits.h>
 #include <string.h>
@@ -140,6 +143,9 @@ struct fe_Context {
   int loaded_module_capacity;
   size_t step_limit;
   size_t steps_executed;
+  uint64_t timeout_ms;
+  uint64_t timeout_deadline_ms;
+  size_t timeout_countdown;
   size_t interrupt_interval;
   size_t interrupt_countdown;
   fe_InterruptFn interrupt_handler;
@@ -172,6 +178,7 @@ static fe_Object *mac_sym = NULL;
 #define MAP_EMPTY 0
 #define MAP_USED 1
 #define MAP_TOMBSTONE 2
+#define TIMEOUT_CHECK_INTERVAL 64
 
 static fe_Map* mapdata(fe_Object *obj);
 static fe_Object* normalize_map_key(fe_Context *ctx, fe_Object *key);
@@ -285,6 +292,17 @@ fe_Handlers* fe_handlers(fe_Context *ctx) {
 }
 
 
+static uint64_t current_time_ms(void) {
+#ifdef _WIN32
+  return (uint64_t)GetTickCount64();
+#else
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (uint64_t)tv.tv_sec * 1000u + (uint64_t)(tv.tv_usec / 1000);
+#endif
+}
+
+
 void fe_set_step_limit(fe_Context *ctx, size_t max_steps) {
   ctx->step_limit = max_steps;
 }
@@ -297,6 +315,23 @@ size_t fe_get_step_limit(fe_Context *ctx) {
 
 size_t fe_get_steps_executed(fe_Context *ctx) {
   return ctx->steps_executed;
+}
+
+
+void fe_set_timeout_ms(fe_Context *ctx, uint64_t timeout_ms) {
+  ctx->timeout_ms = timeout_ms;
+  if (timeout_ms > 0) {
+    ctx->timeout_deadline_ms = current_time_ms() + timeout_ms;
+    ctx->timeout_countdown = TIMEOUT_CHECK_INTERVAL;
+  } else {
+    ctx->timeout_deadline_ms = 0;
+    ctx->timeout_countdown = 0;
+  }
+}
+
+
+uint64_t fe_get_timeout_ms(fe_Context *ctx) {
+  return ctx->timeout_ms;
 }
 
 
@@ -314,6 +349,10 @@ void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
 static void begin_eval_run(fe_Context *ctx) {
   if (ctx->eval_depth == 0) {
     ctx->steps_executed = 0;
+    if (ctx->timeout_ms > 0) {
+      ctx->timeout_deadline_ms = current_time_ms() + ctx->timeout_ms;
+      ctx->timeout_countdown = TIMEOUT_CHECK_INTERVAL;
+    }
     ctx->interrupt_countdown = ctx->interrupt_interval;
   }
   ctx->eval_depth++;
@@ -325,6 +364,9 @@ static void end_eval_run(fe_Context *ctx) {
     ctx->eval_depth--;
   }
   if (ctx->eval_depth == 0) {
+    if (ctx->timeout_ms > 0) {
+      ctx->timeout_countdown = TIMEOUT_CHECK_INTERVAL;
+    }
     ctx->interrupt_countdown = ctx->interrupt_interval;
   }
 }
@@ -334,6 +376,16 @@ static void check_eval_budget(fe_Context *ctx) {
   ctx->steps_executed++;
   if (ctx->step_limit > 0 && ctx->steps_executed > ctx->step_limit) {
     fe_error(ctx, "execution step limit exceeded");
+  }
+  if (ctx->timeout_ms > 0) {
+    if (ctx->timeout_countdown <= 1) {
+      ctx->timeout_countdown = TIMEOUT_CHECK_INTERVAL;
+      if (current_time_ms() >= ctx->timeout_deadline_ms) {
+        fe_error(ctx, "execution timeout exceeded");
+      }
+    } else {
+      ctx->timeout_countdown--;
+    }
   }
   if (ctx->interrupt_handler != NULL) {
     if (ctx->interrupt_countdown <= 1) {
@@ -601,6 +653,9 @@ void fe_error(fe_Context *ctx, const char *msg) {
   /* reset context state */
   ctx->calllist = &nil;
   ctx->eval_depth = 0;
+  if (ctx->timeout_ms > 0) {
+    ctx->timeout_countdown = TIMEOUT_CHECK_INTERVAL;
+  }
   ctx->interrupt_countdown = ctx->interrupt_interval;
   /* do error handler */
   if (ctx->handlers.error) { ctx->handlers.error(ctx, msg, cl); }

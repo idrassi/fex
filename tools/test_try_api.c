@@ -132,6 +132,22 @@ int main(void) {
     }
     fe_set_step_limit(ctx, 0);
 
+    fe_set_timeout_ms(ctx, 10);
+    status = fex_try_do_string(
+        ctx,
+        "let n = 0;\n"
+        "while (true) { n = n + 1; }\n",
+        &result,
+        &error
+    );
+    if (status != FEX_STATUS_RUNTIME_ERROR ||
+        strstr(error.message, "execution timeout exceeded") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected execution timeout error");
+    }
+    fe_set_timeout_ms(ctx, 0);
+
     {
         int interrupt_calls = 0;
         fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 8);

@@ -143,6 +143,15 @@ CASES = [
         ],
     },
     {
+        "name": "timeout budget",
+        "source": "let n = 0;\nwhile (true) { n = n + 1; }\n",
+        "args": ["--timeout-ms", "10", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: execution timeout exceeded",
+        ],
+    },
+    {
         "name": "bad module syntax",
         "source": 'module(123) {\n    export let y = 20;\n}\n',
         "exit_code": 65,
