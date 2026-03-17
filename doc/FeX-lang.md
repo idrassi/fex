@@ -142,7 +142,7 @@ The base FeX environment always includes:
 
 Pair selectors such as `.head` and `.tail`, and the `::` operator, are syntax sugar over these primitives rather than separate runtime functions.
 
-Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `tobytes`, and `readbytes` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe` or `--builtin string,data`. For runaway-script protection, the CLI also supports `--max-steps N` and `--timeout-ms N`. In embedded use, call:
+Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `tobytes`, `readbytes`, and `runcommand` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe`, `--builtin string,data`, or `--builtin system`. For runaway-script protection, the CLI also supports `--max-steps N` and `--timeout-ms N`. In embedded use, call:
 
 ```c
 fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
@@ -221,6 +221,17 @@ println(byteat(payload, 2)); // 67
 writebytes("payload.bin", payload);
 println(readbytes("payload.bin"));
 ```
+
+### Command Capture
+
+```fex
+let proc = runcommand("your-tool --version");
+println(proc.code);
+println(proc.ok);
+println(proc.output);
+```
+
+`runcommand()` is part of the `system` builtin group. It returns a map with `code`, `ok`, and `output`, where `output` is merged stdout/stderr stored as `bytes`. Captured output is currently capped at 4 MiB.
 
 ### REPL Workflow
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import difflib
 import subprocess
 import sys
@@ -10,6 +11,34 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+
+def fex_string_literal(text: str) -> str:
+    escaped = (
+        text.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+def runcommand_case_source() -> str:
+    if sys.platform.startswith("win"):
+        script = (
+            "[Console]::OpenStandardOutput().Write([byte[]](111,117,116),0,3);"
+            "[Console]::OpenStandardError().Write([byte[]](101,114,114),0,3);"
+            "exit 3"
+        )
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        command = f"powershell -NoProfile -EncodedCommand {encoded}"
+    else:
+        command = "sh -c 'printf out; printf err >&2; exit 3'"
+    return (
+        f"let proc = runcommand({fex_string_literal(command)});\n"
+        "println(proc.code);\n"
+        "println(proc.ok);\n"
+        "println(proc.output);\n"
+    )
 
 CASES = [
     {
@@ -126,6 +155,17 @@ CASES = [
             "slice:#bytes[42 43]\n"
             "loaded eq:true\n"
             "loaded:#bytes[41 42 43]\n"
+        ),
+    },
+    {
+        "name": "runcommand",
+        "source": runcommand_case_source(),
+        "args": ["--builtin", "system"],
+        "exit_code": 0,
+        "stdout": (
+            "3\n"
+            "false\n"
+            "#bytes[6f 75 74 65 72 72]\n"
         ),
     },
     {
@@ -355,3 +395,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

@@ -203,6 +203,23 @@ writebytes("payload.bin", payload);
 println(readbytes("payload.bin"));       // #bytes[41 42 43]
 ```
 
+### Command Capture
+
+With the `system` builtin group enabled, `runcommand()` executes a shell command and returns a map with:
+
+- `code`: the process exit code
+- `ok`: `true` when `code == 0`
+- `output`: merged stdout/stderr as `bytes`
+
+```c
+let proc = runcommand("your-tool --version");
+println(proc.code);
+println(proc.ok);
+println(proc.output);
+```
+
+Captured output is currently capped at 4 MiB. Larger command output raises a runtime error instead of growing without bound.
+
 ## Embedding API
 
 FeX is easy to embed. For host applications, prefer the recoverable `fex_try_*` APIs so script failures stay in-process and return structured diagnostics.
@@ -249,7 +266,7 @@ int main(void) {
 
 `fex_do_string()` and `fex_do_file()` are still available for simple tools, but on runtime faults they go through the installed error handler. The default FeX handler prints a traceback and exits.
 
-If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, and `pathjoin`, you can still use `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` for the full set. For production embedding, prefer `fex_init_with_builtins(ctx, flags, mask)` so you can expose only the categories you actually want, for example `FEX_BUILTINS_SAFE` or `FEX_BUILTINS_STRING | FEX_BUILTINS_DATA`.
+If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `pathjoin`, or `runcommand`, you can still use `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` for the full set. For production embedding, prefer `fex_init_with_builtins(ctx, flags, mask)` so you can expose only the categories you actually want, for example `FEX_BUILTINS_SAFE`, `FEX_BUILTINS_STRING | FEX_BUILTINS_DATA`, or `FEX_BUILTINS_SYSTEM`.
 
 For runtime sandboxing, the core `fe` API now also exposes `fe_set_step_limit(ctx, max_steps)`, `fe_set_timeout_ms(ctx, timeout_ms)`, and `fe_set_interrupt_handler(...)`. A host can use the fixed step limit directly, the timeout convenience layer for wall-clock deadlines, or install an interrupt callback that applies custom policy.
 

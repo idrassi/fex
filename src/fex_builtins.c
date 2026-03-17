@@ -45,6 +45,9 @@
 #include <math.h>
 #include <time.h>
 #include <ctype.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 #include "fex_builtins.h"
 #include "sfc32.h"
@@ -54,6 +57,18 @@ typedef struct {
     size_t len;
     size_t cap;
 } TextBuffer;
+
+#define FEX_COMMAND_OUTPUT_MAX_BYTES (4u * 1024u * 1024u)
+
+#ifdef _WIN32
+#define FEX_POPEN  _popen
+#define FEX_PCLOSE _pclose
+#define FEX_POPEN_MODE "rb"
+#else
+#define FEX_POPEN  popen
+#define FEX_PCLOSE pclose
+#define FEX_POPEN_MODE "r"
+#endif
 
 static int buf_reserve(TextBuffer *buf, size_t extra) {
     size_t needed;
@@ -204,6 +219,71 @@ static fe_Object* string_to_bytes(fe_Context *ctx, fe_Object *str_obj, const cha
 
 static int is_path_separator_char(char chr) {
     return chr == '/' || chr == '\\';
+}
+
+static int decode_process_exit_code(int status) {
+#ifdef _WIN32
+    return status;
+#else
+    if (status < 0) {
+        return status;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return status;
+#endif
+}
+
+static int read_stream_into_buffer(fe_Context *ctx, FILE *stream, TextBuffer *buf,
+                                   size_t max_size, const char *func_name) {
+    unsigned char chunk[4096];
+    size_t bytes_read;
+    char msg[160];
+
+    while ((bytes_read = fread(chunk, 1, sizeof(chunk), stream)) > 0) {
+        if (buf->len + bytes_read > max_size) {
+            sprintf(msg, "%s: command output too large", func_name);
+            fe_error(ctx, msg);
+            return 0;
+        }
+        if (!buf_append_mem(buf, (const char*)chunk, bytes_read)) {
+            sprintf(msg, "%s: out of memory", func_name);
+            fe_error(ctx, msg);
+            return 0;
+        }
+    }
+
+    if (ferror(stream)) {
+        sprintf(msg, "%s: error reading command output", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    return 1;
+}
+
+static char* build_merged_command(fe_Context *ctx, const char *command, const char *func_name) {
+    const char *prefix = "(";
+    const char *suffix = ") 2>&1";
+    size_t command_len = strlen(command);
+    size_t total_len = strlen(prefix) + command_len + strlen(suffix);
+    char *merged = malloc(total_len + 1);
+    char msg[160];
+
+    if (!merged) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+
+    memcpy(merged, prefix, strlen(prefix));
+    memcpy(merged + strlen(prefix), command, command_len);
+    memcpy(merged + strlen(prefix) + command_len, suffix, strlen(suffix) + 1);
+    return merged;
 }
 
 /*
@@ -1800,21 +1880,79 @@ static fe_Object* builtin_exit(fe_Context *ctx, fe_Object *args) {
 }
 
 static fe_Object* builtin_system(fe_Context *ctx, fe_Object *args) {
+    fe_Object *command_obj;
+    char *command;
+    int result;
+
     FEX_CHECK_ARGS(ctx, args, 1, "system");
-    fe_Object *command_obj = fe_nextarg(ctx, &args);
-    FEX_CHECK_TYPE(ctx, command_obj, FE_TSTRING, "system");
-    
-    size_t command_len = fe_strlen(ctx, command_obj);
-    if (command_len >= 1024) {
-        fe_error(ctx, "system: command too long");
+    command_obj = fe_nextarg(ctx, &args);
+    command = string_to_cstr(ctx, command_obj, "system");
+
+    if (!command) {
         return fe_nil(ctx);
     }
-    
-    char command[1024];
-    fe_tostring(ctx, command_obj, command, sizeof(command));
-    
-    int result = system(command);
-    return fe_make_number(ctx, (fe_Number)result);
+
+    result = system(command);
+    free(command);
+    return fe_make_number(ctx, (fe_Number)decode_process_exit_code(result));
+}
+
+static fe_Object* builtin_run_command(fe_Context *ctx, fe_Object *args) {
+    fe_Object *command_obj;
+    char *command;
+    char *merged_command;
+    FILE *pipe;
+    TextBuffer output;
+    int raw_status;
+    int exit_code;
+    fe_Object *result;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "runcommand");
+    command_obj = fe_nextarg(ctx, &args);
+    command = string_to_cstr(ctx, command_obj, "runcommand");
+    if (!command) {
+        return fe_nil(ctx);
+    }
+
+    merged_command = build_merged_command(ctx, command, "runcommand");
+    free(command);
+    if (!merged_command) {
+        return fe_nil(ctx);
+    }
+
+    pipe = FEX_POPEN(merged_command, FEX_POPEN_MODE);
+    free(merged_command);
+    if (!pipe) {
+        fe_error(ctx, "runcommand: could not start command");
+        return fe_nil(ctx);
+    }
+
+    output.data = NULL;
+    output.len = 0;
+    output.cap = 0;
+    if (!read_stream_into_buffer(ctx, pipe, &output,
+                                 FEX_COMMAND_OUTPUT_MAX_BYTES, "runcommand")) {
+        FEX_PCLOSE(pipe);
+        buf_free(&output);
+        return fe_nil(ctx);
+    }
+
+    raw_status = FEX_PCLOSE(pipe);
+    if (raw_status < 0) {
+        buf_free(&output);
+        fe_error(ctx, "runcommand: could not finish command");
+        return fe_nil(ctx);
+    }
+
+    exit_code = decode_process_exit_code(raw_status);
+    result = fe_map(ctx);
+    fe_map_set(ctx, result, fe_symbol(ctx, "code"),
+               fe_make_number(ctx, (fe_Number)exit_code));
+    fe_map_set(ctx, result, fe_symbol(ctx, "ok"), fe_bool(ctx, exit_code == 0));
+    fe_map_set(ctx, result, fe_symbol(ctx, "output"),
+               fe_bytes(ctx, output.data ? output.data : "", output.len));
+    buf_free(&output);
+    return result;
 }
 
 /*
@@ -2021,6 +2159,7 @@ static void register_system_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "time"), fe_cfunc(ctx, builtin_time));
     fe_set(ctx, fe_symbol(ctx, "exit"), fe_cfunc(ctx, builtin_exit));
     fe_set(ctx, fe_symbol(ctx, "system"), fe_cfunc(ctx, builtin_system));
+    fe_set(ctx, fe_symbol(ctx, "runcommand"), fe_cfunc(ctx, builtin_run_command));
     
     fe_restoregc(ctx, gc_save);
 }

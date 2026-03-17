@@ -74,7 +74,7 @@ void fex_init_with_config(fe_Context *ctx, FexConfig config);
 Like `fex_init()`, but enables optional features through flags:
 
 - `FEX_CONFIG_ENABLE_SPANS` enables source span tracking.
-- `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` registers the optional extended builtins set, including helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, and `pathjoin`.
+- `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` registers the optional extended builtins set, including helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, and `runcommand`.
 
 ### fex_init_with_builtins()
 
@@ -285,6 +285,17 @@ fe_bytescopy(ctx, bytes, 0, copy, sizeof(copy));
 
 At the language level, extended builtins expose helpers such as `tobytes`, `makebytes`, `byteslen`, `byteat`, `byteslice`, `readbytes`, and `writebytes`.
 
+### System Helpers
+
+The `FEX_BUILTINS_SYSTEM` category includes `time`, `exit`, `system`, and `runcommand`.
+
+- `system(command)` executes a shell command and returns its exit code.
+- `runcommand(command)` executes a shell command and returns a map with `code`, `ok`, and `output`.
+- `output` is a `bytes` value containing merged stdout/stderr.
+- Captured output is currently capped at 4 MiB. Larger output raises a runtime error.
+
+At the C API level, the result from `runcommand()` is just an ordinary FeX map and bytes object, so hosts can inspect it with `fe_map_get()`, `fe_tonumber()`, `fe_byteslen()`, and `fe_bytescopy()`.
+
 ### Maps
 
 Maps are mutable associative containers keyed by strings or symbols. They are a good fit for configuration objects, JSON-like data, and module-style exports.
@@ -437,5 +448,5 @@ The interpreter is re-entrant on a single context: a host `fe_CFunc` may call ba
 - Forgetting GC protection for temporary objects across further allocations.
 - Returning `NULL` from a `fe_CFunc`.
 - Passing a compiled AST or other `fe_Object *` from one context into another.
-- Assuming optional helpers such as `sqrt`, `map`, or `parsejson` are always present. They require `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS`, `fex_init_with_builtins(...)`, `--builtins`, or `--builtin NAME`.
+- Assuming optional helpers such as `sqrt`, `map`, `parsejson`, or `runcommand` are always present. They require `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS`, `fex_init_with_builtins(...)`, `--builtins`, or `--builtin NAME`.
 - Using `fe_cdr_ptr()` without first ensuring the target is non-nil.

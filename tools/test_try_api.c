@@ -25,6 +25,7 @@ int main(void) {
     fe_Object *map;
     fe_Object *name_key;
     fe_Object *name_value;
+    fe_Object *output;
     fe_Object *result;
     FexError error;
     FexStatus status;
@@ -250,6 +251,59 @@ int main(void) {
         return fail("unexpected pathjoin result after enabling I/O builtins");
     }
 
+    fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS, FEX_BUILTINS_SYSTEM);
+    status = fex_try_do_string(
+        ctx,
+#ifdef _WIN32
+        "let proc = runcommand(\"powershell -NoProfile -EncodedCommand WwBDAG8AbgBzAG8AbABlAF0AOgA6AE8AcABlAG4AUwB0AGEAbgBkAGEAcgBkAE8AdQB0AHAAdQB0ACgAKQAuAFcAcgBpAHQAZQAoAFsAYgB5AHQAZQBbAF0AXQAoADEAMQAxACwAMQAxADcALAAxADEANgApACwAMAAsADMAKQA7AFsAQwBvAG4AcwBvAGwAZQBdADoAOgBPAHAAZQBuAFMAdABhAG4AZABhAHIAZABFAHIAcgBvAHIAKAApAC4AVwByAGkAdABlACgAWwBiAHkAdABlAFsAXQBdACgAMQAwADEALAAxADEANAAsADEAMQA0ACkALAAwACwAMwApADsAZQB4AGkAdAAgADMA\");\n"
+#else
+        "let proc = runcommand(\"sh -c 'printf out; printf err >&2; exit 3'\");\n"
+#endif
+        "proc;\n",
+        &result,
+        &error
+    );
+    if (status != FEX_STATUS_OK) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runcommand to execute successfully");
+    }
+    if (fe_type(ctx, result) != FE_TMAP) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runcommand to return a map");
+    }
+    if (fe_tonumber(ctx, fe_map_get(ctx, result, fe_symbol(ctx, "code"))) != 3) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runcommand to preserve the exit code");
+    }
+    if (fe_map_get(ctx, result, fe_symbol(ctx, "ok")) != FE_FALSE) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runcommand ok to be false for a non-zero exit");
+    }
+    output = fe_map_get(ctx, result, fe_symbol(ctx, "output"));
+    if (fe_type(ctx, output) != FE_TBYTES || fe_byteslen(ctx, output) != 6) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runcommand output to be six captured bytes");
+    }
+    {
+        unsigned char captured[6];
+        memset(captured, 0, sizeof(captured));
+        if (fe_bytescopy(ctx, output, 0, captured, sizeof(captured)) != sizeof(captured)) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected runcommand output to be readable as bytes");
+        }
+        if (memcmp(captured, "outerr", sizeof(captured)) != 0) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected runcommand to merge stdout and stderr output");
+        }
+    }
+
     status = fex_try_do_string(ctx, "41 + 1;", &result, &error);
     if (status != FEX_STATUS_OK || fe_tonumber(ctx, result) != 42) {
         fe_close(ctx);
@@ -261,3 +315,5 @@ int main(void) {
     free(memory);
     return 0;
 }
+
+
