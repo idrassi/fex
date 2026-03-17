@@ -27,6 +27,7 @@ typedef fe_Object* (*fe_CFunc)(fe_Context *ctx, fe_Object *args);
 typedef void (*fe_ErrorFn)(fe_Context *ctx, const char *err, fe_Object *cl);
 typedef void (*fe_WriteFn)(fe_Context *ctx, void *udata, char chr);
 typedef char (*fe_ReadFn)(fe_Context *ctx, void *udata);
+typedef int (*fe_InterruptFn)(fe_Context *ctx, void *udata);
 typedef struct { fe_ErrorFn error; fe_CFunc mark, gc; } fe_Handlers;
 
 /**********************************
@@ -67,6 +68,11 @@ enum {
 fe_Context* fe_open(void *ptr, size_t size);
 void fe_close(fe_Context *ctx);
 fe_Handlers* fe_handlers(fe_Context *ctx);
+void fe_set_step_limit(fe_Context *ctx, size_t max_steps);
+size_t fe_get_step_limit(fe_Context *ctx);
+size_t fe_get_steps_executed(fe_Context *ctx);
+void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
+                              void *udata, size_t check_interval_steps);
 void fe_error(fe_Context *ctx, const char *msg);
 fe_Object* fe_nextarg(fe_Context *ctx, fe_Object **arg);
 int fe_type(fe_Context *ctx, fe_Object *obj);

@@ -163,6 +163,7 @@ static void print_usage(const char *program_name) {
   fprintf(stderr, "                Presets: safe, all\n");
   fprintf(stderr, "  --module-path PATH  Add a module search directory (may be repeated)\n");
   fprintf(stderr, "  -I PATH       Alias for --module-path\n");
+  fprintf(stderr, "  --max-steps N  Abort evaluation after approximately N eval steps (0 disables)\n");
   fprintf(stderr, "  --memory-pool-size SIZE  Set memory pool size in MB (default: 5MB)\n");
   fprintf(stderr, "  --help        Show this help message\n");
   fprintf(stderr, "\n");
@@ -173,6 +174,7 @@ int main(int argc, char **argv) {
   int enable_spans = 0, i, module_path_count = 0;
   int exit_code = 0;
   size_t memory_pool_size = MEMORY_POOL_SIZE;
+  size_t max_steps = 0;
   const char *filename = NULL;
   const char **module_paths = NULL;
   void *mem;
@@ -213,6 +215,24 @@ int main(int argc, char **argv) {
         return 64;
       }
       module_paths[module_path_count++] = argv[++i];
+    } else if (strcmp(argv[i], "--max-steps") == 0) {
+      char *endptr;
+      unsigned long long parsed_steps;
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --max-steps requires an integer value\n");
+        print_usage(argv[0]);
+        free(module_paths);
+        return 64;
+      }
+      i++;
+      parsed_steps = strtoull(argv[i], &endptr, 10);
+      if (*endptr != '\0' || (size_t)parsed_steps != parsed_steps) {
+        fprintf(stderr, "Error: Invalid max step count '%s'. Must be a non-negative integer.\n", argv[i]);
+        print_usage(argv[0]);
+        free(module_paths);
+        return 64;
+      }
+      max_steps = (size_t)parsed_steps;
     } else if (strcmp(argv[i], "--memory-pool-size") == 0) {
       char *endptr;
       long size_mb;
@@ -271,6 +291,7 @@ int main(int argc, char **argv) {
     config |= FEX_CONFIG_ENABLE_SPANS;
   }
   fex_init_with_builtins(ctx, config, builtins);
+  fe_set_step_limit(ctx, max_steps);
 
   for (i = 0; i < module_path_count; i++) {
     if (!fex_add_import_path(ctx, module_paths[i])) {

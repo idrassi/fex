@@ -76,7 +76,7 @@ To execute a script file, pass the file path as an argument:
 <path-to-fex> your_script.fex
 ```
 
-Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, and `--module-path PATH` adds file-based import search directories. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
+Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, `--module-path PATH` adds file-based import search directories, and `--max-steps N` aborts runaway evaluation after roughly `N` eval steps. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
 
 ## Language Quick Tour
 
@@ -237,6 +237,8 @@ int main(void) {
 `fex_do_string()` and `fex_do_file()` are still available for simple tools, but on runtime faults they go through the installed error handler. The default FeX handler prints a traceback and exits.
 
 If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, and `pathjoin`, you can still use `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` for the full set. For production embedding, prefer `fex_init_with_builtins(ctx, flags, mask)` so you can expose only the categories you actually want, for example `FEX_BUILTINS_SAFE` or `FEX_BUILTINS_STRING | FEX_BUILTINS_DATA`.
+
+For runtime sandboxing, the core `fe` API now also exposes `fe_set_step_limit(ctx, max_steps)` and `fe_set_interrupt_handler(...)`. A host can use the step limit directly, or install an interrupt callback that checks wall-clock time and returns non-zero to abort evaluation cleanly.
 
 ## Architecture
 

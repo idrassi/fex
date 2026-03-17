@@ -104,6 +104,24 @@ void fe_close(fe_Context *ctx);
 
 Releases resources associated with the interpreter. If pointer objects have GC finalizers, `fe_close()` ensures they are run for remaining live objects.
 
+### Execution Resource Controls
+
+```c
+void fe_set_step_limit(fe_Context *ctx, size_t max_steps);
+size_t fe_get_step_limit(fe_Context *ctx);
+size_t fe_get_steps_executed(fe_Context *ctx);
+void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
+                              void *udata, size_t check_interval_steps);
+```
+
+These low-level `fe` APIs let a host bound script execution without killing the process.
+
+- `fe_set_step_limit()` sets a per-top-level evaluation budget. `0` disables the limit.
+- `fe_get_steps_executed()` reports the number of eval steps consumed by the current or most recent evaluation.
+- `fe_set_interrupt_handler()` installs a callback that runs every `check_interval_steps` evaluations. If it returns non-zero, evaluation stops with the runtime error `"execution interrupted"`.
+
+This is the recommended hook for host-defined timeouts. For example, the host can compare the current monotonic time against a deadline inside the callback.
+
 ### Minimal Example
 
 ```c

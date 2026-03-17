@@ -12,6 +12,13 @@ static int fail(const char *message) {
     return 1;
 }
 
+static int interrupt_once(fe_Context *ctx, void *udata) {
+    int *calls = (int*)udata;
+    (void)ctx;
+    (*calls)++;
+    return *calls >= 1;
+}
+
 int main(void) {
     void *memory;
     fe_Context *ctx;
@@ -102,6 +109,51 @@ int main(void) {
         fe_close(ctx);
         free(memory);
         return fail("expected file I/O error");
+    }
+
+    fe_set_step_limit(ctx, 64);
+    status = fex_try_do_string(
+        ctx,
+        "let n = 0;\n"
+        "while (true) { n = n + 1; }\n",
+        &result,
+        &error
+    );
+    if (status != FEX_STATUS_RUNTIME_ERROR ||
+        strstr(error.message, "execution step limit exceeded") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected execution step limit error");
+    }
+    if (fe_get_steps_executed(ctx) <= 64) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected step counter to advance past the configured limit");
+    }
+    fe_set_step_limit(ctx, 0);
+
+    {
+        int interrupt_calls = 0;
+        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 8);
+        status = fex_try_do_string(
+            ctx,
+            "let n = 0;\n"
+            "while (n < 1000) { n = n + 1; }\n",
+            &result,
+            &error
+        );
+        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "execution interrupted") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected interrupt handler to stop evaluation");
+        }
+        if (interrupt_calls < 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected interrupt handler to run at least once");
+        }
     }
 
     fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS,

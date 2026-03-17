@@ -138,6 +138,13 @@ struct fe_Context {
   char **loaded_modules;
   int loaded_module_count;
   int loaded_module_capacity;
+  size_t step_limit;
+  size_t steps_executed;
+  size_t interrupt_interval;
+  size_t interrupt_countdown;
+  fe_InterruptFn interrupt_handler;
+  void *interrupt_udata;
+  int eval_depth;
   /* --- GC fields --- */
   int live_count;          /* Objects surviving last GC */
   int allocs_since_gc;     /* Objects allocated since last GC */
@@ -275,6 +282,69 @@ static void analyze(fe_Context *ctx, fe_Object *node, fe_Object *bound, fe_Objec
 
 fe_Handlers* fe_handlers(fe_Context *ctx) {
   return &ctx->handlers;
+}
+
+
+void fe_set_step_limit(fe_Context *ctx, size_t max_steps) {
+  ctx->step_limit = max_steps;
+}
+
+
+size_t fe_get_step_limit(fe_Context *ctx) {
+  return ctx->step_limit;
+}
+
+
+size_t fe_get_steps_executed(fe_Context *ctx) {
+  return ctx->steps_executed;
+}
+
+
+void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
+                              void *udata, size_t check_interval_steps) {
+  ctx->interrupt_handler = fn;
+  ctx->interrupt_udata = udata;
+  ctx->interrupt_interval = (fn != NULL)
+    ? (check_interval_steps > 0 ? check_interval_steps : 1024)
+    : 0;
+  ctx->interrupt_countdown = ctx->interrupt_interval;
+}
+
+
+static void begin_eval_run(fe_Context *ctx) {
+  if (ctx->eval_depth == 0) {
+    ctx->steps_executed = 0;
+    ctx->interrupt_countdown = ctx->interrupt_interval;
+  }
+  ctx->eval_depth++;
+}
+
+
+static void end_eval_run(fe_Context *ctx) {
+  if (ctx->eval_depth > 0) {
+    ctx->eval_depth--;
+  }
+  if (ctx->eval_depth == 0) {
+    ctx->interrupt_countdown = ctx->interrupt_interval;
+  }
+}
+
+
+static void check_eval_budget(fe_Context *ctx) {
+  ctx->steps_executed++;
+  if (ctx->step_limit > 0 && ctx->steps_executed > ctx->step_limit) {
+    fe_error(ctx, "execution step limit exceeded");
+  }
+  if (ctx->interrupt_handler != NULL) {
+    if (ctx->interrupt_countdown <= 1) {
+      ctx->interrupt_countdown = ctx->interrupt_interval;
+      if (ctx->interrupt_handler(ctx, ctx->interrupt_udata)) {
+        fe_error(ctx, "execution interrupted");
+      }
+    } else {
+      ctx->interrupt_countdown--;
+    }
+  }
 }
 
 
@@ -530,6 +600,8 @@ void fe_error(fe_Context *ctx, const char *msg) {
   fe_Object *cl = ctx->calllist;
   /* reset context state */
   ctx->calllist = &nil;
+  ctx->eval_depth = 0;
+  ctx->interrupt_countdown = ctx->interrupt_interval;
   /* do error handler */
   if (ctx->handlers.error) { ctx->handlers.error(ctx, msg, cl); }
   /* error handler returned -- print error and traceback, exit */
@@ -1808,6 +1880,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
   fe_Object cl, *va, *vb;
   int n, gc;
 
+  check_eval_budget(ctx);
   if (type(obj) == FE_TSYMBOL) { return cdr(getbound(obj, env)); }
   if (type(obj) != FE_TPAIR) { return obj; }
 
@@ -2198,7 +2271,11 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
 
 
 fe_Object* fe_eval(fe_Context *ctx, fe_Object *obj) {
-  return eval(ctx, obj, &nil, NULL);
+  fe_Object *res;
+  begin_eval_run(ctx);
+  res = eval(ctx, obj, &nil, NULL);
+  end_eval_run(ctx);
+  return res;
 }
 
 

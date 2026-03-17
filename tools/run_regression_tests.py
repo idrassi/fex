@@ -134,6 +134,15 @@ CASES = [
         "stdout": "a/b\n",
     },
     {
+        "name": "max step budget",
+        "source": "let n = 0;\nwhile (true) { n = n + 1; }\n",
+        "args": ["--max-steps", "64", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: execution step limit exceeded",
+        ],
+    },
+    {
         "name": "bad module syntax",
         "source": 'module(123) {\n    export let y = 20;\n}\n',
         "exit_code": 65,
