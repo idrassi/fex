@@ -169,6 +169,27 @@ CASES = [
         ),
     },
     {
+        "name": "cli -e",
+        "skip_input_file": True,
+        "args": ["-e", "println(40 + 2);"],
+        "exit_code": 0,
+        "stdout": "42\n",
+    },
+    {
+        "name": "cli stdin",
+        "skip_input_file": True,
+        "stdin": "println(40 + 2);\n",
+        "exit_code": 0,
+        "stdout": "42\n",
+    },
+    {
+        "name": "cli version",
+        "skip_input_file": True,
+        "args": ["--version"],
+        "exit_code": 0,
+        "stdout": "FeX 1.0\n",
+    },
+    {
         "name": "builtin categories",
         "source": "let q = substring(tojson(\"x\"), 0, 1);\nlet raw = concat(\"{\", q, \"name\", q, \":\", q, \"fex\", q, \"}\");\nprintln(parsejson(raw).name);\n",
         "args": ["--builtin", "string,data"],
@@ -299,20 +320,23 @@ def run_case(exe: Path, case: dict[str, object]) -> list[str]:
     command = [str(exe)]
     temp_path: Path | None = None
     temp_dir_obj = None
+    stdin_text = case.get("stdin")
 
     try:
-        if "source" in case:
-            temp_dir_obj = tempfile.TemporaryDirectory()
-            temp_path = Path(temp_dir_obj.name) / "inline_case.fex"
-            temp_path.write_text(str(case["source"]), encoding="utf-8", newline="\n")
-            command.append(str(temp_path))
-        else:
-            command.append(str(case["script"]))
+        if not case.get("skip_input_file", False):
+            if "source" in case:
+                temp_dir_obj = tempfile.TemporaryDirectory()
+                temp_path = Path(temp_dir_obj.name) / "inline_case.fex"
+                temp_path.write_text(str(case["source"]), encoding="utf-8", newline="\n")
+                command.append(str(temp_path))
+            else:
+                command.append(str(case["script"]))
 
         command.extend(str(arg) for arg in case.get("args", []))
 
         completed = subprocess.run(
             command,
+            input=str(stdin_text) if stdin_text is not None else None,
             capture_output=True,
             text=True,
             encoding="utf-8",

@@ -24,6 +24,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#ifdef _WIN32
+#include <io.h>
+#define FEX_ISATTY _isatty
+#define FEX_FILENO _fileno
+#else
+#include <unistd.h>
+#define FEX_ISATTY isatty
+#define FEX_FILENO fileno
+#endif
 
 #include "fe.h"
 #include "fex.h"
@@ -113,6 +122,75 @@ static int add_builtin_spec(FexBuiltinsConfig *mask, const char *spec) {
   return 1;
 }
 
+static int append_source_fragment(char **buffer, size_t *len, size_t *cap,
+                                  const char *fragment, size_t fragment_len) {
+  size_t needed;
+  size_t new_cap;
+  char *new_buffer;
+
+  if (fragment_len == 0) {
+    return 1;
+  }
+
+  needed = *len + fragment_len + 1;
+  if (needed > *cap) {
+    new_cap = (*cap > 0) ? *cap : 128;
+    while (new_cap < needed) {
+      new_cap *= 2;
+    }
+    new_buffer = realloc(*buffer, new_cap);
+    if (!new_buffer) {
+      return 0;
+    }
+    *buffer = new_buffer;
+    *cap = new_cap;
+  }
+
+  memcpy(*buffer + *len, fragment, fragment_len);
+  *len += fragment_len;
+  (*buffer)[*len] = '\0';
+  return 1;
+}
+
+static int read_stream_source(FILE *stream, char **out_source) {
+  char chunk[4096];
+  char *buffer = NULL;
+  size_t len = 0;
+  size_t cap = 0;
+  size_t bytes_read;
+
+  while ((bytes_read = fread(chunk, 1, sizeof(chunk), stream)) > 0) {
+    if (!append_source_fragment(&buffer, &len, &cap, chunk, bytes_read)) {
+      free(buffer);
+      return 0;
+    }
+  }
+
+  if (ferror(stream)) {
+    free(buffer);
+    return 0;
+  }
+
+  if (buffer == NULL) {
+    buffer = malloc(1);
+    if (!buffer) {
+      return 0;
+    }
+    buffer[0] = '\0';
+  }
+
+  *out_source = buffer;
+  return 1;
+}
+
+static int stdin_is_interactive(void) {
+  return FEX_ISATTY(FEX_FILENO(stdin));
+}
+
+static void print_version(void) {
+  printf("FeX %s\n", FE_VERSION);
+}
+
 static void run_repl(fe_Context *ctx) {
   char buffer[REPL_BUFFER_SIZE];
   FexError error;
@@ -153,9 +231,36 @@ static int run_file(fe_Context *ctx, const char *path) {
   return 0;
 }
 
+static int run_source(fe_Context *ctx, const char *source, const char *source_name) {
+  FexError error;
+  fe_Object *code = NULL;
+  fe_Object *result = NULL;
+  FexStatus status;
+
+  if (source == NULL || source[0] == '\0') {
+    return 0;
+  }
+
+  status = fex_try_compile(ctx, source, source_name, &code, &error);
+  if (status != FEX_STATUS_OK) {
+    fex_print_error(stderr, &error);
+    return exit_code_for_status(status);
+  }
+
+  status = fex_try_eval(ctx, code, &result, &error);
+  (void)result;
+  if (status != FEX_STATUS_OK) {
+    fex_print_error(stderr, &error);
+    return exit_code_for_status(status);
+  }
+
+  return 0;
+}
+
 static void print_usage(const char *program_name) {
-  fprintf(stderr, "Usage: %s [options] [file]\n", program_name);
+  fprintf(stderr, "Usage: %s [options] [file|-]\n", program_name);
   fprintf(stderr, "Options:\n");
+  fprintf(stderr, "  -e CODE       Evaluate inline source (may repeat)\n");
   fprintf(stderr, "  --spans       Enable detailed error reporting with source spans\n");
   fprintf(stderr, "  --builtins    Enable all extended built-in functions\n");
   fprintf(stderr, "  --builtin NAME  Enable a builtin category or preset (may repeat, comma-separated)\n");
@@ -166,18 +271,25 @@ static void print_usage(const char *program_name) {
   fprintf(stderr, "  --max-steps N  Abort evaluation after approximately N eval steps (0 disables)\n");
   fprintf(stderr, "  --timeout-ms N  Abort evaluation after roughly N milliseconds (0 disables)\n");
   fprintf(stderr, "  --memory-pool-size SIZE  Set memory pool size in MB (default: 5MB)\n");
+  fprintf(stderr, "  --version, -V  Show version information\n");
   fprintf(stderr, "  --help        Show this help message\n");
   fprintf(stderr, "\n");
-  fprintf(stderr, "If no file is provided, starts the interactive REPL.\n");
+  fprintf(stderr, "Use '-' to read source from stdin. If no file or -e input is provided,\n");
+  fprintf(stderr, "the CLI reads stdin when piped input is present; otherwise it starts the REPL.\n");
 }
 
 int main(int argc, char **argv) {
   int enable_spans = 0, i, module_path_count = 0;
+  int read_stdin = 0;
+  int end_of_options = 0;
   int exit_code = 0;
   size_t memory_pool_size = MEMORY_POOL_SIZE;
   size_t max_steps = 0;
   uint64_t timeout_ms = 0;
   const char *filename = NULL;
+  char *eval_source = NULL;
+  size_t eval_source_len = 0;
+  size_t eval_source_cap = 0;
   const char **module_paths = NULL;
   void *mem;
   fe_Context *ctx;
@@ -191,14 +303,48 @@ int main(int argc, char **argv) {
   }
 
   for (i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--spans") == 0) {
+    if (!end_of_options && strcmp(argv[i], "--") == 0) {
+      end_of_options = 1;
+    } else if (!end_of_options && strcmp(argv[i], "-e") == 0) {
+      if (filename != NULL || read_stdin) {
+        fprintf(stderr, "Multiple input sources specified.\n");
+        print_usage(argv[0]);
+        free(eval_source);
+        free(module_paths);
+        return 64;
+      }
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: -e requires a source string\n");
+        print_usage(argv[0]);
+        free(eval_source);
+        free(module_paths);
+        return 64;
+      }
+      if (eval_source != NULL &&
+          !append_source_fragment(&eval_source, &eval_source_len,
+                                  &eval_source_cap, "\n", 1)) {
+        fprintf(stderr, "Failed to allocate inline source buffer.\n");
+        free(eval_source);
+        free(module_paths);
+        return 1;
+      }
+      i++;
+      if (!append_source_fragment(&eval_source, &eval_source_len,
+                                  &eval_source_cap, argv[i], strlen(argv[i]))) {
+        fprintf(stderr, "Failed to allocate inline source buffer.\n");
+        free(eval_source);
+        free(module_paths);
+        return 1;
+      }
+    } else if (!end_of_options && strcmp(argv[i], "--spans") == 0) {
       enable_spans = 1;
-    } else if (strcmp(argv[i], "--builtins") == 0) {
+    } else if (!end_of_options && strcmp(argv[i], "--builtins") == 0) {
       builtins |= FEX_BUILTINS_ALL;
-    } else if (strcmp(argv[i], "--builtin") == 0) {
+    } else if (!end_of_options && strcmp(argv[i], "--builtin") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: --builtin requires a category or preset name\n");
         print_usage(argv[0]);
+        free(eval_source);
         free(module_paths);
         return 64;
       }
@@ -206,23 +352,27 @@ int main(int argc, char **argv) {
       if (!add_builtin_spec(&builtins, argv[i])) {
         fprintf(stderr, "Error: Unknown builtin category or preset '%s'\n", argv[i]);
         print_usage(argv[0]);
+        free(eval_source);
         free(module_paths);
         return 64;
       }
-    } else if (strcmp(argv[i], "--module-path") == 0 || strcmp(argv[i], "-I") == 0) {
+    } else if (!end_of_options &&
+               (strcmp(argv[i], "--module-path") == 0 || strcmp(argv[i], "-I") == 0)) {
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: %s requires a path argument\n", argv[i]);
         print_usage(argv[0]);
+        free(eval_source);
         free(module_paths);
         return 64;
       }
       module_paths[module_path_count++] = argv[++i];
-    } else if (strcmp(argv[i], "--max-steps") == 0) {
+    } else if (!end_of_options && strcmp(argv[i], "--max-steps") == 0) {
       char *endptr;
       unsigned long long parsed_steps;
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: --max-steps requires an integer value\n");
         print_usage(argv[0]);
+        free(eval_source);
         free(module_paths);
         return 64;
       }
@@ -231,16 +381,18 @@ int main(int argc, char **argv) {
       if (*endptr != '\0' || (size_t)parsed_steps != parsed_steps) {
         fprintf(stderr, "Error: Invalid max step count '%s'. Must be a non-negative integer.\n", argv[i]);
         print_usage(argv[0]);
+        free(eval_source);
         free(module_paths);
         return 64;
       }
       max_steps = (size_t)parsed_steps;
-    } else if (strcmp(argv[i], "--timeout-ms") == 0) {
+    } else if (!end_of_options && strcmp(argv[i], "--timeout-ms") == 0) {
       char *endptr;
       unsigned long long parsed_timeout_ms;
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: --timeout-ms requires an integer value\n");
         print_usage(argv[0]);
+        free(eval_source);
         free(module_paths);
         return 64;
       }
@@ -249,16 +401,18 @@ int main(int argc, char **argv) {
       if (*endptr != '\0' || (uint64_t)parsed_timeout_ms != parsed_timeout_ms) {
         fprintf(stderr, "Error: Invalid timeout '%s'. Must be a non-negative integer in milliseconds.\n", argv[i]);
         print_usage(argv[0]);
+        free(eval_source);
         free(module_paths);
         return 64;
       }
       timeout_ms = (uint64_t)parsed_timeout_ms;
-    } else if (strcmp(argv[i], "--memory-pool-size") == 0) {
+    } else if (!end_of_options && strcmp(argv[i], "--memory-pool-size") == 0) {
       char *endptr;
       long size_mb;
       if (i + 1 >= argc) {
         fprintf(stderr, "Error: --memory-pool-size requires a value in MB\n");
         print_usage(argv[0]);
+        free(eval_source);
         free(module_paths);
         return 64;
       }
@@ -267,23 +421,43 @@ int main(int argc, char **argv) {
       if (*endptr != '\0' || size_mb <= 0) {
         fprintf(stderr, "Error: Invalid memory pool size '%s'. Must be a positive integer in MB.\n", argv[i]);
         print_usage(argv[0]);
+        free(eval_source);
         free(module_paths);
         return 64;
       }
       memory_pool_size = (size_t)size_mb * 1024 * 1024;
-    } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-      print_usage(argv[0]);
+    } else if (!end_of_options &&
+               (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-V") == 0)) {
+      print_version();
+      free(eval_source);
       free(module_paths);
       return 0;
-    } else if (argv[i][0] == '-') {
+    } else if (!end_of_options &&
+               (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)) {
+      print_usage(argv[0]);
+      free(eval_source);
+      free(module_paths);
+      return 0;
+    } else if (!end_of_options && argv[i][0] == '-' && strcmp(argv[i], "-") != 0) {
       fprintf(stderr, "Unknown option: %s\n", argv[i]);
       print_usage(argv[0]);
+      free(eval_source);
       free(module_paths);
       return 64;
-    } else {
-      if (filename != NULL) {
-        fprintf(stderr, "Multiple input files specified.\n");
+    } else if (strcmp(argv[i], "-") == 0) {
+      if (filename != NULL || eval_source != NULL || read_stdin) {
+        fprintf(stderr, "Multiple input sources specified.\n");
         print_usage(argv[0]);
+        free(eval_source);
+        free(module_paths);
+        return 64;
+      }
+      read_stdin = 1;
+    } else {
+      if (filename != NULL || eval_source != NULL || read_stdin) {
+        fprintf(stderr, "Multiple input sources specified.\n");
+        print_usage(argv[0]);
+        free(eval_source);
         free(module_paths);
         return 64;
       }
@@ -294,6 +468,7 @@ int main(int argc, char **argv) {
   mem = malloc(memory_pool_size);
   if (!mem) {
     fprintf(stderr, "Failed to allocate %zu bytes for interpreter.\n", memory_pool_size);
+    free(eval_source);
     free(module_paths);
     return 1;
   }
@@ -302,6 +477,7 @@ int main(int argc, char **argv) {
   if (!ctx) {
     fprintf(stderr, "Failed to initialize interpreter context.\n");
     free(mem);
+    free(eval_source);
     free(module_paths);
     return 1;
   }
@@ -317,6 +493,7 @@ int main(int argc, char **argv) {
   for (i = 0; i < module_path_count; i++) {
     if (!fex_add_import_path(ctx, module_paths[i])) {
       fprintf(stderr, "Failed to add module path \"%s\".\n", module_paths[i]);
+      free(eval_source);
       free(module_paths);
       fe_close(ctx);
       free(mem);
@@ -325,12 +502,24 @@ int main(int argc, char **argv) {
   }
   free(module_paths);
 
-  if (filename == NULL) {
-    run_repl(ctx);
-  } else {
+  if (eval_source != NULL) {
+    exit_code = run_source(ctx, eval_source, "<expr>");
+  } else if (filename != NULL) {
     exit_code = run_file(ctx, filename);
+  } else if (read_stdin || !stdin_is_interactive()) {
+    char *stdin_source = NULL;
+    if (!read_stream_source(stdin, &stdin_source)) {
+      fprintf(stderr, "I/O error: could not read stdin\n");
+      exit_code = 74;
+    } else {
+      exit_code = run_source(ctx, stdin_source, "<stdin>");
+      free(stdin_source);
+    }
+  } else {
+    run_repl(ctx);
   }
 
+  free(eval_source);
   fe_close(ctx);
   free(mem);
   return exit_code;

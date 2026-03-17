@@ -51,7 +51,7 @@ On single-config generators such as Ninja or Unix Makefiles, omit `--config Debu
 
 ## Usage
 
-The `fex` executable can be used to run a script file or to start an interactive Read-Eval-Print Loop (REPL). The examples below use `<path-to-fex>` to stand in for your generator-specific executable path.
+The `fex` executable can run a script file, evaluate inline source, read source from stdin, or start an interactive Read-Eval-Print Loop (REPL). The examples below use `<path-to-fex>` to stand in for your generator-specific executable path.
 
 ### REPL
 
@@ -76,7 +76,27 @@ To execute a script file, pass the file path as an argument:
 <path-to-fex> your_script.fex
 ```
 
-Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, `--module-path PATH` adds file-based import search directories, `--max-steps N` aborts runaway evaluation after roughly `N` eval steps, and `--timeout-ms N` adds a wall-clock timeout. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
+### Inline Source
+
+To evaluate a snippet directly from the command line:
+
+```bash
+<path-to-fex> -e "println(40 + 2);"
+```
+
+`-e` may be repeated; FeX concatenates the snippets with newlines before compiling them.
+
+### Standard Input
+
+If stdin is piped and no file or `-e` input is provided, FeX executes stdin instead of starting the REPL. You can also force stdin mode explicitly with:
+
+```bash
+<path-to-fex> -
+```
+
+### CLI Flags
+
+Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, `--module-path PATH` adds file-based import search directories, `--max-steps N` aborts runaway evaluation after roughly `N` eval steps, `--timeout-ms N` adds a wall-clock timeout, and `--version` prints the CLI version. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
 
 ## Language Quick Tour
 
