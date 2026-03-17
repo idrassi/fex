@@ -25,18 +25,113 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <setjmp.h>
 
 #include "fex.h"
+#include "fex_internal.h"
 #include "fex_span.h"
 
-static void fex_print_line(const char *src,int ln)
-{
-    int i;
-    const char *p = src;
-    for (i=1;i<ln && *p;++p) if (*p=='\n') ++i;
-    const char *line_start = p;
-    while (*p && *p!='\n') ++p;
-    fprintf(stderr,"%.*s", (int)(p-line_start), line_start);
+typedef struct FexTryScope {
+    jmp_buf env;
+    FexError *error;
+    struct FexTryScope *previous;
+} FexTryScope;
+
+static FexTryScope *g_try_scope = NULL;
+
+static void copy_string(char *dst, size_t dst_size, const char *src) {
+    size_t len;
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    len = strlen(src);
+    if (len >= dst_size) {
+        len = dst_size - 1;
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+void fex_error_clear(FexError *error) {
+    if (!error) {
+        return;
+    }
+    memset(error, 0, sizeof(*error));
+    error->status = FEX_STATUS_OK;
+}
+
+static void fill_basic_error(FexError *error, FexStatus status,
+                             const char *source_name,
+                             int line, int column,
+                             const char *message) {
+    if (!error) {
+        return;
+    }
+    fex_error_clear(error);
+    error->status = status;
+    error->line = line;
+    error->column = column;
+    copy_string(error->source_name, sizeof(error->source_name),
+                source_name ? source_name : "<string>");
+    copy_string(error->message, sizeof(error->message), message);
+}
+
+int fex_try_is_active(void) {
+    return g_try_scope != NULL;
+}
+
+void fex_try_raise(FexStatus status, const char *source_name,
+                   int line, int column, const char *message) {
+    if (!g_try_scope) {
+        return;
+    }
+    fill_basic_error(g_try_scope->error, status, source_name, line, column, message);
+    longjmp(g_try_scope->env, 1);
+}
+
+static void fill_runtime_trace(fe_Context *ctx, FexError *error, fe_Object *cl) {
+    int depth;
+
+    if (!error) {
+        return;
+    }
+
+    for (depth = 0; depth < FEX_ERROR_TRACE_MAX && !fe_isnil(ctx, cl);
+         ++depth, cl = fe_cdr(ctx, cl)) {
+        FexErrorFrame *frame = &error->frames[depth];
+        const FexSpan *sp = fex_lookup_span(fe_car(ctx, cl));
+
+        if (sp) {
+            copy_string(frame->source_name, sizeof(frame->source_name),
+                        sp->source_name ? sp->source_name : "<string>");
+            frame->line = sp->start_line;
+            frame->column = sp->start_col;
+            if (error->line == 0) {
+                error->line = frame->line;
+                error->column = frame->column;
+                copy_string(error->source_name, sizeof(error->source_name),
+                            frame->source_name);
+            }
+        }
+
+        fe_tostring(ctx, fe_car(ctx, cl), frame->expression, sizeof(frame->expression));
+        error->frame_count = depth + 1;
+    }
+}
+
+static void fex_try_on_error(fe_Context *ctx, const char *msg, fe_Object *cl) {
+    fill_basic_error(g_try_scope ? g_try_scope->error : NULL,
+                     FEX_STATUS_RUNTIME_ERROR, "<string>", 0, 0, msg);
+    if (g_try_scope && g_try_scope->error) {
+        fill_runtime_trace(ctx, g_try_scope->error, cl);
+    }
+    if (g_try_scope) {
+        longjmp(g_try_scope->env, 1);
+    }
 }
 
 static void fex_on_error(fe_Context *ctx,const char *msg,fe_Object *cl)
@@ -45,18 +140,60 @@ static void fex_on_error(fe_Context *ctx,const char *msg,fe_Object *cl)
     fprintf(stderr,"error: %s\n",msg);
     for (depth=0; !fe_isnil(ctx,cl); ++depth, cl=fe_cdr(ctx,cl)) {
         const FexSpan *sp = fex_lookup_span(fe_car(ctx,cl));
+        char buf[128];
+        fe_tostring(ctx, fe_car(ctx,cl), buf, sizeof buf);
         if (sp) {
-            fprintf(stderr,"[%d] %s:%d:%d  =>  ",
-                    depth, "<string>", sp->start_line, sp->start_col);
-            fex_print_line(sp->source, sp->start_line);
-            fputc('\n',stderr);
+            fprintf(stderr,"[%d] %s:%d:%d  =>  %s\n",
+                    depth,
+                    sp->source_name ? sp->source_name : "<string>",
+                    sp->start_line,
+                    sp->start_col,
+                    buf);
         } else {
-            /* fallback - same as old printing */
-            char buf[64]; fe_tostring(ctx, fe_car(ctx,cl), buf, sizeof buf);
             fprintf(stderr,"[%d] %s\n", depth, buf);
         }
     }
     exit(EXIT_FAILURE);             /* prevent double-printing in fe_error */
+}
+
+void fex_print_error(FILE *fp, const FexError *error) {
+    int i;
+    const char *label;
+
+    if (!fp || !error || error->status == FEX_STATUS_OK) {
+        return;
+    }
+
+    switch (error->status) {
+        case FEX_STATUS_COMPILE_ERROR: label = "compile error"; break;
+        case FEX_STATUS_RUNTIME_ERROR: label = "runtime error"; break;
+        case FEX_STATUS_IO_ERROR: label = "I/O error"; break;
+        default: label = "error"; break;
+    }
+
+    fprintf(fp, "%s: %s\n", label, error->message[0] ? error->message : "unknown error");
+    if (error->line > 0) {
+        fprintf(fp, "at %s:%d:%d\n",
+                error->source_name[0] ? error->source_name : "<string>",
+                error->line, error->column > 0 ? error->column : 1);
+    } else if (error->source_name[0]) {
+        fprintf(fp, "at %s\n", error->source_name);
+    }
+
+    for (i = 0; i < error->frame_count; ++i) {
+        const FexErrorFrame *frame = &error->frames[i];
+        fprintf(fp, "[%d]", i);
+        if (frame->source_name[0]) {
+            fprintf(fp, " %s", frame->source_name);
+            if (frame->line > 0) {
+                fprintf(fp, ":%d:%d", frame->line, frame->column > 0 ? frame->column : 1);
+            }
+        }
+        if (frame->expression[0]) {
+            fprintf(fp, " => %s", frame->expression);
+        }
+        fputc('\n', fp);
+    }
 }
 
 
@@ -203,6 +340,8 @@ typedef struct {
 
 typedef struct {
   fe_Context *ctx;
+  const char *source;
+  const char *source_name;
   const char *start;
   const char *current;
   const char *line_start;
@@ -218,7 +357,8 @@ static fe_Object *fex_cons_tok(fe_Context *c,
                                Token start, Token end)
 {
     fe_Object *cell = fe_cons(c, car, cdr);
-    fex_record_span(cell, L.start /*still points into the same buffer*/,
+    fex_record_span(cell, L.source,
+                    L.source_name,
                     start.line, start.column,
                     end.line,   end.column);
     return cell;
@@ -226,6 +366,8 @@ static fe_Object *fex_cons_tok(fe_Context *c,
 
 static void init_lexer(fe_Context *ctx, const char* source) {
   L.ctx = ctx;
+  L.source = source;
+  L.source_name = "<string>";
   L.start = source;
   L.current = source;
   L.line_start = source;
@@ -401,6 +543,7 @@ static Token scan_token() {
 
 typedef struct {
     fe_Context *ctx;
+    const char *source_name;
     Token current;
     Token previous;
     int had_error;
@@ -499,6 +642,12 @@ ParseRule rules[] = {
 
 
 static void error_at(Token* token, const char* message) {
+  if (fex_try_is_active()) {
+    fex_try_raise(FEX_STATUS_COMPILE_ERROR,
+                  P.source_name ? P.source_name : "<string>",
+                  token->line, token->column, message);
+    return;
+  }
   if (P.panic_mode) return;
   P.panic_mode = 1;
   fprintf(stderr, "[line %d] Error", token->line);
@@ -990,10 +1139,13 @@ static fe_Object* declaration() {
     return stmt;
 }
 
-fe_Object* fex_compile(fe_Context *ctx, const char *source) {
+fe_Object* fex_compile_named(fe_Context *ctx, const char *source,
+                             const char *source_name) {
     init_lexer(ctx, source);
 
     P.ctx = ctx;
+    P.source_name = source_name ? source_name : "<string>";
+    L.source_name = P.source_name;
     P.had_error = 0;
     P.panic_mode = 0;
     fe_Object* nil_obj = fex_nil(P.ctx);
@@ -1032,9 +1184,14 @@ fe_Object* fex_compile(fe_Context *ctx, const char *source) {
     return program;
 }
 
-fe_Object* fex_do_string(fe_Context *ctx, const char *source) {
+fe_Object* fex_compile(fe_Context *ctx, const char *source) {
+    return fex_compile_named(ctx, source, "<string>");
+}
+
+fe_Object* fex_do_string_named(fe_Context *ctx, const char *source,
+                               const char *source_name) {
     int gc_save = fe_savegc(ctx);
-    fe_Object* code = fex_compile(ctx, source);
+    fe_Object* code = fex_compile_named(ctx, source, source_name);
     if (!code) {
         fe_restoregc(ctx, gc_save);
         return NULL;
@@ -1043,4 +1200,89 @@ fe_Object* fex_do_string(fe_Context *ctx, const char *source) {
     fe_Object *res = fe_eval(ctx, code);
     fe_restoregc(ctx, gc_save);
     return res;
+}
+
+fe_Object* fex_do_string(fe_Context *ctx, const char *source) {
+    return fex_do_string_named(ctx, source, "<string>");
+}
+
+static FexStatus run_try(fe_Context *ctx, fe_Object **out_result,
+                         FexError *out_error,
+                         fe_Object *(*fn)(fe_Context *ctx, const void *a, const void *b),
+                         const void *arg_a, const void *arg_b) {
+    FexTryScope scope;
+    fe_ErrorFn previous_error = fe_handlers(ctx)->error;
+    int jump_result;
+
+    if (out_result) {
+        *out_result = NULL;
+    }
+    fex_error_clear(out_error);
+
+    scope.error = out_error;
+    scope.previous = g_try_scope;
+    g_try_scope = &scope;
+    fe_handlers(ctx)->error = fex_try_on_error;
+
+    jump_result = setjmp(scope.env);
+    if (jump_result == 0) {
+        fe_Object *result = fn(ctx, arg_a, arg_b);
+        g_try_scope = scope.previous;
+        fe_handlers(ctx)->error = previous_error;
+        if (out_result) {
+            *out_result = result;
+        }
+        return FEX_STATUS_OK;
+    }
+
+    g_try_scope = scope.previous;
+    fe_handlers(ctx)->error = previous_error;
+    fex_reset_import_state(ctx);
+    if (out_error && out_error->status == FEX_STATUS_OK) {
+        out_error->status = FEX_STATUS_RUNTIME_ERROR;
+        copy_string(out_error->message, sizeof(out_error->message), "unknown error");
+    }
+    return out_error ? out_error->status : FEX_STATUS_RUNTIME_ERROR;
+}
+
+static fe_Object *try_compile_runner(fe_Context *ctx, const void *source,
+                                     const void *source_name) {
+    return fex_compile_named(ctx, (const char*)source, (const char*)source_name);
+}
+
+static fe_Object *try_eval_runner(fe_Context *ctx, const void *obj, const void *unused) {
+    (void)unused;
+    return fe_eval(ctx, (fe_Object*)obj);
+}
+
+static fe_Object *try_do_string_runner(fe_Context *ctx, const void *source,
+                                       const void *source_name) {
+    return fex_do_string_named(ctx, (const char*)source, (const char*)source_name);
+}
+
+static fe_Object *try_do_file_runner(fe_Context *ctx, const void *path, const void *unused) {
+    (void)unused;
+    return fex_do_file(ctx, (const char*)path);
+}
+
+FexStatus fex_try_compile(fe_Context *ctx, const char *source,
+                          const char *source_name, fe_Object **out_code,
+                          FexError *out_error) {
+    return run_try(ctx, out_code, out_error, try_compile_runner, source,
+                   source_name ? source_name : "<string>");
+}
+
+FexStatus fex_try_eval(fe_Context *ctx, fe_Object *obj, fe_Object **out_result,
+                       FexError *out_error) {
+    return run_try(ctx, out_result, out_error, try_eval_runner, obj, NULL);
+}
+
+FexStatus fex_try_do_string(fe_Context *ctx, const char *source,
+                            fe_Object **out_result, FexError *out_error) {
+    return run_try(ctx, out_result, out_error, try_do_string_runner, source, "<string>");
+}
+
+FexStatus fex_try_do_file(fe_Context *ctx, const char *path,
+                          fe_Object **out_result, FexError *out_error) {
+    return run_try(ctx, out_result, out_error, try_do_file_runner, path, NULL);
 }

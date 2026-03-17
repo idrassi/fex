@@ -22,25 +22,25 @@
 
 #ifndef FEX_SPAN_H
 #define FEX_SPAN_H
+
 #include "fe.h"
 
-/* One entry per AST node.  All pointers are *stable* because Fe never
-   moves objects after allocation.  */
 typedef struct FexSpan {
-    const fe_Object *node;          /* key – the cons cell returned by fe_cons */
-    const char      *source;        /* original buffer given to fex_compile()  */
-    int  start_line, start_col;     /* 1-based                                 */
-    int  end_line,   end_col;
+    const fe_Object *node;
+    const char *source;
+    const char *source_name;
+    int start_line, start_col;
+    int end_line, end_col;
     struct FexSpan *next;
 } FexSpan;
 
-void  fex_record_span(const fe_Object *node,
-                      const char *src,
-                      int sline,int scol,int eline,int ecol);
+void fex_record_span(const fe_Object *node,
+                     const char *src,
+                     const char *source_name,
+                     int sline, int scol, int eline, int ecol);
 
 const FexSpan *fex_lookup_span(const fe_Object *node);
 
-/* Configuration */
 void fex_span_set_enabled(int enabled);
 int fex_span_is_enabled(void);
 

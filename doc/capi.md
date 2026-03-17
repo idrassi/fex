@@ -43,7 +43,7 @@ Objects created after `fe_savegc()` remain protected until the matching `fe_rest
 
 ### Source Location Tracking
 
-FeX can associate AST nodes with source locations. This is mainly useful when you install a custom error handler and want line/column data for stack frames. Use `fex_lookup_span()` for that lookup.
+FeX can associate AST nodes with source locations. This is mainly useful when you install a custom error handler or when you want to correlate `FexError` stack frames with compiled nodes. Use `fex_lookup_span()` for that lookup.
 
 ## Basic Setup and Teardown
 
@@ -117,35 +117,59 @@ int main(void) {
 
 ## Running FeX Code
 
-### fex_do_string()
+### Legacy Convenience Calls
 
 ```c
 fe_Object *fex_do_string(fe_Context *ctx, const char *source);
+fe_Object *fex_do_file(fe_Context *ctx, const char *path);
 ```
 
-Compiles and then evaluates a string of FeX source. It returns the result of the last expression.
+These helpers are convenient for simple tools:
 
-- On compile errors, it returns `NULL`.
-- On runtime errors, control goes through the installed error handler. The default handler terminates the process.
+- `fex_do_string()` compiles and evaluates a source string.
+- `fex_do_file()` reads, compiles, and evaluates a file, resolving relative imports against that file's directory.
+- On compile errors they return `NULL`.
+- On runtime errors they go through the installed error handler. The default FeX handler prints a traceback and terminates the process.
+
+### Recoverable Execution APIs
+
+```c
+FexStatus fex_try_compile(fe_Context *ctx, const char *source,
+                          const char *source_name, fe_Object **out_code,
+                          FexError *out_error);
+FexStatus fex_try_eval(fe_Context *ctx, fe_Object *obj, fe_Object **out_result,
+                       FexError *out_error);
+FexStatus fex_try_do_string(fe_Context *ctx, const char *source,
+                            fe_Object **out_result, FexError *out_error);
+FexStatus fex_try_do_file(fe_Context *ctx, const char *path,
+                          fe_Object **out_result, FexError *out_error);
+void fex_error_clear(FexError *error);
+void fex_print_error(FILE *fp, const FexError *error);
+```
+
+Use these APIs when the host must recover from failures instead of exiting.
+
+- `fex_try_compile()` returns a compiled AST or a structured compile error. `source_name` is copied into diagnostics; pass `NULL` for `"<string>"`.
+- `fex_try_eval()` evaluates a precompiled AST and captures runtime failures.
+- `fex_try_do_string()` and `fex_try_do_file()` cover the full compile/eval path.
+- `FexStatus` is one of `FEX_STATUS_OK`, `FEX_STATUS_COMPILE_ERROR`, `FEX_STATUS_RUNTIME_ERROR`, or `FEX_STATUS_IO_ERROR`.
+- `FexError` carries the copied error message, source name, line/column, and up to `FEX_ERROR_TRACE_MAX` traceback frames.
 
 ```c
 int gc_idx = fe_savegc(ctx);
-fe_Object *result = fex_do_string(ctx, "let x = 10 + 32; x;");
+fe_Object *result = NULL;
+FexError error;
+FexStatus status;
 
-if (result) {
+status = fex_try_do_string(ctx, "let x = 10 + 32; x;", &result, &error);
+if (status == FEX_STATUS_OK) {
     printf("Result: %g\n", fe_tonumber(ctx, result));
+} else {
+    fex_print_error(stderr, &error);
 }
 
 fe_restoregc(ctx, gc_idx);
 ```
-
-### fex_do_file()
-
-```c
-fe_Object *fex_do_file(fe_Context *ctx, const char *path);
-```
-
-Reads, compiles, and evaluates a source file. Relative imports from that file resolve against the file's directory.
 
 ### fex_compile() and fe_eval()
 
@@ -154,19 +178,7 @@ fe_Object *fex_compile(fe_Context *ctx, const char *source);
 fe_Object *fe_eval(fe_Context *ctx, fe_Object *obj);
 ```
 
-Use `fex_compile()` when you want to separate parsing from evaluation. The returned AST is an ordinary `fe_Object *` owned by the same context that compiled it.
-
-```c
-int gc_idx = fe_savegc(ctx);
-fe_Object *code = fex_compile(ctx, "100 / 2;");
-
-if (code) {
-    fe_Object *result = fe_eval(ctx, code);
-    /* ... */
-}
-
-fe_restoregc(ctx, gc_idx);
-```
+Use `fex_compile()` and `fe_eval()` directly when you want the low-level split between parsing and evaluation and are willing to manage errors through either the installed handler or the `fex_try_*` wrappers.
 
 ### Import Search Paths
 
@@ -307,7 +319,7 @@ fe_restoregc(ctx, gc_idx);
 
 ## Error Handling
 
-By default, `fex_init()` installs an error handler that prints a message and terminates the process. Hosts that need to recover can replace that handler.
+By default, `fex_init()` installs an error handler that prints a message and terminates the process. For most embedders, the recommended path is to keep that default handler and call `fex_try_*` when you need recovery.
 
 ### fe_handlers()
 
@@ -315,13 +327,13 @@ By default, `fex_init()` installs an error handler that prints a message and ter
 fe_Handlers *fe_handlers(fe_Context *ctx);
 ```
 
-`fe_handlers(ctx)->error` may be replaced with a custom `fe_ErrorFn`:
+You may still replace `fe_handlers(ctx)->error` with a custom `fe_ErrorFn`:
 
 ```c
 typedef void (*fe_ErrorFn)(fe_Context *ctx, const char *err, fe_Object *cl);
 ```
 
-The `cl` argument is the FeX call stack represented as a list of AST nodes.
+The `cl` argument is the FeX call stack represented as a list of AST nodes. Custom handlers are useful for advanced integrations, but `fex_try_*` is usually simpler because it packages the same information into `FexError` and keeps the interpreter in-process.
 
 ### fex_lookup_span()
 
@@ -329,7 +341,7 @@ The `cl` argument is the FeX call stack represented as a list of AST nodes.
 const FexSpan *fex_lookup_span(const fe_Object *node);
 ```
 
-If span tracking is enabled, this returns source information for an AST node. The returned `FexSpan` includes the source buffer pointer plus start and end line/column positions.
+If span tracking is enabled, this returns source information for an AST node. `FexSpan` records start/end line and column information plus a stable source-name label for diagnostics.
 
 ## Threading and Re-entrancy
 

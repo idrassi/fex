@@ -35,6 +35,35 @@ typedef enum {
     FEX_CONFIG_ENABLE_EXTENDED_BUILTINS = 1 << 1,
 } FexConfig;
 
+typedef enum {
+    FEX_STATUS_OK = 0,
+    FEX_STATUS_COMPILE_ERROR,
+    FEX_STATUS_RUNTIME_ERROR,
+    FEX_STATUS_IO_ERROR
+} FexStatus;
+
+#define FEX_ERROR_MESSAGE_MAX 256
+#define FEX_ERROR_SOURCE_NAME_MAX 260
+#define FEX_ERROR_EXPRESSION_MAX 128
+#define FEX_ERROR_TRACE_MAX 8
+
+typedef struct {
+    char source_name[FEX_ERROR_SOURCE_NAME_MAX];
+    int line;
+    int column;
+    char expression[FEX_ERROR_EXPRESSION_MAX];
+} FexErrorFrame;
+
+typedef struct {
+    FexStatus status;
+    char message[FEX_ERROR_MESSAGE_MAX];
+    char source_name[FEX_ERROR_SOURCE_NAME_MAX];
+    int line;
+    int column;
+    int frame_count;
+    FexErrorFrame frames[FEX_ERROR_TRACE_MAX];
+} FexError;
+
 /*
  * Initializes the FeX environment, registering custom built-in
  * functions like 'print'. Must be called after fe_open().
@@ -53,16 +82,45 @@ void fex_init_with_config(fe_Context *ctx, FexConfig config);
 fe_Object* fex_compile(fe_Context *ctx, const char *source);
 
 /*
+ * Compiles source and reports structured errors instead of printing and
+ * continuing. `source_name` is used in diagnostics; pass NULL for "<string>".
+ */
+FexStatus fex_try_compile(fe_Context *ctx, const char *source,
+                          const char *source_name, fe_Object **out_code,
+                          FexError *out_error);
+
+/*
  * A convenience function that compiles and then evaluates a string
  * of source code.
  */
 fe_Object* fex_do_string(fe_Context *ctx, const char *source);
 
 /*
+ * Evaluates a precompiled AST and reports runtime errors without terminating
+ * the process.
+ */
+FexStatus fex_try_eval(fe_Context *ctx, fe_Object *obj, fe_Object **out_result,
+                       FexError *out_error);
+
+/*
+ * Compiles and evaluates a string of source code without terminating the
+ * process on compile/runtime errors.
+ */
+FexStatus fex_try_do_string(fe_Context *ctx, const char *source,
+                            fe_Object **out_result, FexError *out_error);
+
+/*
  * Reads, compiles, and evaluates a source file. Relative imports from that
  * file resolve against the file's directory.
  */
 fe_Object* fex_do_file(fe_Context *ctx, const char *path);
+
+/*
+ * Reads, compiles, and evaluates a source file without terminating the
+ * process on I/O, compile, or runtime errors.
+ */
+FexStatus fex_try_do_file(fe_Context *ctx, const char *path,
+                          fe_Object **out_result, FexError *out_error);
 
 /*
  * Adds an import search path for file-based `import` resolution.
@@ -80,5 +138,15 @@ void fex_clear_import_paths(fe_Context *ctx);
  * This leaves configured import paths and loaded-module cache intact.
  */
 void fex_reset_import_state(fe_Context *ctx);
+
+/*
+ * Initializes an error object to the empty/success state.
+ */
+void fex_error_clear(FexError *error);
+
+/*
+ * Prints a structured error in a human-readable format.
+ */
+void fex_print_error(FILE *fp, const FexError *error);
 
 #endif

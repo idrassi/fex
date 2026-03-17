@@ -31,6 +31,7 @@
 #include <string.h>
 #include "fe.h"
 #include "fex.h"
+#include "fex_internal.h"
 
 #define unused(x)     ( (void) (x) )
 #define car(x)        ( (x)->car.o )
@@ -119,6 +120,9 @@ struct fe_Context {
   char **source_dirs;
   int source_dir_count;
   int source_dir_capacity;
+  char **source_buffers;
+  int source_buffer_count;
+  int source_buffer_capacity;
   char **loading_modules;
   int loading_module_count;
   int loading_module_capacity;
@@ -459,6 +463,9 @@ int fex_add_import_path(fe_Context *ctx, const char *path) {
 }
 
 void fex_reset_import_state(fe_Context *ctx) {
+  while (ctx->source_buffer_count > 0) {
+    string_array_pop(ctx->source_buffers, &ctx->source_buffer_count);
+  }
   while (ctx->source_dir_count > 0) {
     pop_source_dir(ctx);
   }
@@ -478,11 +485,20 @@ fe_Object* fex_do_file(fe_Context *ctx, const char *path) {
   source = read_text_file(path);
   if (!source) {
     pop_source_dir(ctx);
+    if (fex_try_is_active()) {
+      fex_try_raise(FEX_STATUS_IO_ERROR, path, 0, 0, "could not open input file");
+    }
     return NULL;
   }
+  if (!string_array_push_owned(&ctx->source_buffers, &ctx->source_buffer_count,
+                               &ctx->source_buffer_capacity, source)) {
+    pop_source_dir(ctx);
+    free(source);
+    fe_error(ctx, "out of memory (source path)");
+  }
 
-  result = fex_do_string(ctx, source);
-  free(source);
+  result = fex_do_string_named(ctx, source, path);
+  string_array_pop(ctx->source_buffers, &ctx->source_buffer_count);
   pop_source_dir(ctx);
   return result;
 }
@@ -1936,6 +1952,7 @@ void fe_close(fe_Context *ctx) {
   collectgarbage(ctx);
   string_array_clear(&ctx->import_paths, &ctx->import_path_count, &ctx->import_path_capacity);
   string_array_clear(&ctx->source_dirs, &ctx->source_dir_count, &ctx->source_dir_capacity);
+  string_array_clear(&ctx->source_buffers, &ctx->source_buffer_count, &ctx->source_buffer_capacity);
   string_array_clear(&ctx->loading_modules, &ctx->loading_module_count, &ctx->loading_module_capacity);
   string_array_clear(&ctx->loaded_modules, &ctx->loaded_module_count, &ctx->loaded_module_capacity);
 }

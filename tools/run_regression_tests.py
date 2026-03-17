@@ -72,29 +72,45 @@ CASES = [
         "name": "bad module syntax",
         "source": 'module(123) {\n    export let y = 20;\n}\n',
         "exit_code": 65,
-        "stderr": "[line 1] Error at '123': Expect module name string.\n",
+        "stderr_contains": [
+            "compile error: Expect module name string.",
+            "at ",
+        ],
     },
     {
         "name": "export outside module",
         "source": "export let x = 10;\n",
-        "exit_code": 1,
-        "stderr": "error: export outside of module\n[0] (export (let x 10))\n",
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: export outside of module",
+            "[0] => (export (let x 10))",
+        ],
     },
     {
         "name": "invalid pair property",
         "source": "let p = 1 :: 2 :: nil;\np.foo;\n",
-        "exit_code": 1,
+        "args": ["--spans"],
+        "exit_code": 70,
         "stderr_contains": [
-            "Only .head, .first, .tail, and .rest are valid on pairs",
+            "runtime error: Only .head, .first, .tail, and .rest are valid on pairs",
+            "=> (get p foo)",
         ],
     },
     {
         "name": "cyclic import",
         "source": "import cycle_a;\n",
-        "args": ["--module-path", ROOT / "scripts" / "import_cycles"],
-        "exit_code": 1,
+        "args": ["--module-path", ROOT / "scripts" / "import_cycles", "--spans"],
+        "exit_code": 70,
         "stderr_contains": [
             "cyclic import detected for module 'cycle_a'",
+        ],
+    },
+    {
+        "name": "missing input file",
+        "script": ROOT / "scripts" / "missing-does-not-exist.fex",
+        "exit_code": 74,
+        "stderr_contains": [
+            "I/O error: could not open input file",
         ],
     },
 ]

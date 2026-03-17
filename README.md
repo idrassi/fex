@@ -32,7 +32,7 @@ FeX provides a familiar "curly-brace" syntax front-end that compiles down to the
 *   **Pair Sugar**: `::` builds pairs, `.head`/`.first` and `.tail`/`.rest` read them, and pair selectors can be assigned.
 *   **Zero-Malloc Runtime**: Operates within a single, fixed-size memory arena. No `malloc`/`free` calls are made during script execution, making it highly predictable.
 *   **Garbage Collection**: A simple and fast mark-and-sweep garbage collector manages the memory arena.
-*   **Great Error Reporting**: The parser provides precise error messages with source file line and column numbers.
+*   **Recoverable Diagnostics**: The CLI and C API can surface structured compile, runtime, and file I/O errors without terminating the host process.
 *   **Embeddable C API**: A clean API allows you to easily embed FeX into your C projects, call FeX functions from C, and expose C functions to FeX.
 *   **Highly Portable**: Written in pure ANSI C (C89), it compiles on any standard-compliant C compiler.
 *   **Concise**: The entire implementation (parser, compiler, and VM) is approximately 1800 lines of code.
@@ -76,7 +76,7 @@ To execute a script file, pass the file path as an argument:
 <path-to-fex> your_script.fex
 ```
 
-Pass `--builtins` to enable the optional extended builtins set, `--spans` for richer source-location diagnostics, and `--module-path PATH` to add file-based import search directories.
+Pass `--builtins` to enable the optional extended builtins set, `--spans` for richer source-location diagnostics, and `--module-path PATH` to add file-based import search directories. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
 
 ## Language Quick Tour
 
@@ -163,7 +163,7 @@ println(pair);           // (10 2 3)
 
 ## Embedding API
 
-FeX is easy to embed. Here is a minimal example of running a FeX script from C.
+FeX is easy to embed. For host applications, prefer the recoverable `fex_try_*` APIs so script failures stay in-process and return structured diagnostics.
 
 ```c
 #include <stdio.h>
@@ -172,30 +172,40 @@ FeX is easy to embed. Here is a minimal example of running a FeX script from C.
 #include "fe.h"
 #include "fex.h"
 
-#define MEMORY_POOL_SIZE (1024 * 1024) // 1MB
+#define MEMORY_POOL_SIZE (1024 * 1024) /* 1MB */
 
-int main() {
-    // 1. Allocate a memory pool for the interpreter.
-    void* mem = malloc(MEMORY_POOL_SIZE);
+int main(void) {
+    void *mem = malloc(MEMORY_POOL_SIZE);
+    fe_Context *ctx;
+    FexError error;
+    FexStatus status;
+    const char *script = "println(\"Hello from embedded FeX!\");";
+
     if (!mem) return 1;
 
-    // 2. Open a fe_Context within the pool.
-    fe_Context *ctx = fe_open(mem, MEMORY_POOL_SIZE);
+    ctx = fe_open(mem, MEMORY_POOL_SIZE);
+    if (!ctx) {
+        free(mem);
+        return 1;
+    }
 
-    // 3. Initialize the FeX environment (registers built-ins like println).
     fex_init(ctx);
 
-    // 4. Compile and run a string of code.
-    const char *script = "println(\"Hello from embedded FeX!\");";
-    fex_do_string(ctx, script);
+    status = fex_try_do_string(ctx, script, NULL, &error);
+    if (status != FEX_STATUS_OK) {
+        fex_print_error(stderr, &error);
+        fe_close(ctx);
+        free(mem);
+        return 1;
+    }
 
-    // 5. Clean up.
     fe_close(ctx);
     free(mem);
-
     return 0;
 }
 ```
+
+`fex_do_string()` and `fex_do_file()` are still available for simple tools, but on runtime faults they go through the installed error handler. The default FeX handler prints a traceback and exits.
 
 If you want optional helpers such as `sqrt`, `map`, `filter`, and `makestring`, initialize with `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` instead of plain `fex_init(ctx)`.
 
