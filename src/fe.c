@@ -30,6 +30,7 @@
 #include <limits.h>
 #include <string.h>
 #include "fe.h"
+#include "fex.h"
 
 #define unused(x)     ( (void) (x) )
 #define car(x)        ( (x)->car.o )
@@ -112,6 +113,18 @@ struct fe_Context {
   fe_Object *symlist;
   fe_Object *t;
   int nextchr;
+  char **import_paths;
+  int import_path_count;
+  int import_path_capacity;
+  char **source_dirs;
+  int source_dir_count;
+  int source_dir_capacity;
+  char **loading_modules;
+  int loading_module_count;
+  int loading_module_capacity;
+  char **loaded_modules;
+  int loaded_module_count;
+  int loaded_module_capacity;
   /* --- GC fields --- */
   int live_count;          /* Objects surviving last GC */
   int allocs_since_gc;     /* Objects allocated since last GC */
@@ -236,6 +249,242 @@ static void analyze(fe_Context *ctx, fe_Object *node, fe_Object *bound, fe_Objec
 
 fe_Handlers* fe_handlers(fe_Context *ctx) {
   return &ctx->handlers;
+}
+
+
+static char* dup_cstring(const char *src) {
+  size_t len;
+  char *copy;
+  if (!src) return NULL;
+  len = strlen(src) + 1;
+  copy = malloc(len);
+  if (!copy) return NULL;
+  memcpy(copy, src, len);
+  return copy;
+}
+
+static int ensure_string_array_capacity(char ***items, int *capacity, int needed) {
+  int new_capacity;
+  char **new_items;
+  if (needed <= *capacity) return 1;
+  new_capacity = (*capacity > 0) ? *capacity * 2 : 4;
+  while (new_capacity < needed) {
+    new_capacity *= 2;
+  }
+  new_items = realloc(*items, sizeof(char*) * new_capacity);
+  if (!new_items) return 0;
+  *items = new_items;
+  *capacity = new_capacity;
+  return 1;
+}
+
+static int string_array_push_owned(char ***items, int *count, int *capacity, char *value) {
+  if (!ensure_string_array_capacity(items, capacity, *count + 1)) return 0;
+  (*items)[*count] = value;
+  (*count)++;
+  return 1;
+}
+
+static int string_array_push_copy(char ***items, int *count, int *capacity, const char *value) {
+  char *copy = dup_cstring(value);
+  if (!copy) return 0;
+  if (!string_array_push_owned(items, count, capacity, copy)) {
+    free(copy);
+    return 0;
+  }
+  return 1;
+}
+
+static void string_array_clear(char ***items, int *count, int *capacity) {
+  int i;
+  for (i = 0; i < *count; i++) {
+    free((*items)[i]);
+  }
+  free(*items);
+  *items = NULL;
+  *count = 0;
+  *capacity = 0;
+}
+
+static int string_array_contains(char **items, int count, const char *value) {
+  int i;
+  for (i = 0; i < count; i++) {
+    if (strcmp(items[i], value) == 0) return 1;
+  }
+  return 0;
+}
+
+static void string_array_pop(char **items, int *count) {
+  if (*count <= 0) return;
+  (*count)--;
+  free(items[*count]);
+  items[*count] = NULL;
+}
+
+static int is_path_separator(char chr) {
+  return chr == '/' || chr == '\\';
+}
+
+static char* path_dirname_copy(const char *path) {
+  const char *last_sep = NULL;
+  const char *p;
+  size_t len;
+  char *dir;
+
+  if (!path || !*path) return dup_cstring(".");
+  for (p = path; *p; p++) {
+    if (is_path_separator(*p)) last_sep = p;
+  }
+  if (!last_sep) return dup_cstring(".");
+
+  len = (size_t)(last_sep - path);
+  if (len == 0) len = 1;
+  dir = malloc(len + 1);
+  if (!dir) return NULL;
+  memcpy(dir, path, len);
+  dir[len] = '\0';
+  return dir;
+}
+
+static char* join_module_path(const char *base, const char *module_name) {
+  static const char suffix[] = ".fex";
+  size_t base_len;
+  size_t module_len;
+  size_t needs_sep;
+  char *path;
+
+  base_len = strlen(base);
+  module_len = strlen(module_name);
+  needs_sep = (base_len > 0 && !is_path_separator(base[base_len - 1])) ? 1 : 0;
+  path = malloc(base_len + needs_sep + module_len + sizeof(suffix));
+  if (!path) return NULL;
+  memcpy(path, base, base_len);
+  if (needs_sep) path[base_len++] = '/';
+  memcpy(path + base_len, module_name, module_len);
+  base_len += module_len;
+  memcpy(path + base_len, suffix, sizeof(suffix));
+  return path;
+}
+
+static int file_exists(const char *path) {
+  FILE *fp = fopen(path, "rb");
+  if (!fp) return 0;
+  fclose(fp);
+  return 1;
+}
+
+static char* read_text_file(const char *path) {
+  FILE *file;
+  long file_size;
+  size_t bytes_read;
+  char *buffer;
+
+  file = fopen(path, "rb");
+  if (!file) return NULL;
+  if (fseek(file, 0L, SEEK_END) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  file_size = ftell(file);
+  if (file_size < 0) {
+    fclose(file);
+    return NULL;
+  }
+  rewind(file);
+
+  buffer = malloc((size_t)file_size + 1);
+  if (!buffer) {
+    fclose(file);
+    return NULL;
+  }
+  bytes_read = fread(buffer, 1, (size_t)file_size, file);
+  if (bytes_read != (size_t)file_size && ferror(file)) {
+    free(buffer);
+    fclose(file);
+    return NULL;
+  }
+  buffer[bytes_read] = '\0';
+  fclose(file);
+  return buffer;
+}
+
+static int push_source_dir_from_file(fe_Context *ctx, const char *path) {
+  char *dir = path_dirname_copy(path);
+  if (!dir) return 0;
+  if (!string_array_push_owned(&ctx->source_dirs, &ctx->source_dir_count,
+                               &ctx->source_dir_capacity, dir)) {
+    free(dir);
+    return 0;
+  }
+  return 1;
+}
+
+static void pop_source_dir(fe_Context *ctx) {
+  string_array_pop(ctx->source_dirs, &ctx->source_dir_count);
+}
+
+static char* resolve_module_file(fe_Context *ctx, const char *module_name) {
+  int i;
+  char *candidate;
+
+  if (ctx->source_dir_count > 0) {
+    candidate = join_module_path(ctx->source_dirs[ctx->source_dir_count - 1], module_name);
+    if (!candidate) return NULL;
+    if (file_exists(candidate)) return candidate;
+    free(candidate);
+  }
+
+  for (i = 0; i < ctx->import_path_count; i++) {
+    candidate = join_module_path(ctx->import_paths[i], module_name);
+    if (!candidate) return NULL;
+    if (file_exists(candidate)) return candidate;
+    free(candidate);
+  }
+
+  candidate = join_module_path(".", module_name);
+  if (!candidate) return NULL;
+  if (file_exists(candidate)) return candidate;
+  free(candidate);
+  return NULL;
+}
+
+void fex_clear_import_paths(fe_Context *ctx) {
+  string_array_clear(&ctx->import_paths, &ctx->import_path_count, &ctx->import_path_capacity);
+}
+
+int fex_add_import_path(fe_Context *ctx, const char *path) {
+  if (!path || !*path) return 0;
+  return string_array_push_copy(&ctx->import_paths, &ctx->import_path_count,
+                                &ctx->import_path_capacity, path);
+}
+
+void fex_reset_import_state(fe_Context *ctx) {
+  while (ctx->source_dir_count > 0) {
+    pop_source_dir(ctx);
+  }
+  while (ctx->loading_module_count > 0) {
+    string_array_pop(ctx->loading_modules, &ctx->loading_module_count);
+  }
+}
+
+fe_Object* fex_do_file(fe_Context *ctx, const char *path) {
+  char *source;
+  fe_Object *result;
+
+  if (!push_source_dir_from_file(ctx, path)) {
+    fe_error(ctx, "out of memory (source path)");
+  }
+
+  source = read_text_file(path);
+  if (!source) {
+    pop_source_dir(ctx);
+    return NULL;
+  }
+
+  result = fex_do_string(ctx, source);
+  free(source);
+  pop_source_dir(ctx);
+  return result;
 }
 
 
@@ -1148,6 +1397,56 @@ static fe_Object* argstoenv(fe_Context *ctx, fe_Object *prm, fe_Object *arg, fe_
 }
 
 
+static fe_Object* import_module(fe_Context *ctx, fe_Object *sym) {
+  char module_name[128];
+  char error_buf[256];
+  char *module_path;
+  fe_Object *result;
+
+  checktype(ctx, sym, FE_TSYMBOL);
+  fe_tostring(ctx, sym, module_name, sizeof(module_name));
+
+  if (string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, module_name)) {
+    return cdr(getbound(sym, &nil));
+  }
+
+  if (string_array_contains(ctx->loading_modules, ctx->loading_module_count, module_name)) {
+    sprintf(error_buf, "cyclic import detected for module '%s'", module_name);
+    fe_error(ctx, error_buf);
+  }
+
+  module_path = resolve_module_file(ctx, module_name);
+  if (!module_path) {
+    sprintf(error_buf, "could not resolve module '%s'", module_name);
+    fe_error(ctx, error_buf);
+  }
+
+  if (!string_array_push_copy(&ctx->loading_modules, &ctx->loading_module_count,
+                              &ctx->loading_module_capacity, module_name)) {
+    free(module_path);
+    fe_error(ctx, "out of memory (import state)");
+  }
+
+  result = fex_do_file(ctx, module_path);
+  free(module_path);
+
+  if (result == NULL) {
+    string_array_pop(ctx->loading_modules, &ctx->loading_module_count);
+    fe_error(ctx, "failed to import module");
+  }
+
+  string_array_pop(ctx->loading_modules, &ctx->loading_module_count);
+  if (!string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, module_name)) {
+    if (!string_array_push_copy(&ctx->loaded_modules, &ctx->loaded_module_count,
+                                &ctx->loaded_module_capacity, module_name)) {
+      fe_error(ctx, "out of memory (module cache)");
+    }
+  }
+
+  return cdr(getbound(sym, &nil));
+}
+
+
 static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Object **newenv) {
   fe_Object *fn, *arg, *res;
   fe_Object cl, *va, *vb;
@@ -1189,6 +1488,12 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           checktype(ctx, name_obj, FE_TSTRING);
           fe_tostring(ctx, name_obj, name_buf, sizeof(name_buf));
           fe_set(ctx, fe_symbol(ctx, name_buf), exports);
+          if (!string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, name_buf)) {
+            if (!string_array_push_copy(&ctx->loaded_modules, &ctx->loaded_module_count,
+                                        &ctx->loaded_module_capacity, name_buf)) {
+              fe_error(ctx, "out of memory (module cache)");
+            }
+          }
           res = exports;
           break;
         }
@@ -1211,8 +1516,9 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           break;
         }
         case P_IMPORT:
-          /* form: (import name) - no-op for now */
-          res = &nil;
+          /* form: (import name) */
+          vb = fe_nextarg(ctx, &arg); /* module symbol, not evaluated */
+          res = import_module(ctx, vb);
           break;
         case P_GET: {
           /* form: (get object property) */
@@ -1628,6 +1934,10 @@ void fe_close(fe_Context *ctx) {
   ctx->gcstack_idx = 0;
   ctx->symlist = &nil;
   collectgarbage(ctx);
+  string_array_clear(&ctx->import_paths, &ctx->import_path_count, &ctx->import_path_capacity);
+  string_array_clear(&ctx->source_dirs, &ctx->source_dir_count, &ctx->source_dir_capacity);
+  string_array_clear(&ctx->loading_modules, &ctx->loading_module_count, &ctx->loading_module_capacity);
+  string_array_clear(&ctx->loaded_modules, &ctx->loaded_module_count, &ctx->loaded_module_capacity);
 }
 
 

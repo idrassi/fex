@@ -56,6 +56,19 @@ CASES = [
         ),
     },
     {
+        "name": "module imports",
+        "script": ROOT / "scripts" / "test_module_imports.fex",
+        "args": ["--module-path", ROOT / "scripts" / "import_modules"],
+        "exit_code": 0,
+        "stdout": (
+            "--- Import Runtime Regression ---\n"
+            "loading app\n"
+            "loading helper\n"
+            "42\n"
+            "41\n"
+        ),
+    },
+    {
         "name": "bad module syntax",
         "source": 'module(123) {\n    export let y = 20;\n}\n',
         "exit_code": 65,
@@ -73,6 +86,15 @@ CASES = [
         "exit_code": 1,
         "stderr_contains": [
             "Only .head, .first, .tail, and .rest are valid on pairs",
+        ],
+    },
+    {
+        "name": "cyclic import",
+        "source": "import cycle_a;\n",
+        "args": ["--module-path", ROOT / "scripts" / "import_cycles"],
+        "exit_code": 1,
+        "stderr_contains": [
+            "cyclic import detected for module 'cycle_a'",
         ],
     },
 ]
@@ -129,6 +151,8 @@ def run_case(exe: Path, case: dict[str, object]) -> list[str]:
             command.append(str(temp_path))
         else:
             command.append(str(case["script"]))
+
+        command.extend(str(arg) for arg in case.get("args", []))
 
         completed = subprocess.run(
             command,

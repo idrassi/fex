@@ -58,4 +58,27 @@ fe_Object* fex_compile(fe_Context *ctx, const char *source);
  */
 fe_Object* fex_do_string(fe_Context *ctx, const char *source);
 
+/*
+ * Reads, compiles, and evaluates a source file. Relative imports from that
+ * file resolve against the file's directory.
+ */
+fe_Object* fex_do_file(fe_Context *ctx, const char *path);
+
+/*
+ * Adds an import search path for file-based `import` resolution.
+ * Returns non-zero on success.
+ */
+int fex_add_import_path(fe_Context *ctx, const char *path);
+
+/*
+ * Clears all configured import search paths.
+ */
+void fex_clear_import_paths(fe_Context *ctx);
+
+/*
+ * Clears transient import execution state after a recoverable error.
+ * This leaves configured import paths and loaded-module cache intact.
+ */
+void fex_reset_import_state(fe_Context *ctx);
+
 #endif

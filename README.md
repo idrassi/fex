@@ -76,7 +76,7 @@ To execute a script file, pass the file path as an argument:
 <path-to-fex> your_script.fex
 ```
 
-Pass `--builtins` to enable the optional extended builtins set, and `--spans` for richer source-location diagnostics.
+Pass `--builtins` to enable the optional extended builtins set, `--spans` for richer source-location diagnostics, and `--module-path PATH` to add file-based import search directories.
 
 ## Language Quick Tour
 

@@ -1,0 +1,5 @@
+println("--- Import Runtime Regression ---");
+import app;
+import app;
+println(app.value);
+println(helper.value);

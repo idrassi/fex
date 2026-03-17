@@ -139,6 +139,14 @@ if (result) {
 fe_restoregc(ctx, gc_idx);
 ```
 
+### fex_do_file()
+
+```c
+fe_Object *fex_do_file(fe_Context *ctx, const char *path);
+```
+
+Reads, compiles, and evaluates a source file. Relative imports from that file resolve against the file's directory.
+
 ### fex_compile() and fe_eval()
 
 ```c
@@ -159,6 +167,17 @@ if (code) {
 
 fe_restoregc(ctx, gc_idx);
 ```
+
+### Import Search Paths
+
+For file-based `import`, configure additional search roots with:
+
+```c
+int fex_add_import_path(fe_Context *ctx, const char *path);
+void fex_clear_import_paths(fe_Context *ctx);
+```
+
+`fex_add_import_path()` returns non-zero on success.
 
 ## Creating and Inspecting Values
 

@@ -1,0 +1,4 @@
+import cycle_a;
+module ("cycle_b") {
+  export let value = 2;
+}
