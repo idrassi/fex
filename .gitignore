@@ -11,3 +11,10 @@
 /src/*.exe
 /src/*.pgm
 /src/workspace_concatenated.txt
+
+# Local scratch scripts and notes
+/scripts/fuzz_string_test.fex
+/scripts/test_error_bad_syntax.fex
+/scripts/test_error_export_global.fex
+/src/llm_context.py
+/src/memory_enhancements.md
