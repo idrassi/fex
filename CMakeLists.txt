@@ -8,6 +8,19 @@ endif()
 include(CTest)
 
 set(CMAKE_C_STANDARD 90)
+option(FEX_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
+if(FEX_ENABLE_SANITIZERS)
+    if(WIN32)
+        message(FATAL_ERROR "FEX_ENABLE_SANITIZERS is currently supported only on non-Windows GCC or Clang builds")
+    endif()
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR "FEX_ENABLE_SANITIZERS requires a GCC- or Clang-compatible compiler")
+    endif()
+
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " -fsanitize=address,undefined -fno-omit-frame-pointer")
+endif()
 
 add_executable(fex src/fex.c src/fex_span.c src/fe.c src/main.c src/fex_builtins.c src/sfc32.c)
 target_include_directories(fex PRIVATE src)

@@ -2664,16 +2664,22 @@ cleanup:
 static fe_Object* build_process_result(fe_Context *ctx,
                                        const ProcessOutput *output) {
     fe_Object *result = fe_map(ctx);
+    const unsigned char *stdout_data = output->stdout_data
+        ? output->stdout_data
+        : (const unsigned char*)"";
+    const unsigned char *stderr_data = output->stderr_data
+        ? output->stderr_data
+        : (const unsigned char*)"";
 
     fe_map_set(ctx, result, fe_symbol(ctx, "code"),
                fe_make_number(ctx, (fe_Number)output->exit_code));
     fe_map_set(ctx, result, fe_symbol(ctx, "ok"),
                fe_bool(ctx, output->exit_code == 0));
     fe_map_set(ctx, result, fe_symbol(ctx, "stdout"),
-               fe_bytes(ctx, output->stdout_data ? output->stdout_data : "",
+               fe_bytes(ctx, stdout_data,
                         output->stdout_len));
     fe_map_set(ctx, result, fe_symbol(ctx, "stderr"),
-               fe_bytes(ctx, output->stderr_data ? output->stderr_data : "",
+               fe_bytes(ctx, stderr_data,
                         output->stderr_len));
     return result;
 }
