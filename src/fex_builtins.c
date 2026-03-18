@@ -948,6 +948,8 @@ static fe_Object* builtin_random_bytes(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "randbytes");
     fe_Object *count_obj = fe_nextarg(ctx, &args);
     fe_Number count_num = fe_tonumber(ctx, count_obj);
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
     
     if (count_num <= 0 || count_num > 1024) {
         fe_error(ctx, "randbytes: count must be between 1 and 1024");
@@ -964,6 +966,11 @@ static fe_Object* builtin_random_bytes(fe_Context *ctx, fe_Object *args) {
     fe_Object **tail = &result;
     
     for (i = 0; i < count; i++) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         uint32_t random_val = sfc32_next(&rng_state);
         uint8_t byte_val = (uint8_t)(random_val & 0xFF);
         
@@ -991,6 +998,8 @@ static fe_Object* builtin_string_length(fe_Context *ctx, fe_Object *args) {
 static fe_Object* builtin_string_upper(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "upper");
     fe_Object *str = fe_nextarg(ctx, &args);
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "upper");
 
     size_t len = fe_strlen(ctx, str);
@@ -1008,6 +1017,11 @@ static fe_Object* builtin_string_upper(fe_Context *ctx, fe_Object *args) {
     
     size_t i;
     for (i = 0; i < len; i++) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         buffer[i] = toupper(buffer[i]);
     }
 
@@ -1017,6 +1031,8 @@ static fe_Object* builtin_string_upper(fe_Context *ctx, fe_Object *args) {
 static fe_Object* builtin_string_lower(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "lower");
     fe_Object *str = fe_nextarg(ctx, &args);
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "lower");
 
     size_t len = fe_strlen(ctx, str);
@@ -1034,6 +1050,11 @@ static fe_Object* builtin_string_lower(fe_Context *ctx, fe_Object *args) {
     
     size_t i;
     for (i = 0; i < len; i++) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         buffer[i] = tolower(buffer[i]);
     }
 
@@ -1114,6 +1135,8 @@ static fe_Object* builtin_string_split(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 2, "split");
     fe_Object *str = fe_nextarg(ctx, &args);
     fe_Object *delim = fe_nextarg(ctx, &args);
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
     
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "split");
     FEX_CHECK_TYPE(ctx, delim, FE_TSTRING, "split");
@@ -1135,6 +1158,11 @@ static fe_Object* builtin_string_split(fe_Context *ctx, fe_Object *args) {
     
     char *token = strtok(buffer, delimiter);
     while (token != NULL) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         *tail = fe_cons(ctx, fe_string(ctx, token, strlen(token)), fe_nil(ctx));
         tail = fe_cdr_ptr(ctx, *tail);
         token = strtok(NULL, delimiter);
@@ -1146,6 +1174,8 @@ static fe_Object* builtin_string_split(fe_Context *ctx, fe_Object *args) {
 static fe_Object* builtin_string_trim(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "trim");
     fe_Object *str = fe_nextarg(ctx, &args);
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "trim");
     
     size_t str_len = fe_strlen(ctx, str);
@@ -1159,11 +1189,25 @@ static fe_Object* builtin_string_trim(fe_Context *ctx, fe_Object *args) {
     
     /* Trim leading whitespace */
     char *start = buffer;
-    while (isspace(*start)) start++;
+    while (isspace(*start)) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
+        start++;
+    }
     
     /* Trim trailing whitespace */
     char *end = start + strlen(start) - 1;
-    while (end > start && isspace(*end)) end--;
+    while (end > start && isspace(*end)) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
+        end--;
+    }
     
     *(end + 1) = '\0';
     size_t trimmed_len = (size_t)(end - start + 1);
@@ -2237,6 +2281,8 @@ static fe_Object* builtin_dirname(fe_Context *ctx, fe_Object *args) {
     size_t end;
     size_t i;
     fe_Object *result;
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
 
     FEX_CHECK_ARGS(ctx, args, 1, "dirname");
     path_obj = fe_nextarg(ctx, &args);
@@ -2245,11 +2291,29 @@ static fe_Object* builtin_dirname(fe_Context *ctx, fe_Object *args) {
 
     end = strlen(path);
     while (end > 1 && is_path_separator_char(path[end - 1])) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            free(path);
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         end--;
     }
     for (i = end; i > 0; i--) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            free(path);
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         if (is_path_separator_char(path[i - 1])) {
             while (i > 1 && is_path_separator_char(path[i - 2])) {
+                abort_error = builtin_poll_abort(ctx, &poll_countdown);
+                if (abort_error != NULL) {
+                    free(path);
+                    fe_error(ctx, abort_error);
+                    return fe_nil(ctx);
+                }
                 i--;
             }
             if (i == 1) {
@@ -2272,6 +2336,8 @@ static fe_Object* builtin_basename(fe_Context *ctx, fe_Object *args) {
     size_t end;
     size_t start;
     fe_Object *result;
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
 
     FEX_CHECK_ARGS(ctx, args, 1, "basename");
     path_obj = fe_nextarg(ctx, &args);
@@ -2280,10 +2346,22 @@ static fe_Object* builtin_basename(fe_Context *ctx, fe_Object *args) {
 
     end = strlen(path);
     while (end > 1 && is_path_separator_char(path[end - 1])) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            free(path);
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         end--;
     }
     start = end;
     while (start > 0 && !is_path_separator_char(path[start - 1])) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            free(path);
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         start--;
     }
     result = fe_string(ctx, path + start, end - start);

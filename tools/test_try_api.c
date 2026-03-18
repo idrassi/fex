@@ -123,6 +123,32 @@ static char* make_large_path_string(size_t length) {
     return path;
 }
 
+static char* make_large_split_string(size_t item_count) {
+    size_t length;
+    char *text;
+    size_t offset = 0;
+    size_t i;
+
+    if (item_count == 0) {
+        item_count = 1;
+    }
+
+    length = item_count * 2 - 1;
+    text = (char*)malloc(length + 1);
+    if (!text) {
+        return NULL;
+    }
+
+    for (i = 0; i < item_count; i++) {
+        text[offset++] = 'a';
+        if (i + 1 < item_count) {
+            text[offset++] = ',';
+        }
+    }
+    text[offset] = '\0';
+    return text;
+}
+
 static int write_large_test_file(const char *path, size_t size, unsigned char fill_byte) {
     FILE *file;
     unsigned char chunk[4096];
@@ -505,6 +531,40 @@ int main(void) {
             fe_close(ctx);
             free(memory);
             return fail("expected parsejson interrupt handler to run");
+        }
+    }
+
+    {
+        char *large_split = make_large_split_string(512);
+        fe_Object *bigsplit;
+        int gc_save = fe_savegc(ctx);
+        int interrupt_calls = 0;
+
+        if (!large_split) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to allocate split interrupt source");
+        }
+
+        bigsplit = fe_string(ctx, large_split, strlen(large_split));
+        free(large_split);
+        fe_pushgc(ctx, bigsplit);
+        fe_set(ctx, fe_symbol(ctx, "bigsplit"), bigsplit);
+        fe_restoregc(ctx, gc_save);
+
+        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 1);
+        status = fex_try_do_string(ctx, "split(bigsplit, \",\");\n", &result, &error);
+        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "execution interrupted") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected split to honor interrupt polling", status, &error);
+        }
+        if (interrupt_calls < 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected split interrupt handler to run");
         }
     }
 
