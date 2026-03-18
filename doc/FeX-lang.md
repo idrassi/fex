@@ -126,6 +126,7 @@ Module behavior:
 - `import ident;` loads `ident.fex` or `ident/index.fex`, searching the importing file's directory first, then configured module paths, then the current working directory.
 - `import pkg.name;` resolves dotted package names through path separators, so `import feature.helper;` looks for `feature/helper.fex` and `feature/helper/index.fex`.
 - `import "./name";` and `import "../pkg/name";` keep explicit relative segments and are resolved against the importing file before configured module paths are consulted.
+- Imported files are implicit module scopes, so top-level `export let` and `export fn` populate the imported module directly.
 - When import resolution fails, the runtime error includes the candidate paths that were searched.
 
 At runtime, a module is still just a value. Dot access uses `get`.

@@ -1,0 +1,8 @@
+println("--- Implicit File Module Regression ---");
+import app;
+import feature;
+import feature.helper;
+println(app.value);
+println(helper.value);
+println(feature.value);
+println(feature.helper.value);

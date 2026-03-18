@@ -199,6 +199,7 @@ These helpers are convenient for simple tools:
 - `fex_do_string()` compiles and evaluates a source string.
 - `fex_do_file()` reads, compiles, and evaluates a file, resolving relative imports against that file's directory.
 - File-based `import` accepts bare names (`import name;`), dotted packages (`import pkg.name;`), and string paths (`import "./name";`).
+- Files loaded through `import` also act as implicit module scopes, so top-level `export let` and `export fn` populate the imported module without an explicit `module("name") { ... }` wrapper.
 - Resolution still tries both `name.fex` and `name/index.fex`.
 - On compile errors they return `NULL`.
 - On runtime errors they go through the installed error handler. The default FeX handler prints a traceback and terminates the process.
@@ -269,7 +270,7 @@ Import lookup order is:
 2. Each path added with `fex_add_import_path()`
 3. The current working directory
 
-Within each root, FeX tries both `name.fex` and `name/index.fex`. Dotted specifiers map to path separators, and string path imports keep explicit relative segments such as `./` and `../`. When resolution fails, the runtime error includes the searched candidate paths.
+Within each root, FeX tries both `name.fex` and `name/index.fex`. Dotted specifiers map to path separators, and string path imports keep explicit relative segments such as `./` and `../`. Imported files evaluate with an implicit export table; direct `fex_do_file()` calls still execute as ordinary scripts. When resolution fails, the runtime error includes the searched candidate paths.
 
 ## Creating and Inspecting Values
 

@@ -1,4 +1,5 @@
 println("loading feature mismatch");
 module ("internal_feature_mismatch") {
-  export let value = 77;
+  export let hidden = 7;
 }
+export let value = 77;

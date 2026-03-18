@@ -1262,9 +1262,11 @@ void fex_reset_import_state(fe_Context *ctx) {
   }
 }
 
-fe_Object* fex_do_file(fe_Context *ctx, const char *path) {
+static fe_Object* do_file_common(fe_Context *ctx, const char *path,
+                                 fe_Object *implicit_exports) {
   char *source;
   fe_Object *result;
+  int pushed_module = 0;
 
   if (!push_source_dir_from_file(ctx, path)) {
     memory_error(ctx, "out of memory (source path)");
@@ -1288,10 +1290,27 @@ fe_Object* fex_do_file(fe_Context *ctx, const char *path) {
     memory_error(ctx, "out of memory (source path)");
   }
 
+  if (implicit_exports != NULL && type(implicit_exports) == FE_TMAP) {
+    ctx->modulestack = fe_cons(ctx, implicit_exports, ctx->modulestack);
+    pushed_module = 1;
+  }
+
   result = fex_do_string_named(ctx, source, path);
+  if (pushed_module) {
+    ctx->modulestack = cdr(ctx->modulestack);
+  }
   string_array_pop(ctx, ctx->source_buffers, &ctx->source_buffer_count);
   pop_source_dir(ctx);
   return result;
+}
+
+static fe_Object* fex_do_import_file(fe_Context *ctx, const char *path,
+                                     fe_Object *implicit_exports) {
+  return do_file_common(ctx, path, implicit_exports);
+}
+
+fe_Object* fex_do_file(fe_Context *ctx, const char *path) {
+  return do_file_common(ctx, path, NULL);
 }
 
 
@@ -2820,6 +2839,8 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
   int is_relative;
   fe_Object *result = NULL;
   fe_Object *module_obj = NULL;
+  fe_Object *implicit_exports = NULL;
+  int gc_save = fe_savegc(ctx);
   int i;
 
   lookup_name = module_spec_to_lookup_name(ctx, module_spec);
@@ -2856,6 +2877,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
       tracked_free(ctx, lookup_name);
       tracked_free(ctx, searched_paths);
       string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+      fe_restoregc(ctx, gc_save);
       return module_obj;
     }
 
@@ -2863,6 +2885,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
     if (optional) {
       tracked_free(ctx, searched_paths);
       string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+      fe_restoregc(ctx, gc_save);
       return NULL;
     }
 
@@ -2887,12 +2910,14 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
     bind_imported_module(ctx, module_spec, segments, segment_count,
                          is_relative, module_obj);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    fe_restoregc(ctx, gc_save);
     return module_obj;
   }
 
   if (string_array_contains(ctx, ctx->loading_modules, ctx->loading_module_count, module_path)) {
     tracked_free(ctx, module_path);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    fe_restoregc(ctx, gc_save);
     sprintf(error_buf, "cyclic import detected for module '%s'", module_spec);
     fe_error(ctx, error_buf);
   }
@@ -2901,24 +2926,41 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
                               &ctx->loading_module_capacity, module_path)) {
     tracked_free(ctx, module_path);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    fe_restoregc(ctx, gc_save);
     memory_error(ctx, "out of memory (import state)");
   }
 
-  result = fex_do_file(ctx, module_path);
+  implicit_exports = fe_map(ctx);
+  fe_pushgc(ctx, implicit_exports);
+  result = fex_do_import_file(ctx, module_path, implicit_exports);
+  if (result != NULL) {
+    fe_pushgc(ctx, result);
+  }
 
   if (result == NULL) {
     string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
     tracked_free(ctx, module_path);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    fe_restoregc(ctx, gc_save);
     fe_error(ctx, "failed to import module");
   }
 
   string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
-  module_obj = resolve_imported_module_value(ctx, module_spec, segments,
-                                             segment_count, result);
+  if (fe_map_count(ctx, implicit_exports) > 0) {
+    module_obj = implicit_exports;
+  } else {
+    module_obj = resolve_imported_module_value(ctx, module_spec, segments,
+                                               segment_count, NULL);
+    if (type(module_obj) != FE_TMAP) {
+      module_obj = implicit_exports;
+    }
+  }
+  fe_pushgc(ctx, module_obj);
+
   if (type(module_obj) != FE_TMAP) {
     tracked_free(ctx, module_path);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    fe_restoregc(ctx, gc_save);
     sprintf(error_buf, "module '%s' did not produce a module value", module_spec);
     fe_error(ctx, error_buf);
   }
@@ -2929,11 +2971,13 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
   if (!module_cache_push_owned(ctx, module_path, module_obj)) {
     tracked_free(ctx, module_path);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    fe_restoregc(ctx, gc_save);
     memory_error(ctx, "out of memory (module cache)");
   }
   module_path = NULL;
   tracked_free(ctx, module_path);
   string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+  fe_restoregc(ctx, gc_save);
 
   return module_obj;
 }

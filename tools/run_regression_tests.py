@@ -231,6 +231,23 @@ CASES = [
         ),
     },
     {
+        "name": "implicit file modules",
+        "script": ROOT / "scripts" / "test_implicit_file_modules.fex",
+        "args": ["--module-path", ROOT / "scripts" / "import_file_modules"],
+        "exit_code": 0,
+        "stdout": (
+            "--- Implicit File Module Regression ---\n"
+            "loading implicit app\n"
+            "loading implicit helper\n"
+            "loading implicit feature package\n"
+            "loading implicit feature helper\n"
+            "42\n"
+            "41\n"
+            "43\n"
+            "41\n"
+        ),
+    },
+    {
         "name": "package ergonomics",
         "script": ROOT / "scripts" / "test_module_package_ergonomics.fex",
         "args": ["--module-path", ROOT / "scripts" / "import_packages"],

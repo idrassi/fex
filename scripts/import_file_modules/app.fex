@@ -1,0 +1,3 @@
+println("loading implicit app");
+import helper;
+export let value = helper.value + 1;
