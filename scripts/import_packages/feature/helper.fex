@@ -1,0 +1,4 @@
+println("loading feature helper");
+module ("helper") {
+  export let value = 41;
+}

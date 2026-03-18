@@ -96,7 +96,7 @@ If stdin is piped and no file or `-e` input is provided, FeX executes stdin inst
 
 ### CLI Flags
 
-Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, `--module-path PATH` adds file-based import search directories, `--max-steps N` aborts runaway evaluation after roughly `N` eval steps, `--timeout-ms N` adds a wall-clock timeout, `--max-memory N` aborts when tracked context memory exceeds `N` bytes, and `--version` prints the CLI version. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
+Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, `--module-path PATH` adds file-based import search directories, `--max-steps N` aborts runaway evaluation after roughly `N` eval steps, `--timeout-ms N` adds a wall-clock timeout, `--max-memory N` aborts when tracked context memory exceeds `N` bytes, and `--version` prints the CLI version. Imports look for both `name.fex` and `name/index.fex`, so directory-style packages work out of the box. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
 
 ## Language Quick Tour
 

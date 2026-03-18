@@ -144,6 +144,22 @@ CASES = [
         ),
     },
     {
+        "name": "package imports",
+        "script": ROOT / "scripts" / "test_module_packages.fex",
+        "args": [
+            "--module-path", ROOT / "scripts" / "import_packages",
+            "--module-path", ROOT / "scripts" / "import_packages" / "feature" / ".." / "feature",
+        ],
+        "exit_code": 0,
+        "stdout": (
+            "--- Package Import Regression ---\n"
+            "loading feature package\n"
+            "loading feature helper\n"
+            "42\n"
+            "41\n"
+        ),
+    },
+    {
         "name": "maps",
         "script": ROOT / "scripts" / "test_maps.fex",
         "args": ["--builtins"],
@@ -356,6 +372,18 @@ CASES = [
         "exit_code": 70,
         "stderr_contains": [
             "cyclic import detected for module 'cycle_a'",
+        ],
+    },
+    {
+        "name": "missing module diagnostics",
+        "source": "import missing_pkg;\n",
+        "args": ["--module-path", ROOT / "scripts" / "import_packages", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "could not resolve module 'missing_pkg'",
+            "searched:",
+            "missing_pkg.fex",
+            "missing_pkg/index.fex",
         ],
     },
     {

@@ -626,6 +626,45 @@ static int is_path_separator(char chr) {
   return chr == '/' || chr == '\\';
 }
 
+static void normalize_path_chars(char *path) {
+  char *p;
+  if (!path) return;
+  for (p = path; *p; p++) {
+    if (is_path_separator(*p)) {
+      *p = '/';
+#ifdef _WIN32
+    } else if (*p >= 'A' && *p <= 'Z') {
+      *p = (char)('a' + (*p - 'A'));
+#endif
+    }
+  }
+}
+
+static char* dup_normalized_path(fe_Context *ctx, const char *path) {
+  char *copy = dup_cstring(ctx, path);
+  if (!copy) return NULL;
+  normalize_path_chars(copy);
+  return copy;
+}
+
+static char* normalize_existing_path(fe_Context *ctx, const char *path) {
+#ifdef _WIN32
+  char resolved[MAX_PATH];
+#else
+  char resolved[4096];
+#endif
+  char *copy;
+#ifdef _WIN32
+  if (!_fullpath(resolved, path, sizeof(resolved))) return NULL;
+#else
+  if (!realpath(path, resolved)) return NULL;
+#endif
+  copy = dup_cstring(ctx, resolved);
+  if (!copy) return NULL;
+  normalize_path_chars(copy);
+  return copy;
+}
+
 static char* path_dirname_copy(fe_Context *ctx, const char *path) {
   const char *last_sep = NULL;
   const char *p;
@@ -647,24 +686,36 @@ static char* path_dirname_copy(fe_Context *ctx, const char *path) {
   return dir;
 }
 
-static char* join_module_path(fe_Context *ctx, const char *base, const char *module_name) {
-  static const char suffix[] = ".fex";
+static char* join_path_suffix(fe_Context *ctx, const char *base,
+                              const char *name, const char *suffix) {
   size_t base_len;
-  size_t module_len;
+  size_t name_len;
   size_t needs_sep;
+  size_t suffix_len;
   char *path;
 
   base_len = strlen(base);
-  module_len = strlen(module_name);
+  name_len = strlen(name);
+  suffix_len = strlen(suffix);
   needs_sep = (base_len > 0 && !is_path_separator(base[base_len - 1])) ? 1 : 0;
-  path = tracked_alloc(ctx, base_len + needs_sep + module_len + sizeof(suffix));
+  path = tracked_alloc(ctx, base_len + needs_sep + name_len + suffix_len + 1);
   if (!path) return NULL;
   memcpy(path, base, base_len);
   if (needs_sep) path[base_len++] = '/';
-  memcpy(path + base_len, module_name, module_len);
-  base_len += module_len;
-  memcpy(path + base_len, suffix, sizeof(suffix));
+  memcpy(path + base_len, name, name_len);
+  base_len += name_len;
+  memcpy(path + base_len, suffix, suffix_len + 1);
   return path;
+}
+
+static char* join_module_file_path(fe_Context *ctx, const char *base,
+                                   const char *module_name) {
+  return join_path_suffix(ctx, base, module_name, ".fex");
+}
+
+static char* join_module_index_path(fe_Context *ctx, const char *base,
+                                    const char *module_name) {
+  return join_path_suffix(ctx, base, module_name, "/index.fex");
 }
 
 static int file_exists(const char *path) {
@@ -713,7 +764,9 @@ static char* read_text_file(fe_Context *ctx, const char *path) {
 }
 
 static int push_source_dir_from_file(fe_Context *ctx, const char *path) {
-  char *dir = path_dirname_copy(ctx, path);
+  char *normalized_path = normalize_existing_path(ctx, path);
+  char *dir = path_dirname_copy(ctx, normalized_path ? normalized_path : path);
+  tracked_free(ctx, normalized_path);
   if (!dir) return 0;
   if (!string_array_push_owned(ctx, &ctx->source_dirs, &ctx->source_dir_count,
                                &ctx->source_dir_capacity, dir)) {
@@ -727,29 +780,136 @@ static void pop_source_dir(fe_Context *ctx) {
   string_array_pop(ctx, ctx->source_dirs, &ctx->source_dir_count);
 }
 
-static char* resolve_module_file(fe_Context *ctx, const char *module_name) {
+static char* format_search_paths(fe_Context *ctx, char **items, int count) {
+  size_t total = 1;
+  size_t prefix_len = 4;
   int i;
+  char *buf;
+  char *p;
+
+  if (count <= 0) return dup_cstring(ctx, "");
+  for (i = 0; i < count; i++) {
+    total += prefix_len + strlen(items[i]) + 1;
+  }
+
+  buf = tracked_alloc(ctx, total);
+  if (!buf) return NULL;
+
+  p = buf;
+  for (i = 0; i < count; i++) {
+    size_t item_len = strlen(items[i]);
+    memcpy(p, "  - ", prefix_len);
+    p += prefix_len;
+    memcpy(p, items[i], item_len);
+    p += item_len;
+    *p++ = '\n';
+  }
+  *p = '\0';
+  return buf;
+}
+
+static int try_resolve_module_candidate(fe_Context *ctx, const char *candidate,
+                                        char ***searched, int *searched_count,
+                                        int *searched_capacity,
+                                        char **resolved_path) {
+  char *normalized;
+
+  if (searched &&
+      !string_array_push_copy(ctx, searched, searched_count,
+                              searched_capacity, candidate)) {
+    return -1;
+  }
+  if (!file_exists(candidate)) {
+    return 0;
+  }
+
+  normalized = normalize_existing_path(ctx, candidate);
+  if (normalized) {
+    *resolved_path = normalized;
+    return 1;
+  }
+  if (ctx->alloc_failure_active) {
+    return -1;
+  }
+
+  normalized = dup_normalized_path(ctx, candidate);
+  if (!normalized) return -1;
+  *resolved_path = normalized;
+  return 1;
+}
+
+static int try_resolve_module_under_base(fe_Context *ctx, const char *base,
+                                         const char *module_name,
+                                         char ***searched, int *searched_count,
+                                         int *searched_capacity,
+                                         char **resolved_path) {
   char *candidate;
+  int status;
+
+  candidate = join_module_file_path(ctx, base, module_name);
+  if (!candidate) return -1;
+  status = try_resolve_module_candidate(ctx, candidate, searched,
+                                        searched_count, searched_capacity,
+                                        resolved_path);
+  tracked_free(ctx, candidate);
+  if (status != 0) return status;
+
+  candidate = join_module_index_path(ctx, base, module_name);
+  if (!candidate) return -1;
+  status = try_resolve_module_candidate(ctx, candidate, searched,
+                                        searched_count, searched_capacity,
+                                        resolved_path);
+  tracked_free(ctx, candidate);
+  return status;
+}
+
+static char* resolve_module_file(fe_Context *ctx, const char *module_name,
+                                 char **searched_paths) {
+  int i;
+  int status;
+  char *resolved = NULL;
+  char **searched = NULL;
+  int searched_count = 0;
+  int searched_capacity = 0;
+
+  if (searched_paths) *searched_paths = NULL;
 
   if (ctx->source_dir_count > 0) {
-    candidate = join_module_path(ctx, ctx->source_dirs[ctx->source_dir_count - 1], module_name);
-    if (!candidate) return NULL;
-    if (file_exists(candidate)) return candidate;
-    tracked_free(ctx, candidate);
+    status = try_resolve_module_under_base(ctx,
+                                           ctx->source_dirs[ctx->source_dir_count - 1],
+                                           module_name,
+                                           searched_paths ? &searched : NULL,
+                                           &searched_count, &searched_capacity,
+                                           &resolved);
+    if (status > 0) goto resolved;
+    if (status < 0) goto done;
   }
 
   for (i = 0; i < ctx->import_path_count; i++) {
-    candidate = join_module_path(ctx, ctx->import_paths[i], module_name);
-    if (!candidate) return NULL;
-    if (file_exists(candidate)) return candidate;
-    tracked_free(ctx, candidate);
+    status = try_resolve_module_under_base(ctx, ctx->import_paths[i], module_name,
+                                           searched_paths ? &searched : NULL,
+                                           &searched_count, &searched_capacity,
+                                           &resolved);
+    if (status > 0) goto resolved;
+    if (status < 0) goto done;
   }
 
-  candidate = join_module_path(ctx, ".", module_name);
-  if (!candidate) return NULL;
-  if (file_exists(candidate)) return candidate;
-  tracked_free(ctx, candidate);
-  return NULL;
+  status = try_resolve_module_under_base(ctx, ".", module_name,
+                                         searched_paths ? &searched : NULL,
+                                         &searched_count, &searched_capacity,
+                                         &resolved);
+  if (status > 0) goto resolved;
+
+done:
+  if (searched_paths) {
+    *searched_paths = format_search_paths(ctx, searched, searched_count);
+  }
+  string_array_clear(ctx, &searched, &searched_count, &searched_capacity);
+  return resolved;
+
+resolved:
+  string_array_clear(ctx, &searched, &searched_count, &searched_capacity);
+  return resolved;
 }
 
 void fex_clear_import_paths(fe_Context *ctx) {
@@ -757,9 +917,19 @@ void fex_clear_import_paths(fe_Context *ctx) {
 }
 
 int fex_add_import_path(fe_Context *ctx, const char *path) {
+  char *normalized;
   if (!path || !*path) return 0;
-  return string_array_push_copy(ctx, &ctx->import_paths, &ctx->import_path_count,
-                                &ctx->import_path_capacity, path);
+  normalized = normalize_existing_path(ctx, path);
+  if (!normalized) {
+    normalized = dup_normalized_path(ctx, path);
+    if (!normalized) return 0;
+  }
+  if (!string_array_push_owned(ctx, &ctx->import_paths, &ctx->import_path_count,
+                               &ctx->import_path_capacity, normalized)) {
+    tracked_free(ctx, normalized);
+    return 0;
+  }
+  return 1;
 }
 
 void fex_reset_import_state(fe_Context *ctx) {
@@ -2163,52 +2333,86 @@ static fe_Object* argstoenv(fe_Context *ctx, fe_Object *prm, fe_Object *arg, fe_
 
 static fe_Object* import_module(fe_Context *ctx, fe_Object *sym) {
   char module_name[128];
-  char error_buf[256];
+  char error_buf[2048];
   char *module_path;
+  char *searched_paths = NULL;
   fe_Object *result;
+  size_t error_len;
 
   checktype(ctx, sym, FE_TSYMBOL);
   fe_tostring(ctx, sym, module_name, sizeof(module_name));
-
-  if (string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, module_name)) {
-    return cdr(getbound(sym, &nil));
+  result = cdr(getbound(sym, &nil));
+  if (type(result) == FE_TMAP) {
+    return result;
   }
 
-  if (string_array_contains(ctx->loading_modules, ctx->loading_module_count, module_name)) {
-    sprintf(error_buf, "cyclic import detected for module '%s'", module_name);
-    fe_error(ctx, error_buf);
-  }
-
-  module_path = resolve_module_file(ctx, module_name);
+  module_path = resolve_module_file(ctx, module_name, &searched_paths);
   if (!module_path) {
+    if (searched_paths && ctx->alloc_failure_active) {
+      tracked_free(ctx, searched_paths);
+    }
     if (ctx->alloc_failure_active) {
       memory_error(ctx, "out of memory (module path)");
     }
     sprintf(error_buf, "could not resolve module '%s'", module_name);
+    if (searched_paths && *searched_paths) {
+      static const char searched_label[] = "\nsearched:\n";
+      size_t remaining;
+      error_len = strlen(error_buf);
+      remaining = sizeof(error_buf) - error_len - 1;
+      if (remaining > 0) {
+        size_t label_len = sizeof(searched_label) - 1;
+        size_t copy_len;
+        if (label_len > remaining) label_len = remaining;
+        memcpy(error_buf + error_len, searched_label, label_len);
+        error_len += label_len;
+        remaining = sizeof(error_buf) - error_len - 1;
+        copy_len = strlen(searched_paths);
+        if (copy_len > remaining) copy_len = remaining;
+        memcpy(error_buf + error_len, searched_paths, copy_len);
+        error_len += copy_len;
+        error_buf[error_len] = '\0';
+      }
+    }
+    tracked_free(ctx, searched_paths);
+    fe_error(ctx, error_buf);
+  }
+
+  if (string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, module_path)) {
+    tracked_free(ctx, module_path);
+    return cdr(getbound(sym, &nil));
+  }
+
+  if (string_array_contains(ctx->loading_modules, ctx->loading_module_count, module_path)) {
+    tracked_free(ctx, module_path);
+    sprintf(error_buf, "cyclic import detected for module '%s'", module_name);
     fe_error(ctx, error_buf);
   }
 
   if (!string_array_push_copy(ctx, &ctx->loading_modules, &ctx->loading_module_count,
-                              &ctx->loading_module_capacity, module_name)) {
+                              &ctx->loading_module_capacity, module_path)) {
     tracked_free(ctx, module_path);
     memory_error(ctx, "out of memory (import state)");
   }
 
   result = fex_do_file(ctx, module_path);
-  tracked_free(ctx, module_path);
 
   if (result == NULL) {
     string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
+    tracked_free(ctx, module_path);
     fe_error(ctx, "failed to import module");
   }
 
   string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
-  if (!string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, module_name)) {
-    if (!string_array_push_copy(ctx, &ctx->loaded_modules, &ctx->loaded_module_count,
-                                &ctx->loaded_module_capacity, module_name)) {
+  if (!string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, module_path)) {
+    if (!string_array_push_owned(ctx, &ctx->loaded_modules, &ctx->loaded_module_count,
+                                 &ctx->loaded_module_capacity, module_path)) {
+      tracked_free(ctx, module_path);
       memory_error(ctx, "out of memory (module cache)");
     }
+    module_path = NULL;
   }
+  tracked_free(ctx, module_path);
 
   return cdr(getbound(sym, &nil));
 }
@@ -2258,12 +2462,6 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           checktype(ctx, name_obj, FE_TSTRING);
           fe_tostring(ctx, name_obj, name_buf, sizeof(name_buf));
           fe_set(ctx, fe_symbol(ctx, name_buf), exports);
-          if (!string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, name_buf)) {
-            if (!string_array_push_copy(ctx, &ctx->loaded_modules, &ctx->loaded_module_count,
-                                        &ctx->loaded_module_capacity, name_buf)) {
-              memory_error(ctx, "out of memory (module cache)");
-            }
-          }
           res = exports;
           break;
         }

@@ -123,7 +123,8 @@ Module behavior:
 
 - `module("name") { ... }` executes the body and binds the resulting export table under `name`.
 - `export` may decorate `let` and `fn` declarations inside a module.
-- `import ident;` is a compile-time directive that makes the module name available in source.
+- `import ident;` loads `ident.fex` or `ident/index.fex`, searching the importing file's directory first, then configured module paths, then the current working directory.
+- When import resolution fails, the runtime error includes the candidate paths that were searched.
 
 At runtime, a module is still just a value. Dot access uses `get`.
 

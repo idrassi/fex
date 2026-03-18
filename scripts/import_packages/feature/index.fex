@@ -1,0 +1,5 @@
+println("loading feature package");
+import helper;
+module ("feature") {
+  export let value = helper.value + 1;
+}

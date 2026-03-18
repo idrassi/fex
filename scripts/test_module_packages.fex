@@ -1,0 +1,6 @@
+println("--- Package Import Regression ---");
+import feature;
+import helper;
+import feature;
+println(feature.value);
+println(helper.value);
