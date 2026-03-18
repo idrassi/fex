@@ -58,6 +58,7 @@
 #define GC_GROWTH_FACTOR 2
 #define GC_INITIAL_DIVISOR 4
 #define GC_MIN_THRESHOLD 1024
+#define FE_IO_ABORT_CHECK_INTERVAL 64u
 
 
 #ifdef FE_OPT_NO_MALLOC_STRINGS
@@ -572,6 +573,16 @@ static const char* poll_eval_abort(fe_Context *ctx, int immediate) {
 
 const char* fe_poll_abort(fe_Context *ctx) {
   return poll_eval_abort(ctx, 1);
+}
+
+
+static const char* poll_io_abort(fe_Context *ctx, size_t *countdown) {
+  if (*countdown > 1) {
+    (*countdown)--;
+    return NULL;
+  }
+  *countdown = FE_IO_ABORT_CHECK_INTERVAL;
+  return fe_poll_abort(ctx);
 }
 
 
@@ -1849,26 +1860,41 @@ fe_Object** fe_cdr_ptr(fe_Context *ctx, fe_Object *obj) {
   return &cdr(checktype(ctx, obj, FE_TPAIR));
 }
 
-static void writestr(fe_Context *ctx, fe_WriteFn fn, void *udata, const char *s) {
-  while (*s) { fn(ctx, udata, *s++); }
+static void write_checked(fe_Context *ctx, fe_WriteFn fn, void *udata, char chr,
+                          size_t *countdown) {
+  const char *abort_msg = poll_io_abort(ctx, countdown);
+  if (abort_msg != NULL) {
+    fe_error(ctx, abort_msg);
+  }
+  fn(ctx, udata, chr);
 }
 
-static void write_hex_byte(fe_Context *ctx, fe_WriteFn fn, void *udata, unsigned char byte) {
+static void writestr(fe_Context *ctx, fe_WriteFn fn, void *udata, const char *s,
+                     size_t *countdown) {
+  while (*s) {
+    write_checked(ctx, fn, udata, *s++, countdown);
+  }
+}
+
+static void write_hex_byte(fe_Context *ctx, fe_WriteFn fn, void *udata,
+                           unsigned char byte, size_t *countdown) {
   static const char hexdigits[] = "0123456789abcdef";
-  fn(ctx, udata, hexdigits[(byte >> 4) & 0x0f]);
-  fn(ctx, udata, hexdigits[byte & 0x0f]);
+  write_checked(ctx, fn, udata, hexdigits[(byte >> 4) & 0x0f], countdown);
+  write_checked(ctx, fn, udata, hexdigits[byte & 0x0f], countdown);
 }
 
 void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int qt) {
   char buf[32];
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
+  const char *abort_msg;
 
   switch (type(obj)) {
     case FE_TNIL:
-      writestr(ctx, fn, udata, "nil");
+      writestr(ctx, fn, udata, "nil", &poll_countdown);
       break;
 
     case FE_TBOOLEAN:
-      writestr(ctx, fn, udata, (obj == FE_TRUE) ? "true" : "false");
+      writestr(ctx, fn, udata, (obj == FE_TRUE) ? "true" : "false", &poll_countdown);
       break;
 
     case FE_TNUMBER:
@@ -1877,27 +1903,31 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
       } else {
           sprintf(buf, "%.7g", number(obj));
       }
-      writestr(ctx, fn, udata, buf);
+      writestr(ctx, fn, udata, buf, &poll_countdown);
       break;
 
     case FE_TPAIR:
       if (car(obj) == frame_sym) {
-        writestr(ctx, fn, udata, "[env frame]");
+        writestr(ctx, fn, udata, "[env frame]", &poll_countdown);
         break;
       }
 
-      fn(ctx, udata, '(');
+      write_checked(ctx, fn, udata, '(', &poll_countdown);
       for (;;) {
+        abort_msg = poll_io_abort(ctx, &poll_countdown);
+        if (abort_msg != NULL) {
+          fe_error(ctx, abort_msg);
+        }
         fe_write(ctx, car(obj), fn, udata, 1);
         obj = cdr(obj);
         if (type(obj) != FE_TPAIR) { break; }
-        fn(ctx, udata, ' ');
+        write_checked(ctx, fn, udata, ' ', &poll_countdown);
       }
       if (!isnil(obj)) {
-        writestr(ctx, fn, udata, " . ");
+        writestr(ctx, fn, udata, " . ", &poll_countdown);
         fe_write(ctx, obj, fn, udata, 1);
       }
-      fn(ctx, udata, ')');
+      write_checked(ctx, fn, udata, ')', &poll_countdown);
       break;
 
     case FE_TSYMBOL:
@@ -1905,7 +1935,7 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
       break;
 
     case FE_TSTRING:
-      if (qt) fn(ctx, udata, '"');
+      if (qt) write_checked(ctx, fn, udata, '"', &poll_countdown);
 #ifdef FE_OPT_NO_MALLOC_STRINGS
       {
           size_t len = FE_STR_LEN(obj);
@@ -1918,8 +1948,8 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
                   size_t i;
                   for (i = 0; i < to_write; i++) {
                       char c = slab->data[i];
-                      if (qt && c == '"') fn(ctx, udata, '\\');
-                      fn(ctx, udata, c);
+                      if (qt && c == '"') write_checked(ctx, fn, udata, '\\', &poll_countdown);
+                      write_checked(ctx, fn, udata, c, &poll_countdown);
                   }
                   remaining -= to_write;
                   offset = slab->next;
@@ -1930,16 +1960,16 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
       {
           const char *p = FE_STR_DATA(ctx, obj);
           while (*p) {
-              if (qt && *p=='"') fn(ctx, udata, '\\');
-              fn(ctx, udata, *p++);
+              if (qt && *p == '"') write_checked(ctx, fn, udata, '\\', &poll_countdown);
+              write_checked(ctx, fn, udata, *p++, &poll_countdown);
           }
       }
 #endif
-      if (qt) fn(ctx, udata, '"');
+      if (qt) write_checked(ctx, fn, udata, '"', &poll_countdown);
       break;
 
     case FE_TBYTES:
-      writestr(ctx, fn, udata, "#bytes[");
+      writestr(ctx, fn, udata, "#bytes[", &poll_countdown);
 #ifdef FE_OPT_NO_MALLOC_STRINGS
       {
           size_t len = FE_STR_LEN(obj);
@@ -1952,8 +1982,8 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
                   size_t to_write = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
                   size_t i;
                   for (i = 0; i < to_write; i++) {
-                      if (!first) fn(ctx, udata, ' ');
-                      write_hex_byte(ctx, fn, udata, (unsigned char)slab->data[i]);
+                      if (!first) write_checked(ctx, fn, udata, ' ', &poll_countdown);
+                      write_hex_byte(ctx, fn, udata, (unsigned char)slab->data[i], &poll_countdown);
                       first = 0;
                   }
                   remaining -= to_write;
@@ -1967,40 +1997,44 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
           size_t i;
           const unsigned char *p = (const unsigned char*)FE_STR_DATA(ctx, obj);
           for (i = 0; i < len; i++) {
-              if (i > 0) fn(ctx, udata, ' ');
-              write_hex_byte(ctx, fn, udata, p[i]);
+              if (i > 0) write_checked(ctx, fn, udata, ' ', &poll_countdown);
+              write_hex_byte(ctx, fn, udata, p[i], &poll_countdown);
           }
       }
 #endif
-      fn(ctx, udata, ']');
+      write_checked(ctx, fn, udata, ']', &poll_countdown);
       break;
 
     case FE_TMAP: {
       fe_Map *map = mapdata(obj);
       int i;
       int first = 1;
-      fn(ctx, udata, '{');
+      write_checked(ctx, fn, udata, '{', &poll_countdown);
       if (map) {
         for (i = 0; i < map->capacity; i++) {
+          abort_msg = poll_io_abort(ctx, &poll_countdown);
+          if (abort_msg != NULL) {
+            fe_error(ctx, abort_msg);
+          }
           if (map->states[i] != MAP_USED) {
             continue;
           }
           if (!first) {
-            writestr(ctx, fn, udata, ", ");
+            writestr(ctx, fn, udata, ", ", &poll_countdown);
           }
           fe_write(ctx, map->keys[i], fn, udata, 1);
-          writestr(ctx, fn, udata, ": ");
+          writestr(ctx, fn, udata, ": ", &poll_countdown);
           fe_write(ctx, map->values[i], fn, udata, 1);
           first = 0;
         }
       }
-      fn(ctx, udata, '}');
+      write_checked(ctx, fn, udata, '}', &poll_countdown);
       break;
     }
 
     default:
       sprintf(buf, "[%s %p]", typenames[type(obj)], (void*) obj);
-      writestr(ctx, fn, udata, buf);
+      writestr(ctx, fn, udata, buf, &poll_countdown);
       break;
   }
 }
@@ -2171,6 +2205,8 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
   fe_Number n;
   int chr, gc;
   char buf[64], *p;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
+  const char *abort_msg;
 
   /* get next character */
   chr = ctx->nextchr ? ctx->nextchr : fn(ctx, udata);
@@ -2178,6 +2214,10 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
 
   /* skip whitespace */
   while (chr && strchr(" \n\t\r", chr)) {
+    abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
     chr = fn(ctx, udata);
   }
 
@@ -2186,7 +2226,13 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
       return NULL;
 
     case ';':
-      while (chr && chr != '\n') { chr = fn(ctx, udata); }
+      while (chr && chr != '\n') {
+        abort_msg = poll_io_abort(ctx, &poll_countdown);
+        if (abort_msg != NULL) {
+          fe_error(ctx, abort_msg);
+        }
+        chr = fn(ctx, udata);
+      }
       return read_(ctx, fn, udata);
 
     case ')':
@@ -2198,6 +2244,10 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
       gc = fe_savegc(ctx);
       fe_pushgc(ctx, res); /* to cause error on too-deep nesting */
       while ( (v = read_(ctx, fn, udata)) != &rparen ) {
+        abort_msg = poll_io_abort(ctx, &poll_countdown);
+        if (abort_msg != NULL) {
+          fe_error(ctx, abort_msg);
+        }
         if (v == NULL) { fe_error(ctx, "unclosed list"); }
         if (type(v) == FE_TSYMBOL && streq(ctx, car(cdr(v)), ".")) {
           /* dotted pair */
@@ -2225,6 +2275,10 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
         size_t len = 0;
         chr = fn(ctx, udata);
         while (chr != '"') {
+            abort_msg = poll_io_abort(ctx, &poll_countdown);
+            if (abort_msg != NULL) {
+                fe_error(ctx, abort_msg);
+            }
             if (chr == '\0') fe_error(ctx, "unclosed string");
             if (chr == '\\') {
                 chr = fn(ctx, udata);
@@ -2246,6 +2300,11 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
 
         chr = fn(ctx, udata);
         while (chr!='"') {
+          abort_msg = poll_io_abort(ctx, &poll_countdown);
+          if (abort_msg != NULL) {
+            tracked_free(ctx, s_buf);
+            fe_error(ctx, abort_msg);
+          }
           if (chr=='\0') { tracked_free(ctx, s_buf); fe_error(ctx, "unclosed string"); }
           if (chr=='\\') {
               chr = fn(ctx, udata);
@@ -2275,6 +2334,10 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
     default:
       p = buf;
       do {
+        abort_msg = poll_io_abort(ctx, &poll_countdown);
+        if (abort_msg != NULL) {
+          fe_error(ctx, abort_msg);
+        }
         if (p == buf + sizeof(buf) - 1) { fe_error(ctx, "symbol too long"); }
         *p++ = chr;
         chr = fn(ctx, udata);

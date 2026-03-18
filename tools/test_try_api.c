@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <setjmp.h>
 #include <string.h>
 
 #include "fe.h"
@@ -48,6 +49,37 @@ static int interrupt_once(fe_Context *ctx, void *udata) {
     (void)ctx;
     (*calls)++;
     return *calls >= 1;
+}
+
+typedef struct {
+    jmp_buf env;
+    char message[256];
+} ReadTryScope;
+
+typedef struct {
+    const char *text;
+    size_t offset;
+} StringReader;
+
+static ReadTryScope *g_read_try_scope = NULL;
+
+static void read_try_error_handler(fe_Context *ctx, const char *err, fe_Object *cl) {
+    (void)ctx;
+    (void)cl;
+    if (!g_read_try_scope) {
+        abort();
+    }
+    snprintf(g_read_try_scope->message, sizeof(g_read_try_scope->message), "%s", err);
+    longjmp(g_read_try_scope->env, 1);
+}
+
+static char read_from_string(fe_Context *ctx, void *udata) {
+    StringReader *reader = (StringReader*)udata;
+    (void)ctx;
+    if (!reader->text[reader->offset]) {
+        return '\0';
+    }
+    return reader->text[reader->offset++];
 }
 
 static fe_Object* make_number_list(fe_Context *ctx, int count) {
@@ -104,6 +136,35 @@ static char* make_large_parsejson_source(size_t item_count) {
     }
     memcpy(source + offset, suffix, suffix_len);
     offset += suffix_len;
+    source[offset] = '\0';
+    return source;
+}
+
+static char* make_large_read_list_source(size_t item_count) {
+    size_t total_len;
+    char *source;
+    size_t offset;
+    size_t i;
+
+    if (item_count == 0) {
+        item_count = 1;
+    }
+
+    total_len = 2 + item_count * 2;
+    source = (char*)malloc(total_len + 1);
+    if (!source) {
+        return NULL;
+    }
+
+    offset = 0;
+    source[offset++] = '(';
+    for (i = 0; i < item_count; i++) {
+        source[offset++] = '0';
+        if (i + 1 < item_count) {
+            source[offset++] = ' ';
+        }
+    }
+    source[offset++] = ')';
     source[offset] = '\0';
     return source;
 }
@@ -593,6 +654,98 @@ int main(void) {
             free(memory);
             return fail("expected list length interrupt handler to run");
         }
+    }
+
+    {
+        int interrupt_calls = 0;
+
+        fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS, FEX_BUILTINS_TYPE);
+        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 1);
+        status = fex_try_do_string(ctx, "tostring(biglist);\n", &result, &error);
+        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "execution interrupted") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected tostring to honor interrupt polling", status, &error);
+        }
+        if (interrupt_calls < 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected tostring interrupt handler to run");
+        }
+    }
+
+    {
+        void *read_memory = malloc(TEST_MEM_SIZE);
+        fe_Context *read_ctx;
+        char *read_source = make_large_read_list_source(4096);
+        StringReader reader;
+        ReadTryScope read_try;
+        fe_ErrorFn previous_error;
+        int interrupt_calls = 0;
+
+        if (!read_memory || !read_source) {
+            free(read_source);
+            free(read_memory);
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to allocate fe_read interrupt fixtures");
+        }
+
+        read_ctx = fe_open(read_memory, TEST_MEM_SIZE);
+        if (!read_ctx) {
+            free(read_source);
+            free(read_memory);
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to open fe_read interrupt context");
+        }
+
+        fex_init_with_config(read_ctx, FEX_CONFIG_ENABLE_SPANS);
+        fe_set_interrupt_handler(read_ctx, interrupt_once, &interrupt_calls, 1);
+        reader.text = read_source;
+        reader.offset = 0;
+        previous_error = fe_handlers(read_ctx)->error;
+        fe_handlers(read_ctx)->error = read_try_error_handler;
+        g_read_try_scope = &read_try;
+        read_try.message[0] = '\0';
+
+        if (setjmp(read_try.env) == 0) {
+            (void)fe_read(read_ctx, read_from_string, &reader);
+            g_read_try_scope = NULL;
+            fe_handlers(read_ctx)->error = previous_error;
+            fe_set_interrupt_handler(read_ctx, NULL, NULL, 0);
+            fe_close(read_ctx);
+            free(read_source);
+            free(read_memory);
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_read to honor interrupt polling");
+        }
+
+        g_read_try_scope = NULL;
+        fe_handlers(read_ctx)->error = previous_error;
+        fe_set_interrupt_handler(read_ctx, NULL, NULL, 0);
+        if (strstr(read_try.message, "execution interrupted") == NULL) {
+            fe_close(read_ctx);
+            free(read_source);
+            free(read_memory);
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_read interrupt message");
+        }
+        if (interrupt_calls < 1) {
+            fe_close(read_ctx);
+            free(read_source);
+            free(read_memory);
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_read interrupt handler to run");
+        }
+        fe_close(read_ctx);
+        free(read_source);
+        free(read_memory);
     }
 
     status = fex_try_do_string(ctx, "pathjoin(\"build\", \"fex\");", &result, &error);
