@@ -112,6 +112,16 @@ typedef struct {
 #endif
 } ProcessCapturePipe;
 
+#ifdef _WIN32
+typedef struct {
+    HANDLE write_handle;
+    const unsigned char *data;
+    size_t len;
+    int failed;
+    DWORD error_code;
+} ProcessInputWriter;
+#endif
+
 #define FEX_COMMAND_OUTPUT_MAX_BYTES (4u * 1024u * 1024u)
 #define PROCESS_STREAM_CAPTURE 0
 #define PROCESS_STREAM_INHERIT 1
@@ -2823,95 +2833,6 @@ static int parse_process_options(fe_Context *ctx, fe_Object *opts_obj,
     return 1;
 }
 
-static int create_temp_redirect_file(fe_Context *ctx, TempRedirectFile *file,
-                                     const char *func_name) {
-    char msg[160];
-
-#ifdef _WIN32
-    char temp_dir[MAX_PATH + 1];
-    char temp_name[MAX_PATH + 1];
-    DWORD temp_dir_len;
-    SECURITY_ATTRIBUTES sa;
-
-    temp_dir_len = GetTempPathA(MAX_PATH, temp_dir);
-    if (temp_dir_len == 0 || temp_dir_len > MAX_PATH) {
-        sprintf(msg, "%s: could not create temp file", func_name);
-        fe_error(ctx, msg);
-        return 0;
-    }
-    if (GetTempFileNameA(temp_dir, "fex", 0, temp_name) == 0) {
-        sprintf(msg, "%s: could not create temp file", func_name);
-        fe_error(ctx, msg);
-        return 0;
-    }
-
-    file->path = copy_cstr(temp_name);
-    if (!file->path) {
-        remove(temp_name);
-        sprintf(msg, "%s: out of memory", func_name);
-        fe_error(ctx, msg);
-        return 0;
-    }
-
-    sa.nLength = sizeof(sa);
-    sa.lpSecurityDescriptor = NULL;
-    sa.bInheritHandle = TRUE;
-    file->handle = CreateFileA(
-        temp_name,
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        &sa,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_TEMPORARY,
-        NULL
-    );
-    if (file->handle == INVALID_HANDLE_VALUE) {
-        remove(temp_name);
-        free(file->path);
-        file->path = NULL;
-        sprintf(msg, "%s: could not create temp file", func_name);
-        fe_error(ctx, msg);
-        return 0;
-    }
-#else
-    const char *tmp_dir;
-    const char *name = "fexprocXXXXXX";
-    size_t tmp_dir_len;
-    int need_sep;
-    char *path;
-
-    tmp_dir = getenv("TMPDIR");
-    if (!tmp_dir || !*tmp_dir) {
-        tmp_dir = "/tmp";
-    }
-
-    tmp_dir_len = strlen(tmp_dir);
-    need_sep = (tmp_dir_len > 0 && tmp_dir[tmp_dir_len - 1] != '/');
-    path = malloc(tmp_dir_len + (size_t)need_sep + strlen(name) + 1);
-    if (!path) {
-        sprintf(msg, "%s: out of memory", func_name);
-        fe_error(ctx, msg);
-        return 0;
-    }
-    memcpy(path, tmp_dir, tmp_dir_len);
-    if (need_sep) {
-        path[tmp_dir_len++] = '/';
-    }
-    memcpy(path + tmp_dir_len, name, strlen(name) + 1);
-
-    file->fd = mkstemp(path);
-    if (file->fd < 0) {
-        free(path);
-        sprintf(msg, "%s: could not create temp file", func_name);
-        fe_error(ctx, msg);
-        return 0;
-    }
-    file->path = path;
-#endif
-
-    return 1;
-}
-
 static int open_null_redirect_file(fe_Context *ctx, TempRedirectFile *file,
                                    int writable, const char *func_name) {
     char msg[160];
@@ -2999,6 +2920,57 @@ static int create_process_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe
     return 1;
 }
 
+static int create_process_input_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
+                                     const char *func_name) {
+    char msg[160];
+
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES sa;
+
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&pipe->read_handle, &pipe->write_handle, &sa, 0)) {
+        sprintf(msg, "%s: could not create stdin pipe", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+    if (!SetHandleInformation(pipe->write_handle, HANDLE_FLAG_INHERIT, 0)) {
+        sprintf(msg, "%s: could not configure stdin pipe", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#else
+    int fds[2];
+    int flags;
+
+    if (pipe(fds) != 0) {
+        sprintf(msg, "%s: could not create stdin pipe", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+    flags = fcntl(fds[0], F_GETFD, 0);
+    if (flags >= 0) {
+        fcntl(fds[0], F_SETFD, flags | FD_CLOEXEC);
+    }
+    flags = fcntl(fds[1], F_GETFD, 0);
+    if (flags >= 0) {
+        fcntl(fds[1], F_SETFD, flags | FD_CLOEXEC);
+    }
+
+    pipe->read_fd = fds[0];
+    pipe->write_fd = fds[1];
+    flags = fcntl(pipe->write_fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(pipe->write_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        sprintf(msg, "%s: could not configure stdin pipe", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#endif
+
+    return 1;
+}
+
 #ifdef _WIN32
 static HANDLE duplicate_inheritable_handle(HANDLE handle) {
     HANDLE copy = INVALID_HANDLE_VALUE;
@@ -3012,6 +2984,51 @@ static HANDLE duplicate_inheritable_handle(HANDLE handle) {
         return INVALID_HANDLE_VALUE;
     }
     return copy;
+}
+
+static DWORD WINAPI process_input_writer_thread(void *param) {
+    ProcessInputWriter *writer = (ProcessInputWriter*)param;
+    size_t offset = 0;
+
+    while (offset < writer->len) {
+        DWORD written = 0;
+        DWORD chunk = (DWORD)((writer->len - offset > 0x7fffffffU)
+            ? 0x7fffffffU
+            : (DWORD)(writer->len - offset));
+
+        if (!WriteFile(writer->write_handle, writer->data + offset,
+                       chunk, &written, NULL)) {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE) {
+                writer->failed = 0;
+                writer->error_code = 0;
+                CloseHandle(writer->write_handle);
+                writer->write_handle = INVALID_HANDLE_VALUE;
+                return 0;
+            }
+            writer->failed = 1;
+            writer->error_code = err;
+            CloseHandle(writer->write_handle);
+            writer->write_handle = INVALID_HANDLE_VALUE;
+            return 1;
+        }
+
+        if (written == 0) {
+            writer->failed = 1;
+            writer->error_code = ERROR_WRITE_FAULT;
+            CloseHandle(writer->write_handle);
+            writer->write_handle = INVALID_HANDLE_VALUE;
+            return 1;
+        }
+
+        offset += (size_t)written;
+    }
+
+    CloseHandle(writer->write_handle);
+    writer->write_handle = INVALID_HANDLE_VALUE;
+    writer->failed = 0;
+    writer->error_code = 0;
+    return 0;
 }
 #endif
 
@@ -3085,6 +3102,47 @@ static int drain_windows_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
     return 1;
 }
 #else
+static int write_posix_input_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
+                                  const unsigned char *data, size_t len,
+                                  size_t *offset, const char *func_name,
+                                  int *pipe_open, int *made_progress) {
+    char msg[160];
+
+    while (*pipe_open && *offset < len) {
+        ssize_t bytes_written = write(pipe->write_fd, data + *offset, len - *offset);
+
+        if (bytes_written > 0) {
+            *offset += (size_t)bytes_written;
+            *made_progress = 1;
+            continue;
+        }
+
+        if (bytes_written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (bytes_written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return 1;
+        }
+        if (bytes_written < 0 && errno == EPIPE) {
+            close_process_capture_pipe_write(pipe);
+            *pipe_open = 0;
+            return 1;
+        }
+
+        sprintf(msg, "%s: could not write stdin", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    if (*pipe_open && *offset >= len) {
+        close_process_capture_pipe_write(pipe);
+        *pipe_open = 0;
+    }
+
+    (void)ctx;
+    return 1;
+}
+
 static int drain_posix_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
                                     TextBuffer *buf, size_t limit,
                                     int *overflow, const char *func_name,
@@ -3125,51 +3183,6 @@ static int drain_posix_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
     return 1;
 }
 #endif
-
-static int write_temp_redirect_data(fe_Context *ctx, TempRedirectFile *file,
-                                    const unsigned char *data, size_t len,
-                                    const char *func_name) {
-    char msg[160];
-    size_t offset = 0;
-
-    while (offset < len) {
-#ifdef _WIN32
-        DWORD written = 0;
-        DWORD chunk = (DWORD)((len - offset > 0x7fffffffU) ? 0x7fffffffU : (DWORD)(len - offset));
-        if (!WriteFile(file->handle, data + offset, chunk, &written, NULL) || written == 0) {
-            sprintf(msg, "%s: could not write stdin", func_name);
-            fe_error(ctx, msg);
-            return 0;
-        }
-        offset += (size_t)written;
-#else
-        ssize_t written = write(file->fd, data + offset, len - offset);
-        if (written <= 0) {
-            sprintf(msg, "%s: could not write stdin", func_name);
-            fe_error(ctx, msg);
-            return 0;
-        }
-        offset += (size_t)written;
-#endif
-    }
-
-#ifdef _WIN32
-    if (SetFilePointer(file->handle, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER &&
-        GetLastError() != NO_ERROR) {
-        sprintf(msg, "%s: could not rewind stdin", func_name);
-        fe_error(ctx, msg);
-        return 0;
-    }
-#else
-    if (lseek(file->fd, 0, SEEK_SET) < 0) {
-        sprintf(msg, "%s: could not rewind stdin", func_name);
-        fe_error(ctx, msg);
-        return 0;
-    }
-#endif
-
-    return 1;
-}
 
 #ifdef _WIN32
 static int buf_append_repeat(TextBuffer *buf, char chr, size_t count) {
@@ -3314,7 +3327,7 @@ extern char **environ;
 static int run_process_native(fe_Context *ctx, CStringArray *argv,
                               ProcessOptions *options, ProcessOutput *output,
                               const char *func_name) {
-    TempRedirectFile stdin_file;
+    ProcessCapturePipe stdin_pipe;
     TempRedirectFile stdout_redirect;
     TempRedirectFile stderr_redirect;
     ProcessCapturePipe stdout_pipe;
@@ -3324,8 +3337,14 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     int stdout_overflow = 0;
     int stderr_overflow = 0;
     int ok = 0;
+#ifdef _WIN32
+    HANDLE stdin_thread = NULL;
+    ProcessInputWriter stdin_writer;
+#else
+    size_t stdin_offset = 0;
+#endif
 
-    init_temp_redirect_file(&stdin_file);
+    init_process_capture_pipe(&stdin_pipe);
     init_temp_redirect_file(&stdout_redirect);
     init_temp_redirect_file(&stderr_redirect);
     init_process_capture_pipe(&stdout_pipe);
@@ -3339,14 +3358,12 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     memset(output, 0, sizeof(*output));
     output->stdout_captured = (options->stdout_mode == PROCESS_STREAM_CAPTURE);
     output->stderr_captured = (options->stderr_mode == PROCESS_STREAM_CAPTURE);
+#ifdef _WIN32
+    memset(&stdin_writer, 0, sizeof(stdin_writer));
+    stdin_writer.write_handle = INVALID_HANDLE_VALUE;
+#endif
 
-    if (!create_temp_redirect_file(ctx, &stdin_file, func_name)) {
-        goto cleanup;
-    }
-
-    if (!write_temp_redirect_data(ctx, &stdin_file,
-                                  options->stdin_data ? options->stdin_data : (const unsigned char*)"",
-                                  options->stdin_len, func_name)) {
+    if (!create_process_input_pipe(ctx, &stdin_pipe, func_name)) {
         goto cleanup;
     }
 
@@ -3396,7 +3413,7 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
 
         startup_info.cb = sizeof(startup_info);
         startup_info.dwFlags = STARTF_USESTDHANDLES;
-        startup_info.hStdInput = stdin_file.handle;
+        startup_info.hStdInput = stdin_pipe.read_handle;
         if (options->stdout_mode == PROCESS_STREAM_INHERIT) {
             stdout_redirect.handle = duplicate_inheritable_handle(GetStdHandle(STD_OUTPUT_HANDLE));
             if (stdout_redirect.handle == INVALID_HANDLE_VALUE) {
@@ -3437,11 +3454,27 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
         free(command_line);
         free(environment);
         CloseHandle(process_info.hThread);
-        close_temp_redirect_file(&stdin_file);
+        close_process_capture_pipe_read(&stdin_pipe);
         close_temp_redirect_file(&stdout_redirect);
         close_temp_redirect_file(&stderr_redirect);
         close_process_capture_pipe_write(&stdout_pipe);
         close_process_capture_pipe_write(&stderr_pipe);
+
+        if (options->stdin_len > 0) {
+            stdin_writer.write_handle = stdin_pipe.write_handle;
+            stdin_writer.data = options->stdin_data ? options->stdin_data : (const unsigned char*)"";
+            stdin_writer.len = options->stdin_len;
+            stdin_thread = CreateThread(NULL, 0, process_input_writer_thread,
+                                        &stdin_writer, 0, NULL);
+            if (stdin_thread == NULL) {
+                fe_error(ctx, "runprocess: could not start stdin writer");
+                CloseHandle(process_info.hProcess);
+                goto cleanup;
+            }
+            stdin_pipe.write_handle = INVALID_HANDLE_VALUE;
+        } else {
+            close_process_capture_pipe_write(&stdin_pipe);
+        }
 
         if (options->stdout_mode != PROCESS_STREAM_CAPTURE &&
             options->stderr_mode != PROCESS_STREAM_CAPTURE) {
@@ -3500,6 +3533,16 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
 
             CloseHandle(process_info.hProcess);
         }
+
+        if (stdin_thread != NULL) {
+            wait_result = WaitForSingleObject(stdin_thread, INFINITE);
+            CloseHandle(stdin_thread);
+            stdin_thread = NULL;
+            if (wait_result != WAIT_OBJECT_0 || stdin_writer.failed) {
+                fe_error(ctx, "runprocess: could not write stdin");
+                goto cleanup;
+            }
+        }
     }
 #else
     {
@@ -3516,11 +3559,12 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
             if (options->cwd && chdir(options->cwd) != 0) {
                 _exit(127);
             }
-            if (dup2(stdin_file.fd, 0) < 0) {
+            if (dup2(stdin_pipe.read_fd, 0) < 0) {
                 _exit(127);
             }
 
-            close(stdin_file.fd);
+            close_process_capture_pipe_read(&stdin_pipe);
+            close_process_capture_pipe_write(&stdin_pipe);
             if (options->stdout_mode == PROCESS_STREAM_CAPTURE) {
                 close_process_capture_pipe_read(&stdout_pipe);
                 if (dup2(stdout_pipe.write_fd, 1) < 0) {
@@ -3553,14 +3597,16 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
             _exit(127);
         }
 
-        close_temp_redirect_file(&stdin_file);
+        close_process_capture_pipe_read(&stdin_pipe);
         close_temp_redirect_file(&stdout_redirect);
         close_temp_redirect_file(&stderr_redirect);
         close_process_capture_pipe_write(&stdout_pipe);
         close_process_capture_pipe_write(&stderr_pipe);
 
         if (options->stdout_mode != PROCESS_STREAM_CAPTURE &&
-            options->stderr_mode != PROCESS_STREAM_CAPTURE) {
+            options->stderr_mode != PROCESS_STREAM_CAPTURE &&
+            options->stdin_len == 0) {
+            close_process_capture_pipe_write(&stdin_pipe);
             if (waitpid(pid, &status, 0) < 0) {
                 fe_error(ctx, "runprocess: could not wait for process");
                 goto cleanup;
@@ -3568,10 +3614,16 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
             output->exit_code = decode_process_exit_code(status);
         } else {
             int process_finished = 0;
+            int stdin_open = 1;
             int stdout_open = (options->stdout_mode == PROCESS_STREAM_CAPTURE);
             int stderr_open = (options->stderr_mode == PROCESS_STREAM_CAPTURE);
 
-            while (!process_finished || stdout_open || stderr_open) {
+            if (options->stdin_len == 0) {
+                close_process_capture_pipe_write(&stdin_pipe);
+                stdin_open = 0;
+            }
+
+            while (!process_finished || stdin_open || stdout_open || stderr_open) {
                 int made_progress = 0;
 
                 if (!process_finished) {
@@ -3585,13 +3637,21 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
                     }
                 }
 
-                if (stdout_open || stderr_open) {
+                if (stdin_open || stdout_open || stderr_open) {
                     fd_set readfds;
+                    fd_set writefds;
                     struct timeval timeout;
                     int maxfd = -1;
                     int select_result;
 
                     FD_ZERO(&readfds);
+                    FD_ZERO(&writefds);
+                    if (stdin_open) {
+                        FD_SET(stdin_pipe.write_fd, &writefds);
+                        if (stdin_pipe.write_fd > maxfd) {
+                            maxfd = stdin_pipe.write_fd;
+                        }
+                    }
                     if (stdout_open) {
                         FD_SET(stdout_pipe.read_fd, &readfds);
                         if (stdout_pipe.read_fd > maxfd) {
@@ -3607,15 +3667,23 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
 
                     timeout.tv_sec = 0;
                     timeout.tv_usec = process_finished ? 0 : 10000;
-                    select_result = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
+                    select_result = select(maxfd + 1, &readfds, &writefds, NULL, &timeout);
                     if (select_result < 0) {
                         if (errno == EINTR) {
                             continue;
                         }
-                        fe_error(ctx, "runprocess: could not poll capture pipes");
+                        fe_error(ctx, "runprocess: could not poll process pipes");
                         goto cleanup;
                     }
 
+                    if (stdin_open &&
+                        FD_ISSET(stdin_pipe.write_fd, &writefds) &&
+                        !write_posix_input_pipe(ctx, &stdin_pipe,
+                                                options->stdin_data ? options->stdin_data : (const unsigned char*)"",
+                                                options->stdin_len, &stdin_offset,
+                                                func_name, &stdin_open, &made_progress)) {
+                        goto cleanup;
+                    }
                     if (stdout_open &&
                         (process_finished || FD_ISSET(stdout_pipe.read_fd, &readfds)) &&
                         !drain_posix_capture_pipe(ctx, &stdout_pipe, &stdout_buf,
@@ -3661,7 +3729,7 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     ok = 1;
 
 cleanup:
-    destroy_temp_redirect_file(&stdin_file);
+    destroy_process_capture_pipe(&stdin_pipe);
     destroy_temp_redirect_file(&stdout_redirect);
     destroy_temp_redirect_file(&stderr_redirect);
     destroy_process_capture_pipe(&stdout_pipe);
