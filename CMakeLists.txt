@@ -51,16 +51,22 @@ if(UNIX)
 endif()
 
 if(BUILD_TESTING)
+    find_package(PythonInterp QUIET)
     add_executable(fex_try_api_test src/fex.c src/fex_span.c src/fe.c src/fex_builtins.c src/sfc32.c tools/test_try_api.c)
     target_include_directories(fex_try_api_test PRIVATE src)
     fex_apply_target_defaults(fex_try_api_test)
     if(UNIX)
         target_link_libraries(fex_try_api_test m)
     endif()
+    if(PYTHONINTERP_FOUND)
+        target_compile_definitions(
+            fex_try_api_test PRIVATE
+            FEX_TEST_PYTHON_EXECUTABLE="${PYTHON_EXECUTABLE}"
+        )
+    endif()
 
     add_test(NAME fex_try_api COMMAND $<TARGET_FILE:fex_try_api_test>)
 
-    find_package(PythonInterp QUIET)
     if(PYTHONINTERP_FOUND)
         add_test(
             NAME fex_regressions

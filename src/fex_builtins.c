@@ -61,6 +61,9 @@
 #include "fex_builtins.h"
 #include "sfc32.h"
 
+#define FEX_BUILTIN_ABORT_CHECK_INTERVAL 64u
+#define FEX_FILE_IO_CHUNK_SIZE 16384u
+
 typedef struct {
     char *data;
     size_t len;
@@ -160,6 +163,16 @@ static int buf_append_mem(TextBuffer *buf, const char *data, size_t len) {
     buf->len += len;
     buf->data[buf->len] = '\0';
     return 1;
+}
+
+static const char* builtin_poll_abort(fe_Context *ctx, size_t *countdown) {
+    if (*countdown > 1) {
+        (*countdown)--;
+        return NULL;
+    }
+
+    *countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    return fe_poll_abort(ctx);
 }
 
 static int buf_append_str(TextBuffer *buf, const char *str) {
@@ -556,6 +569,8 @@ static fe_Object* cstring_array_to_list(fe_Context *ctx, const CStringArray *arr
     fe_Object *result;
     int i;
     int gc_save;
+    size_t poll_countdown = 1;
+    const char *abort_error;
 
     if (array->count == 0) {
         return fe_nil(ctx);
@@ -569,6 +584,13 @@ static fe_Object* cstring_array_to_list(fe_Context *ctx, const CStringArray *arr
 
     gc_save = fe_savegc(ctx);
     for (i = 0; i < array->count; i++) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_restoregc(ctx, gc_save);
+            free(items);
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         items[i] = fe_string(ctx, array->items[i], strlen(array->items[i]));
         fe_pushgc(ctx, items[i]);
     }
@@ -1545,12 +1567,25 @@ static fe_Object* builtin_map_count(fe_Context *ctx, fe_Object *args) {
 typedef struct {
     fe_Context *ctx;
     const char *current;
+    size_t poll_countdown;
 } JsonParser;
 
+typedef struct {
+    fe_Context *ctx;
+    size_t poll_countdown;
+} JsonWriter;
+
 static void json_skip_ws(JsonParser *parser) {
+    const char *abort_error;
+
     while (*parser->current &&
            (*parser->current == ' ' || *parser->current == '\t' ||
             *parser->current == '\n' || *parser->current == '\r')) {
+        abort_error = builtin_poll_abort(parser->ctx, &parser->poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(parser->ctx, abort_error);
+            return;
+        }
         parser->current++;
     }
 }
@@ -1568,6 +1603,7 @@ static fe_Object* json_parse_string(JsonParser *parser) {
     TextBuffer buf;
     fe_Object *result;
     int hi, lo, hi2, lo2;
+    const char *abort_error;
 
     buf.data = NULL;
     buf.len = 0;
@@ -1582,6 +1618,13 @@ static fe_Object* json_parse_string(JsonParser *parser) {
     while (*parser->current && *parser->current != '"') {
         unsigned codepoint;
         char chr = *parser->current++;
+
+        abort_error = builtin_poll_abort(parser->ctx, &parser->poll_countdown);
+        if (abort_error != NULL) {
+            buf_free(&buf);
+            fe_error(parser->ctx, abort_error);
+            return fe_nil(parser->ctx);
+        }
         if (chr == '\\') {
             chr = *parser->current++;
             switch (chr) {
@@ -1657,6 +1700,7 @@ static fe_Object* json_parse_number(JsonParser *parser) {
 static fe_Object* json_parse_array(JsonParser *parser) {
     fe_Object *result;
     fe_Object **tail;
+    const char *abort_error;
 
     parser->current++;
     json_skip_ws(parser);
@@ -1670,6 +1714,11 @@ static fe_Object* json_parse_array(JsonParser *parser) {
 
     for (;;) {
         fe_Object *item = json_parse_value(parser);
+        abort_error = builtin_poll_abort(parser->ctx, &parser->poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(parser->ctx, abort_error);
+            return fe_nil(parser->ctx);
+        }
         *tail = fe_cons(parser->ctx, item, fe_nil(parser->ctx));
         tail = fe_cdr_ptr(parser->ctx, *tail);
         json_skip_ws(parser);
@@ -1688,6 +1737,7 @@ static fe_Object* json_parse_array(JsonParser *parser) {
 
 static fe_Object* json_parse_object(JsonParser *parser) {
     fe_Object *map = fe_map(parser->ctx);
+    const char *abort_error;
 
     parser->current++;
     json_skip_ws(parser);
@@ -1700,6 +1750,11 @@ static fe_Object* json_parse_object(JsonParser *parser) {
         fe_Object *key;
         fe_Object *value;
 
+        abort_error = builtin_poll_abort(parser->ctx, &parser->poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(parser->ctx, abort_error);
+            return fe_nil(parser->ctx);
+        }
         if (*parser->current != '"') {
             fe_error(parser->ctx, "parsejson: expected object key string");
             return fe_nil(parser->ctx);
@@ -1763,7 +1818,15 @@ static fe_Object* json_parse_value(JsonParser *parser) {
 }
 
 static int json_is_proper_list(fe_Context *ctx, fe_Object *obj) {
+    size_t poll_countdown = 1;
+    const char *abort_error;
+
     while (!fe_isnil(ctx, obj)) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return 0;
+        }
         if (fe_type(ctx, obj) != FE_TPAIR) {
             return 0;
         }
@@ -1772,11 +1835,12 @@ static int json_is_proper_list(fe_Context *ctx, fe_Object *obj) {
     return 1;
 }
 
-static int json_write_string(fe_Context *ctx, fe_Object *obj, TextBuffer *buf) {
+static int json_write_string(JsonWriter *writer, fe_Object *obj, TextBuffer *buf) {
     char *text;
     size_t i;
+    const char *abort_error;
 
-    text = string_to_cstr(ctx, obj, "tojson");
+    text = string_to_cstr(writer->ctx, obj, "tojson");
     if (!text) {
         return 0;
     }
@@ -1786,6 +1850,12 @@ static int json_write_string(fe_Context *ctx, fe_Object *obj, TextBuffer *buf) {
     }
     for (i = 0; text[i] != '\0'; i++) {
         unsigned char chr = (unsigned char)text[i];
+        abort_error = builtin_poll_abort(writer->ctx, &writer->poll_countdown);
+        if (abort_error != NULL) {
+            free(text);
+            fe_error(writer->ctx, abort_error);
+            return 0;
+        }
         switch (chr) {
             case '"': if (!buf_append_str(buf, "\\\"")) goto fail; break;
             case '\\': if (!buf_append_str(buf, "\\\\")) goto fail; break;
@@ -1813,53 +1883,63 @@ fail:
     return 0;
 }
 
-static int json_write_value(fe_Context *ctx, fe_Object *obj, TextBuffer *buf) {
+static int json_write_value(JsonWriter *writer, fe_Object *obj, TextBuffer *buf) {
     char number_buf[64];
-    switch (fe_type(ctx, obj)) {
+    switch (fe_type(writer->ctx, obj)) {
         case FE_TNIL:
             return buf_append_str(buf, "null");
         case FE_TBOOLEAN:
-            return buf_append_str(buf, (obj == fe_bool(ctx, 1)) ? "true" : "false");
+            return buf_append_str(buf, (obj == fe_bool(writer->ctx, 1)) ? "true" : "false");
         case FE_TNUMBER:
-            sprintf(number_buf, "%.15g", fe_tonumber(ctx, obj));
+            sprintf(number_buf, "%.15g", fe_tonumber(writer->ctx, obj));
             return buf_append_str(buf, number_buf);
         case FE_TSTRING:
-            return json_write_string(ctx, obj, buf);
+            return json_write_string(writer, obj, buf);
         case FE_TMAP: {
-            fe_Object *keys = fe_map_keys(ctx, obj);
+            fe_Object *keys = fe_map_keys(writer->ctx, obj);
             int first = 1;
             if (!buf_append_char(buf, '{')) return 0;
-            while (!fe_isnil(ctx, keys)) {
-                fe_Object *key = fe_car(ctx, keys);
+            while (!fe_isnil(writer->ctx, keys)) {
+                fe_Object *key = fe_car(writer->ctx, keys);
+                const char *abort_error = builtin_poll_abort(writer->ctx, &writer->poll_countdown);
+                if (abort_error != NULL) {
+                    fe_error(writer->ctx, abort_error);
+                    return 0;
+                }
                 if (!first && !buf_append_char(buf, ',')) return 0;
-                if (!json_write_string(ctx, key, buf)) return 0;
+                if (!json_write_string(writer, key, buf)) return 0;
                 if (!buf_append_char(buf, ':')) return 0;
-                if (!json_write_value(ctx, fe_map_get(ctx, obj, key), buf)) return 0;
+                if (!json_write_value(writer, fe_map_get(writer->ctx, obj, key), buf)) return 0;
                 first = 0;
-                keys = fe_cdr(ctx, keys);
+                keys = fe_cdr(writer->ctx, keys);
             }
             return buf_append_char(buf, '}');
         }
         case FE_TPAIR: {
-            if (!json_is_proper_list(ctx, obj)) {
-                fe_error(ctx, "tojson: cannot serialize dotted pair");
+            if (!json_is_proper_list(writer->ctx, obj)) {
+                fe_error(writer->ctx, "tojson: cannot serialize dotted pair");
                 return 0;
             }
             if (!buf_append_char(buf, '[')) return 0;
             {
                 int first = 1;
                 fe_Object *list = obj;
-                while (!fe_isnil(ctx, list)) {
+                while (!fe_isnil(writer->ctx, list)) {
+                    const char *abort_error = builtin_poll_abort(writer->ctx, &writer->poll_countdown);
+                    if (abort_error != NULL) {
+                        fe_error(writer->ctx, abort_error);
+                        return 0;
+                    }
                     if (!first && !buf_append_char(buf, ',')) return 0;
-                    if (!json_write_value(ctx, fe_car(ctx, list), buf)) return 0;
+                    if (!json_write_value(writer, fe_car(writer->ctx, list), buf)) return 0;
                     first = 0;
-                    list = fe_cdr(ctx, list);
+                    list = fe_cdr(writer->ctx, list);
                 }
             }
             return buf_append_char(buf, ']');
         }
         default:
-            fe_error(ctx, "tojson: unsupported value type");
+            fe_error(writer->ctx, "tojson: unsupported value type");
             return 0;
     }
 }
@@ -1879,6 +1959,7 @@ static fe_Object* builtin_parse_json(fe_Context *ctx, fe_Object *args) {
 
     parser.ctx = ctx;
     parser.current = text;
+    parser.poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     result = json_parse_value(&parser);
     json_skip_ws(&parser);
     if (*parser.current != '\0') {
@@ -1894,6 +1975,7 @@ static fe_Object* builtin_to_json(fe_Context *ctx, fe_Object *args) {
     TextBuffer buf;
     fe_Object *value;
     fe_Object *result;
+    JsonWriter writer;
 
     FEX_CHECK_ARGS(ctx, args, 1, "tojson");
     value = fe_nextarg(ctx, &args);
@@ -1901,7 +1983,9 @@ static fe_Object* builtin_to_json(fe_Context *ctx, fe_Object *args) {
     buf.data = NULL;
     buf.len = 0;
     buf.cap = 0;
-    if (!json_write_value(ctx, value, &buf)) {
+    writer.ctx = ctx;
+    writer.poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    if (!json_write_value(&writer, value, &buf)) {
         buf_free(&buf);
         return fe_nil(ctx);
     }
@@ -1922,6 +2006,9 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
     long size;
     char *buffer;
     size_t bytes_read;
+    size_t total_read;
+    size_t poll_countdown = 1;
+    const char *abort_error;
     char msg[160];
 
     file = fopen(filename, "rb");
@@ -1959,19 +2046,39 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
         return NULL;
     }
 
-    bytes_read = fread(buffer, 1, (size_t)size, file);
-    if (ferror(file)) {
-        free(buffer);
-        fclose(file);
-        sprintf(msg, "%s: error reading file", func_name);
-        fe_error(ctx, msg);
-        return NULL;
+    total_read = 0;
+    while (total_read < (size_t)size) {
+        size_t chunk_size = (size_t)size - total_read;
+        if (chunk_size > FEX_FILE_IO_CHUNK_SIZE) {
+            chunk_size = FEX_FILE_IO_CHUNK_SIZE;
+        }
+
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            free(buffer);
+            fclose(file);
+            fe_error(ctx, abort_error);
+            return NULL;
+        }
+
+        bytes_read = fread(buffer + total_read, 1, chunk_size, file);
+        total_read += bytes_read;
+        if (bytes_read < chunk_size) {
+            if (ferror(file)) {
+                free(buffer);
+                fclose(file);
+                sprintf(msg, "%s: error reading file", func_name);
+                fe_error(ctx, msg);
+                return NULL;
+            }
+            break;
+        }
     }
 
     fclose(file);
-    buffer[bytes_read] = '\0';
+    buffer[total_read] = '\0';
     if (out_size) {
-        *out_size = bytes_read;
+        *out_size = total_read;
     }
     return buffer;
 }
@@ -2122,6 +2229,8 @@ static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
     char *path;
     CStringArray entries;
     fe_Object *result;
+    size_t poll_countdown = 1;
+    const char *abort_error;
 
     FEX_CHECK_ARGS(ctx, args, 1, "listdir");
     path_obj = fe_nextarg(ctx, &args);
@@ -2177,6 +2286,14 @@ static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
         }
 
         do {
+            abort_error = builtin_poll_abort(ctx, &poll_countdown);
+            if (abort_error != NULL) {
+                FindClose(find_handle);
+                free(path);
+                free_cstring_array(&entries);
+                fe_error(ctx, abort_error);
+                return fe_nil(ctx);
+            }
             if (strcmp(find_data.cFileName, ".") == 0 ||
                 strcmp(find_data.cFileName, "..") == 0) {
                 continue;
@@ -2204,6 +2321,14 @@ static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
         }
 
         while ((entry = readdir(dir)) != NULL) {
+            abort_error = builtin_poll_abort(ctx, &poll_countdown);
+            if (abort_error != NULL) {
+                closedir(dir);
+                free(path);
+                free_cstring_array(&entries);
+                fe_error(ctx, abort_error);
+                return fe_nil(ctx);
+            }
             if (strcmp(entry->d_name, ".") == 0 ||
                 strcmp(entry->d_name, "..") == 0) {
                 continue;
@@ -2319,8 +2444,12 @@ static fe_Object* builtin_write_file(fe_Context *ctx, fe_Object *args) {
     char *filename = string_to_cstr(ctx, filename_obj, "writefile");
     char *content = string_to_cstr(ctx, content_obj, "writefile");
     size_t content_len;
-    FILE *file;
     size_t written;
+    size_t total_written;
+    size_t chunk_size;
+    size_t poll_countdown = 1;
+    const char *abort_error;
+    FILE *file;
 
     if (!filename || !content) {
         free(filename);
@@ -2337,19 +2466,35 @@ static fe_Object* builtin_write_file(fe_Context *ctx, fe_Object *args) {
         return fe_nil(ctx);
     }
 
-    written = fwrite(content, 1, content_len, file);
-    if (written != content_len || ferror(file)) {
-        fclose(file);
-        free(filename);
-        free(content);
-        fe_error(ctx, "writefile: error writing file");
-        return fe_nil(ctx);
+    total_written = 0;
+    while (total_written < content_len) {
+        chunk_size = content_len - total_written;
+        if (chunk_size > FEX_FILE_IO_CHUNK_SIZE) {
+            chunk_size = FEX_FILE_IO_CHUNK_SIZE;
+        }
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fclose(file);
+            free(filename);
+            free(content);
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
+        written = fwrite(content + total_written, 1, chunk_size, file);
+        total_written += written;
+        if (written < chunk_size || ferror(file)) {
+            fclose(file);
+            free(filename);
+            free(content);
+            fe_error(ctx, "writefile: error writing file");
+            return fe_nil(ctx);
+        }
     }
 
     fclose(file);
     free(filename);
     free(content);
-    return fe_make_number(ctx, (fe_Number)written);
+    return fe_make_number(ctx, (fe_Number)total_written);
 }
 
 static fe_Object* builtin_write_bytes(fe_Context *ctx, fe_Object *args) {
@@ -2358,8 +2503,12 @@ static fe_Object* builtin_write_bytes(fe_Context *ctx, fe_Object *args) {
     char *filename;
     unsigned char *content;
     size_t content_len;
-    FILE *file;
     size_t written;
+    size_t total_written;
+    size_t chunk_size;
+    size_t poll_countdown = 1;
+    const char *abort_error;
+    FILE *file;
 
     FEX_CHECK_ARGS(ctx, args, 2, "writebytes");
     filename_obj = fe_nextarg(ctx, &args);
@@ -2381,19 +2530,35 @@ static fe_Object* builtin_write_bytes(fe_Context *ctx, fe_Object *args) {
         return fe_nil(ctx);
     }
 
-    written = fwrite(content, 1, content_len, file);
-    if (written != content_len || ferror(file)) {
-        fclose(file);
-        free(filename);
-        free(content);
-        fe_error(ctx, "writebytes: error writing file");
-        return fe_nil(ctx);
+    total_written = 0;
+    while (total_written < content_len) {
+        chunk_size = content_len - total_written;
+        if (chunk_size > FEX_FILE_IO_CHUNK_SIZE) {
+            chunk_size = FEX_FILE_IO_CHUNK_SIZE;
+        }
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fclose(file);
+            free(filename);
+            free(content);
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
+        written = fwrite(content + total_written, 1, chunk_size, file);
+        total_written += written;
+        if (written < chunk_size || ferror(file)) {
+            fclose(file);
+            free(filename);
+            free(content);
+            fe_error(ctx, "writebytes: error writing file");
+            return fe_nil(ctx);
+        }
     }
 
     fclose(file);
     free(filename);
     free(content);
-    return fe_make_number(ctx, (fe_Number)written);
+    return fe_make_number(ctx, (fe_Number)total_written);
 }
 
 static fe_Object* builtin_read_json(fe_Context *ctx, fe_Object *args) {
@@ -2414,6 +2579,7 @@ static fe_Object* builtin_read_json(fe_Context *ctx, fe_Object *args) {
 
     parser.ctx = ctx;
     parser.current = buffer;
+    parser.poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     result = json_parse_value(&parser);
     json_skip_ws(&parser);
     if (*parser.current != '\0') {
@@ -2432,6 +2598,11 @@ static fe_Object* builtin_write_json(fe_Context *ctx, fe_Object *args) {
     TextBuffer buf;
     FILE *file;
     size_t written;
+    size_t total_written;
+    size_t chunk_size;
+    size_t poll_countdown = 1;
+    const char *abort_error;
+    JsonWriter writer;
 
     FEX_CHECK_ARGS(ctx, args, 2, "writejson");
     filename_obj = fe_nextarg(ctx, &args);
@@ -2443,7 +2614,9 @@ static fe_Object* builtin_write_json(fe_Context *ctx, fe_Object *args) {
     buf.data = NULL;
     buf.len = 0;
     buf.cap = 0;
-    if (!json_write_value(ctx, value, &buf)) {
+    writer.ctx = ctx;
+    writer.poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    if (!json_write_value(&writer, value, &buf)) {
         free(filename);
         buf_free(&buf);
         return fe_nil(ctx);
@@ -2457,19 +2630,35 @@ static fe_Object* builtin_write_json(fe_Context *ctx, fe_Object *args) {
         return fe_nil(ctx);
     }
 
-    written = fwrite(buf.data, 1, buf.len, file);
-    if (written != buf.len || ferror(file)) {
-        fclose(file);
-        free(filename);
-        buf_free(&buf);
-        fe_error(ctx, "writejson: error writing file");
-        return fe_nil(ctx);
+    total_written = 0;
+    while (total_written < buf.len) {
+        chunk_size = buf.len - total_written;
+        if (chunk_size > FEX_FILE_IO_CHUNK_SIZE) {
+            chunk_size = FEX_FILE_IO_CHUNK_SIZE;
+        }
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fclose(file);
+            free(filename);
+            buf_free(&buf);
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
+        written = fwrite(buf.data + total_written, 1, chunk_size, file);
+        total_written += written;
+        if (written < chunk_size || ferror(file)) {
+            fclose(file);
+            free(filename);
+            buf_free(&buf);
+            fe_error(ctx, "writejson: error writing file");
+            return fe_nil(ctx);
+        }
     }
 
     fclose(file);
     free(filename);
     buf_free(&buf);
-    return fe_make_number(ctx, (fe_Number)written);
+    return fe_make_number(ctx, (fe_Number)total_written);
 }
 
 static int count_list_length(fe_Context *ctx, fe_Object *list,

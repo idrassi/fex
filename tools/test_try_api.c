@@ -1,3 +1,13 @@
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS
+#include <direct.h>
+#define TEST_PATH_SEP '\\'
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define TEST_PATH_SEP '/'
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,6 +16,9 @@
 #include "fex.h"
 
 #define TEST_MEM_SIZE (1024 * 1024)
+#ifndef FEX_TEST_PYTHON_EXECUTABLE
+#define FEX_TEST_PYTHON_EXECUTABLE "python"
+#endif
 #ifdef _WIN32
 #define TEST_SCRIPTS_DIR "..\\scripts"
 #else
@@ -35,6 +48,118 @@ static int interrupt_once(fe_Context *ctx, void *udata) {
     (void)ctx;
     (*calls)++;
     return *calls >= 1;
+}
+
+static char* make_large_parsejson_source(size_t item_count) {
+    const char *prefix = "parsejson(\"[";
+    const char *suffix = "]\");\n";
+    size_t prefix_len = strlen(prefix);
+    size_t suffix_len = strlen(suffix);
+    size_t body_len;
+    size_t total_len;
+    char *source;
+    size_t offset;
+    size_t i;
+
+    if (item_count == 0) {
+        item_count = 1;
+    }
+
+    body_len = item_count * 2 - 1;
+    total_len = prefix_len + body_len + suffix_len;
+    source = (char*)malloc(total_len + 1);
+    if (!source) {
+        return NULL;
+    }
+
+    memcpy(source, prefix, prefix_len);
+    offset = prefix_len;
+    for (i = 0; i < item_count; i++) {
+        source[offset++] = '0';
+        if (i + 1 < item_count) {
+            source[offset++] = ',';
+        }
+    }
+    memcpy(source + offset, suffix, suffix_len);
+    offset += suffix_len;
+    source[offset] = '\0';
+    return source;
+}
+
+static int write_large_test_file(const char *path, size_t size, unsigned char fill_byte) {
+    FILE *file;
+    unsigned char chunk[4096];
+    size_t remaining = size;
+
+    memset(chunk, fill_byte, sizeof(chunk));
+    remove(path);
+    file = fopen(path, "wb");
+    if (!file) {
+        return 0;
+    }
+
+    while (remaining > 0) {
+        size_t chunk_size = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        if (fwrite(chunk, 1, chunk_size, file) != chunk_size) {
+            fclose(file);
+            remove(path);
+            return 0;
+        }
+        remaining -= chunk_size;
+    }
+
+    fclose(file);
+    return 1;
+}
+
+static int make_test_directory(const char *path) {
+    remove(path);
+#ifdef _WIN32
+    _rmdir(path);
+    return _mkdir(path) == 0;
+#else
+    rmdir(path);
+    return mkdir(path, 0700) == 0;
+#endif
+}
+
+static void remove_test_directory(const char *path) {
+#ifdef _WIN32
+    _rmdir(path);
+#else
+    rmdir(path);
+#endif
+}
+
+static int create_test_directory_files(const char *dir_path, int count) {
+    int i;
+
+    for (i = 0; i < count; i++) {
+        char file_path[256];
+        FILE *file;
+
+        snprintf(file_path, sizeof(file_path), "%s%cfile_%04d.tmp",
+            dir_path, TEST_PATH_SEP, i);
+        file = fopen(file_path, "wb");
+        if (!file) {
+            return 0;
+        }
+        fclose(file);
+    }
+
+    return 1;
+}
+
+static void cleanup_test_directory_files(const char *dir_path, int count) {
+    int i;
+
+    for (i = 0; i < count; i++) {
+        char file_path[256];
+        snprintf(file_path, sizeof(file_path), "%s%cfile_%04d.tmp",
+            dir_path, TEST_PATH_SEP, i);
+        remove(file_path);
+    }
+    remove_test_directory(dir_path);
 }
 
 int main(void) {
@@ -319,6 +444,33 @@ int main(void) {
         return fail("unexpected selective JSON helper result");
     }
 
+    {
+        char *parsejson_source = make_large_parsejson_source(100);
+        int interrupt_calls = 0;
+
+        if (!parsejson_source) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to allocate parsejson interrupt source");
+        }
+
+        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 1);
+        status = fex_try_do_string(ctx, parsejson_source, &result, &error);
+        free(parsejson_source);
+        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "execution interrupted") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected parsejson to honor interrupt polling", status, &error);
+        }
+        if (interrupt_calls < 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected parsejson interrupt handler to run");
+        }
+    }
+
     status = fex_try_do_string(ctx, "pathjoin(\"build\", \"fex\");", &result, &error);
     if (status != FEX_STATUS_RUNTIME_ERROR || strstr(error.message, "tried to call non-callable value") == NULL) {
         fe_close(ctx);
@@ -340,6 +492,72 @@ int main(void) {
         return fail("unexpected pathjoin result after enabling I/O builtins");
     }
 
+    {
+        const char *readbytes_path = "fex_try_api_abort_read.bin";
+        char readbytes_source[256];
+        int interrupt_calls = 0;
+
+        if (!write_large_test_file(readbytes_path, 200 * 1024, 0x5a)) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to create readbytes interrupt fixture");
+        }
+
+        snprintf(readbytes_source, sizeof(readbytes_source),
+            "readbytes(\"%s\");\n", readbytes_path);
+        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 1);
+        status = fex_try_do_string(ctx, readbytes_source, &result, &error);
+        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+        remove(readbytes_path);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "execution interrupted") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected readbytes to honor interrupt polling", status, &error);
+        }
+        if (interrupt_calls < 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected readbytes interrupt handler to run");
+        }
+    }
+
+    {
+        const char *listdir_path = "fex_try_api_abort_dir";
+        char listdir_source[256];
+        int interrupt_calls = 0;
+
+        if (!make_test_directory(listdir_path)) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to create listdir interrupt fixture directory");
+        }
+        if (!create_test_directory_files(listdir_path, 256)) {
+            cleanup_test_directory_files(listdir_path, 256);
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to populate listdir interrupt fixture directory");
+        }
+
+        snprintf(listdir_source, sizeof(listdir_source),
+            "listdir(\"%s\");\n", listdir_path);
+        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 1);
+        status = fex_try_do_string(ctx, listdir_source, &result, &error);
+        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+        cleanup_test_directory_files(listdir_path, 256);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "execution interrupted") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected listdir to honor interrupt polling", status, &error);
+        }
+        if (interrupt_calls < 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected listdir interrupt handler to run");
+        }
+    }
+
     fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS, FEX_BUILTINS_SYSTEM);
     status = fex_try_do_string(
         ctx,
@@ -355,7 +573,7 @@ int main(void) {
     if (status != FEX_STATUS_OK) {
         fe_close(ctx);
         free(memory);
-        return fail("expected runcommand to execute successfully");
+        return fail_status("expected runcommand to execute successfully", status, &error);
     }
     if (fe_type(ctx, result) != FE_TMAP) {
         fe_close(ctx);
@@ -397,7 +615,7 @@ int main(void) {
         FEX_BUILTINS_SYSTEM | FEX_BUILTINS_DATA);
     status = fex_try_do_string(
         ctx,
-        "let proc = runprocess(\"python\", [\"-c\", \"import os, pathlib, sys; data = sys.stdin.buffer.read(); sys.stdout.buffer.write(data.upper()); sys.stderr.buffer.write(os.getenv('FEX_TEST', 'missing').encode('ascii')); sys.stderr.buffer.write(b'@'); sys.stderr.buffer.write(pathlib.Path().resolve().name.encode('ascii')); raise SystemExit(5)\"], "
+        "let proc = runprocess(\"" FEX_TEST_PYTHON_EXECUTABLE "\", [\"-c\", \"import os, pathlib, sys; data = sys.stdin.buffer.read(); sys.stdout.buffer.write(data.upper()); sys.stderr.buffer.write(os.getenv('FEX_TEST', 'missing').encode('ascii')); sys.stderr.buffer.write(b'@'); sys.stderr.buffer.write(pathlib.Path().resolve().name.encode('ascii')); raise SystemExit(5)\"], "
             "makemap(\"stdin\", tobytes(\"abc\"), \"cwd\", \"" TEST_SCRIPTS_DIR "\", "
             "\"env\", makemap(\"FEX_TEST\", \"env\")));\n"
         "proc;\n",
@@ -407,7 +625,7 @@ int main(void) {
     if (status != FEX_STATUS_OK) {
         fe_close(ctx);
         free(memory);
-        return fail("expected runprocess to execute successfully");
+        return fail_status("expected runprocess to execute successfully", status, &error);
     }
     if (fe_type(ctx, result) != FE_TMAP) {
         fe_close(ctx);
@@ -467,7 +685,7 @@ int main(void) {
 
     status = fex_try_do_string(
         ctx,
-        "let proc = runprocess(\"python\", [\"-c\", \"import sys; sys.stdout.write('inherit-out\\\\n'); sys.stderr.write('discard-err\\\\n')\"], "
+        "let proc = runprocess(\"" FEX_TEST_PYTHON_EXECUTABLE "\", [\"-c\", \"import sys; sys.stdout.write('inherit-out\\\\n'); sys.stderr.write('discard-err\\\\n')\"], "
             "makemap(\"stdout\", \"inherit\", \"stderr\", \"discard\"));\n"
         "proc;\n",
         &result,
@@ -476,7 +694,7 @@ int main(void) {
     if (status != FEX_STATUS_OK) {
         fe_close(ctx);
         free(memory);
-        return fail("expected runprocess stream modes to execute successfully");
+        return fail_status("expected runprocess stream modes to execute successfully", status, &error);
     }
     output = fe_map_get(ctx, result, fe_symbol(ctx, "stdout"));
     if (!fe_isnil(ctx, output)) {
@@ -493,7 +711,7 @@ int main(void) {
 
     status = fex_try_do_string(
         ctx,
-        "runprocess(\"python\", [\"-c\", \"import sys; sys.stdout.write('abcdef')\"], "
+        "runprocess(\"" FEX_TEST_PYTHON_EXECUTABLE "\", [\"-c\", \"import sys; sys.stdout.write('abcdef')\"], "
             "makemap(\"max_stdout\", 4));\n",
         &result,
         &error
