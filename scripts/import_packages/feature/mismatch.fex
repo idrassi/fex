@@ -1,0 +1,4 @@
+println("loading feature mismatch");
+module ("internal_feature_mismatch") {
+  export let value = 77;
+}

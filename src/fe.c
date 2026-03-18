@@ -147,6 +147,7 @@ struct fe_Context {
   int loading_module_count;
   int loading_module_capacity;
   char **loaded_modules;
+  fe_Object **loaded_module_values;
   int loaded_module_count;
   int loaded_module_capacity;
   size_t step_limit;
@@ -672,6 +673,67 @@ static void string_array_pop(fe_Context *ctx, char **items, int *count) {
   (*count)--;
   tracked_free(ctx, items[*count]);
   items[*count] = NULL;
+}
+
+static int ensure_object_array_capacity(fe_Context *ctx, fe_Object ***items,
+                                        int *capacity, int needed) {
+  int new_capacity;
+  fe_Object **new_items;
+  if (needed <= *capacity && *items != NULL) return 1;
+  new_capacity = (*capacity > 0) ? *capacity * 2 : 4;
+  if (*items == NULL && *capacity >= needed) {
+    new_capacity = *capacity;
+  }
+  while (new_capacity < needed) {
+    new_capacity *= 2;
+  }
+  new_items = tracked_realloc(ctx, *items, sizeof(fe_Object*) * (size_t)new_capacity);
+  if (!new_items) return 0;
+  *items = new_items;
+  *capacity = new_capacity;
+  return 1;
+}
+
+static int module_cache_find_index(fe_Context *ctx, const char *path) {
+  int i;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
+  for (i = 0; i < ctx->loaded_module_count; i++) {
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
+    if (strcmp(ctx->loaded_modules[i], path) == 0) return i;
+  }
+  return -1;
+}
+
+static fe_Object* module_cache_get(fe_Context *ctx, const char *path) {
+  int index = module_cache_find_index(ctx, path);
+  if (index < 0) return &nil;
+  return ctx->loaded_module_values[index];
+}
+
+static int module_cache_push_owned(fe_Context *ctx, char *path, fe_Object *value) {
+  int needed = ctx->loaded_module_count + 1;
+  if (!ensure_string_array_capacity(ctx, &ctx->loaded_modules,
+                                    &ctx->loaded_module_capacity, needed)) {
+    return 0;
+  }
+  if (!ensure_object_array_capacity(ctx, &ctx->loaded_module_values,
+                                    &ctx->loaded_module_capacity, needed)) {
+    return 0;
+  }
+  ctx->loaded_modules[ctx->loaded_module_count] = path;
+  ctx->loaded_module_values[ctx->loaded_module_count] = value;
+  ctx->loaded_module_count++;
+  return 1;
+}
+
+static void module_cache_clear(fe_Context *ctx) {
+  string_array_clear(ctx, &ctx->loaded_modules,
+                     &ctx->loaded_module_count, &ctx->loaded_module_capacity);
+  tracked_free(ctx, ctx->loaded_module_values);
+  ctx->loaded_module_values = NULL;
 }
 
 static int is_path_separator(char chr) {
@@ -1442,6 +1504,9 @@ static void collectgarbage(fe_Context *ctx) {
   }
   fe_mark(ctx, ctx->modulestack);
   fe_mark(ctx, ctx->symlist);
+  for (i = 0; i < ctx->loaded_module_count; i++) {
+    fe_mark(ctx, ctx->loaded_module_values[i]);
+  }
   /* sweep and unmark */
   for (i = 0; i < ctx->object_count; i++) {
     fe_Object *obj = &ctx->objects[i];
@@ -2816,15 +2881,9 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
   }
   tracked_free(ctx, lookup_name);
 
-  if (string_array_contains(ctx, ctx->loaded_modules, ctx->loaded_module_count, module_path)) {
-    module_obj = resolve_imported_module_value(ctx, module_spec, segments,
-                                               segment_count, NULL);
+  module_obj = module_cache_get(ctx, module_path);
+  if (type(module_obj) == FE_TMAP) {
     tracked_free(ctx, module_path);
-    if (type(module_obj) != FE_TMAP) {
-      string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
-      sprintf(error_buf, "loaded module '%s' is not bound as a module", module_spec);
-      fe_error(ctx, error_buf);
-    }
     bind_imported_module(ctx, module_spec, segments, segment_count,
                          is_relative, module_obj);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
@@ -2867,15 +2926,12 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
   bind_imported_module(ctx, module_spec, segments, segment_count,
                        is_relative, module_obj);
 
-  if (!string_array_contains(ctx, ctx->loaded_modules, ctx->loaded_module_count, module_path)) {
-    if (!string_array_push_owned(ctx, &ctx->loaded_modules, &ctx->loaded_module_count,
-                                 &ctx->loaded_module_capacity, module_path)) {
-      tracked_free(ctx, module_path);
-      string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
-      memory_error(ctx, "out of memory (module cache)");
-    }
-    module_path = NULL;
+  if (!module_cache_push_owned(ctx, module_path, module_obj)) {
+    tracked_free(ctx, module_path);
+    string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    memory_error(ctx, "out of memory (module cache)");
   }
+  module_path = NULL;
   tracked_free(ctx, module_path);
   string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
 
@@ -3403,7 +3459,7 @@ void fe_close(fe_Context *ctx) {
   string_array_clear(ctx, &ctx->source_dirs, &ctx->source_dir_count, &ctx->source_dir_capacity);
   string_array_clear(ctx, &ctx->source_buffers, &ctx->source_buffer_count, &ctx->source_buffer_capacity);
   string_array_clear(ctx, &ctx->loading_modules, &ctx->loading_module_count, &ctx->loading_module_capacity);
-  string_array_clear(ctx, &ctx->loaded_modules, &ctx->loaded_module_count, &ctx->loaded_module_capacity);
+  module_cache_clear(ctx);
 }
 
 

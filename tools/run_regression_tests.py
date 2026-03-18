@@ -246,6 +246,20 @@ CASES = [
         ),
     },
     {
+        "name": "import binding by spec",
+        "script": ROOT / "scripts" / "test_module_binding_by_spec.fex",
+        "args": ["--module-path", ROOT / "scripts" / "import_packages"],
+        "exit_code": 0,
+        "stdout": (
+            "--- Import Binding Regression ---\n"
+            "loading feature package\n"
+            "loading feature helper\n"
+            "loading feature mismatch\n"
+            "77\n"
+            "77\n"
+        ),
+    },
+    {
         "name": "maps",
         "script": ROOT / "scripts" / "test_maps.fex",
         "args": ["--builtins"],
