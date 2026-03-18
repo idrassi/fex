@@ -52,6 +52,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #endif
@@ -100,6 +101,16 @@ typedef struct {
     int fd;
 #endif
 } TempRedirectFile;
+
+typedef struct {
+#ifdef _WIN32
+    HANDLE read_handle;
+    HANDLE write_handle;
+#else
+    int read_fd;
+    int write_fd;
+#endif
+} ProcessCapturePipe;
 
 #define FEX_COMMAND_OUTPUT_MAX_BYTES (4u * 1024u * 1024u)
 #define PROCESS_STREAM_CAPTURE 0
@@ -287,6 +298,78 @@ static void destroy_temp_redirect_file(TempRedirectFile *file) {
         free(file->path);
         file->path = NULL;
     }
+}
+
+static void init_process_capture_pipe(ProcessCapturePipe *pipe) {
+#ifdef _WIN32
+    pipe->read_handle = INVALID_HANDLE_VALUE;
+    pipe->write_handle = INVALID_HANDLE_VALUE;
+#else
+    pipe->read_fd = -1;
+    pipe->write_fd = -1;
+#endif
+}
+
+static void close_process_capture_pipe_read(ProcessCapturePipe *pipe) {
+#ifdef _WIN32
+    if (pipe->read_handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(pipe->read_handle);
+        pipe->read_handle = INVALID_HANDLE_VALUE;
+    }
+#else
+    if (pipe->read_fd >= 0) {
+        close(pipe->read_fd);
+        pipe->read_fd = -1;
+    }
+#endif
+}
+
+static void close_process_capture_pipe_write(ProcessCapturePipe *pipe) {
+#ifdef _WIN32
+    if (pipe->write_handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(pipe->write_handle);
+        pipe->write_handle = INVALID_HANDLE_VALUE;
+    }
+#else
+    if (pipe->write_fd >= 0) {
+        close(pipe->write_fd);
+        pipe->write_fd = -1;
+    }
+#endif
+}
+
+static void destroy_process_capture_pipe(ProcessCapturePipe *pipe) {
+    close_process_capture_pipe_read(pipe);
+    close_process_capture_pipe_write(pipe);
+}
+
+static int append_process_capture(TextBuffer *buf, const unsigned char *data,
+                                  size_t len, size_t limit, int *overflow,
+                                  fe_Context *ctx, const char *func_name) {
+    size_t to_copy = len;
+    char msg[160];
+
+    if (*overflow) {
+        return 1;
+    }
+
+    if (limit > 0 && buf->len >= limit) {
+        *overflow = 1;
+        return 1;
+    }
+
+    if (limit > 0 && to_copy > limit - buf->len) {
+        to_copy = limit - buf->len;
+        *overflow = 1;
+    }
+
+    if (to_copy > 0 && !buf_append_mem(buf, (const char*)data, to_copy)) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    return 1;
 }
 
 static char* string_to_cstr(fe_Context *ctx, fe_Object *str_obj, const char *func_name) {
@@ -2865,6 +2948,57 @@ static int open_null_redirect_file(fe_Context *ctx, TempRedirectFile *file,
     return 1;
 }
 
+static int create_process_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
+                                       const char *func_name) {
+    char msg[160];
+
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES sa;
+
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&pipe->read_handle, &pipe->write_handle, &sa, 0)) {
+        sprintf(msg, "%s: could not create capture pipe", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+    if (!SetHandleInformation(pipe->read_handle, HANDLE_FLAG_INHERIT, 0)) {
+        sprintf(msg, "%s: could not configure capture pipe", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#else
+    int fds[2];
+    int flags;
+
+    if (pipe(fds) != 0) {
+        sprintf(msg, "%s: could not create capture pipe", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+    flags = fcntl(fds[0], F_GETFD, 0);
+    if (flags >= 0) {
+        fcntl(fds[0], F_SETFD, flags | FD_CLOEXEC);
+    }
+    flags = fcntl(fds[1], F_GETFD, 0);
+    if (flags >= 0) {
+        fcntl(fds[1], F_SETFD, flags | FD_CLOEXEC);
+    }
+
+    pipe->read_fd = fds[0];
+    pipe->write_fd = fds[1];
+    flags = fcntl(pipe->read_fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(pipe->read_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        sprintf(msg, "%s: could not configure capture pipe", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#endif
+
+    return 1;
+}
+
 #ifdef _WIN32
 static HANDLE duplicate_inheritable_handle(HANDLE handle) {
     HANDLE copy = INVALID_HANDLE_VALUE;
@@ -2878,6 +3012,117 @@ static HANDLE duplicate_inheritable_handle(HANDLE handle) {
         return INVALID_HANDLE_VALUE;
     }
     return copy;
+}
+#endif
+
+#ifdef _WIN32
+static int drain_windows_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
+                                      TextBuffer *buf, size_t limit,
+                                      int *overflow, const char *func_name,
+                                      int process_finished,
+                                      int *pipe_open, int *made_progress) {
+    unsigned char chunk[4096];
+    char msg[160];
+
+    while (*pipe_open) {
+        DWORD available = 0;
+
+        if (!PeekNamedPipe(pipe->read_handle, NULL, 0, NULL, &available, NULL)) {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE) {
+                close_process_capture_pipe_read(pipe);
+                *pipe_open = 0;
+                return 1;
+            }
+            sprintf(msg, "%s: could not read capture pipe", func_name);
+            fe_error(ctx, msg);
+            return 0;
+        }
+
+        if (available == 0) {
+            if (process_finished) {
+                close_process_capture_pipe_read(pipe);
+                *pipe_open = 0;
+            }
+            return 1;
+        }
+
+        for (;;) {
+            DWORD to_read = (DWORD)((sizeof(chunk) < available) ? sizeof(chunk) : available);
+            DWORD bytes_read = 0;
+
+            if (!ReadFile(pipe->read_handle, chunk, to_read, &bytes_read, NULL)) {
+                DWORD err = GetLastError();
+                if (err == ERROR_BROKEN_PIPE) {
+                    close_process_capture_pipe_read(pipe);
+                    *pipe_open = 0;
+                    return 1;
+                }
+                sprintf(msg, "%s: could not read capture pipe", func_name);
+                fe_error(ctx, msg);
+                return 0;
+            }
+
+            if (bytes_read == 0) {
+                close_process_capture_pipe_read(pipe);
+                *pipe_open = 0;
+                return 1;
+            }
+
+            *made_progress = 1;
+            if (!append_process_capture(buf, chunk, (size_t)bytes_read, limit,
+                                        overflow, ctx, func_name)) {
+                return 0;
+            }
+
+            if (bytes_read >= available) {
+                break;
+            }
+            available -= bytes_read;
+        }
+    }
+
+    return 1;
+}
+#else
+static int drain_posix_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
+                                    TextBuffer *buf, size_t limit,
+                                    int *overflow, const char *func_name,
+                                    int *pipe_open, int *made_progress) {
+    unsigned char chunk[4096];
+    char msg[160];
+
+    while (*pipe_open) {
+        ssize_t bytes_read = read(pipe->read_fd, chunk, sizeof(chunk));
+
+        if (bytes_read > 0) {
+            *made_progress = 1;
+            if (!append_process_capture(buf, chunk, (size_t)bytes_read, limit,
+                                        overflow, ctx, func_name)) {
+                return 0;
+            }
+            continue;
+        }
+
+        if (bytes_read == 0) {
+            close_process_capture_pipe_read(pipe);
+            *pipe_open = 0;
+            return 1;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return 1;
+        }
+
+        sprintf(msg, "%s: could not read capture pipe", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    return 1;
 }
 #endif
 
@@ -3066,38 +3311,31 @@ static char* build_windows_environment_block(fe_Context *ctx, CStringArray *env,
 extern char **environ;
 #endif
 
-static int read_redirect_output(fe_Context *ctx, TempRedirectFile *file,
-                                const char *func_name,
-                                const char *stream_name,
-                                size_t max_size,
-                                unsigned char **out_data, size_t *out_len) {
-    char *buffer;
-    char helper_name[160];
-
-    close_temp_redirect_file(file);
-    sprintf(helper_name, "%s %s", func_name, stream_name);
-    buffer = read_file_dynamic(ctx, file->path,
-                               (max_size == 0) ? (size_t)LONG_MAX : max_size,
-                               out_len, helper_name);
-    if (!buffer) {
-        return 0;
-    }
-
-    *out_data = (unsigned char*)buffer;
-    return 1;
-}
-
 static int run_process_native(fe_Context *ctx, CStringArray *argv,
                               ProcessOptions *options, ProcessOutput *output,
                               const char *func_name) {
     TempRedirectFile stdin_file;
-    TempRedirectFile stdout_file;
-    TempRedirectFile stderr_file;
+    TempRedirectFile stdout_redirect;
+    TempRedirectFile stderr_redirect;
+    ProcessCapturePipe stdout_pipe;
+    ProcessCapturePipe stderr_pipe;
+    TextBuffer stdout_buf;
+    TextBuffer stderr_buf;
+    int stdout_overflow = 0;
+    int stderr_overflow = 0;
     int ok = 0;
 
     init_temp_redirect_file(&stdin_file);
-    init_temp_redirect_file(&stdout_file);
-    init_temp_redirect_file(&stderr_file);
+    init_temp_redirect_file(&stdout_redirect);
+    init_temp_redirect_file(&stderr_redirect);
+    init_process_capture_pipe(&stdout_pipe);
+    init_process_capture_pipe(&stderr_pipe);
+    stdout_buf.data = NULL;
+    stdout_buf.len = 0;
+    stdout_buf.cap = 0;
+    stderr_buf.data = NULL;
+    stderr_buf.len = 0;
+    stderr_buf.cap = 0;
     memset(output, 0, sizeof(*output));
     output->stdout_captured = (options->stdout_mode == PROCESS_STREAM_CAPTURE);
     output->stderr_captured = (options->stderr_mode == PROCESS_STREAM_CAPTURE);
@@ -3113,21 +3351,21 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     }
 
     if (options->stdout_mode == PROCESS_STREAM_CAPTURE) {
-        if (!create_temp_redirect_file(ctx, &stdout_file, func_name)) {
+        if (!create_process_capture_pipe(ctx, &stdout_pipe, func_name)) {
             goto cleanup;
         }
     } else if (options->stdout_mode == PROCESS_STREAM_DISCARD) {
-        if (!open_null_redirect_file(ctx, &stdout_file, 1, func_name)) {
+        if (!open_null_redirect_file(ctx, &stdout_redirect, 1, func_name)) {
             goto cleanup;
         }
     }
 
     if (options->stderr_mode == PROCESS_STREAM_CAPTURE) {
-        if (!create_temp_redirect_file(ctx, &stderr_file, func_name)) {
+        if (!create_process_capture_pipe(ctx, &stderr_pipe, func_name)) {
             goto cleanup;
         }
     } else if (options->stderr_mode == PROCESS_STREAM_DISCARD) {
-        if (!open_null_redirect_file(ctx, &stderr_file, 1, func_name)) {
+        if (!open_null_redirect_file(ctx, &stderr_redirect, 1, func_name)) {
             goto cleanup;
         }
     }
@@ -3160,25 +3398,33 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
         startup_info.dwFlags = STARTF_USESTDHANDLES;
         startup_info.hStdInput = stdin_file.handle;
         if (options->stdout_mode == PROCESS_STREAM_INHERIT) {
-            stdout_file.handle = duplicate_inheritable_handle(GetStdHandle(STD_OUTPUT_HANDLE));
-            if (stdout_file.handle == INVALID_HANDLE_VALUE) {
+            stdout_redirect.handle = duplicate_inheritable_handle(GetStdHandle(STD_OUTPUT_HANDLE));
+            if (stdout_redirect.handle == INVALID_HANDLE_VALUE) {
                 free(command_line);
                 free(environment);
                 fe_error(ctx, "runprocess: could not inherit stdout");
                 goto cleanup;
             }
+            startup_info.hStdOutput = stdout_redirect.handle;
+        } else if (options->stdout_mode == PROCESS_STREAM_CAPTURE) {
+            startup_info.hStdOutput = stdout_pipe.write_handle;
+        } else {
+            startup_info.hStdOutput = stdout_redirect.handle;
         }
         if (options->stderr_mode == PROCESS_STREAM_INHERIT) {
-            stderr_file.handle = duplicate_inheritable_handle(GetStdHandle(STD_ERROR_HANDLE));
-            if (stderr_file.handle == INVALID_HANDLE_VALUE) {
+            stderr_redirect.handle = duplicate_inheritable_handle(GetStdHandle(STD_ERROR_HANDLE));
+            if (stderr_redirect.handle == INVALID_HANDLE_VALUE) {
                 free(command_line);
                 free(environment);
                 fe_error(ctx, "runprocess: could not inherit stderr");
                 goto cleanup;
             }
+            startup_info.hStdError = stderr_redirect.handle;
+        } else if (options->stderr_mode == PROCESS_STREAM_CAPTURE) {
+            startup_info.hStdError = stderr_pipe.write_handle;
+        } else {
+            startup_info.hStdError = stderr_redirect.handle;
         }
-        startup_info.hStdOutput = stdout_file.handle;
-        startup_info.hStdError = stderr_file.handle;
 
         if (!CreateProcessA(NULL, command_line, NULL, NULL, TRUE, 0,
                             environment, options->cwd, &startup_info, &process_info)) {
@@ -3192,18 +3438,68 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
         free(environment);
         CloseHandle(process_info.hThread);
         close_temp_redirect_file(&stdin_file);
-        close_temp_redirect_file(&stdout_file);
-        close_temp_redirect_file(&stderr_file);
+        close_temp_redirect_file(&stdout_redirect);
+        close_temp_redirect_file(&stderr_redirect);
+        close_process_capture_pipe_write(&stdout_pipe);
+        close_process_capture_pipe_write(&stderr_pipe);
 
-        wait_result = WaitForSingleObject(process_info.hProcess, INFINITE);
-        if (wait_result != WAIT_OBJECT_0 ||
-            !GetExitCodeProcess(process_info.hProcess, &raw_exit_code)) {
+        if (options->stdout_mode != PROCESS_STREAM_CAPTURE &&
+            options->stderr_mode != PROCESS_STREAM_CAPTURE) {
+            wait_result = WaitForSingleObject(process_info.hProcess, INFINITE);
+            if (wait_result != WAIT_OBJECT_0 ||
+                !GetExitCodeProcess(process_info.hProcess, &raw_exit_code)) {
+                CloseHandle(process_info.hProcess);
+                fe_error(ctx, "runprocess: could not wait for process");
+                goto cleanup;
+            }
             CloseHandle(process_info.hProcess);
-            fe_error(ctx, "runprocess: could not wait for process");
-            goto cleanup;
+            output->exit_code = (int)raw_exit_code;
+        } else {
+            int process_finished = 0;
+            int stdout_open = (options->stdout_mode == PROCESS_STREAM_CAPTURE);
+            int stderr_open = (options->stderr_mode == PROCESS_STREAM_CAPTURE);
+
+            while (!process_finished || stdout_open || stderr_open) {
+                int made_progress = 0;
+
+                if (stdout_open &&
+                    !drain_windows_capture_pipe(ctx, &stdout_pipe, &stdout_buf,
+                                                options->max_stdout, &stdout_overflow,
+                                                func_name, process_finished,
+                                                &stdout_open, &made_progress)) {
+                    CloseHandle(process_info.hProcess);
+                    goto cleanup;
+                }
+                if (stderr_open &&
+                    !drain_windows_capture_pipe(ctx, &stderr_pipe, &stderr_buf,
+                                                options->max_stderr, &stderr_overflow,
+                                                func_name, process_finished,
+                                                &stderr_open, &made_progress)) {
+                    CloseHandle(process_info.hProcess);
+                    goto cleanup;
+                }
+
+                if (!process_finished) {
+                    wait_result = WaitForSingleObject(process_info.hProcess,
+                                                     made_progress ? 0 : 10);
+                    if (wait_result == WAIT_OBJECT_0) {
+                        if (!GetExitCodeProcess(process_info.hProcess, &raw_exit_code)) {
+                            CloseHandle(process_info.hProcess);
+                            fe_error(ctx, "runprocess: could not wait for process");
+                            goto cleanup;
+                        }
+                        output->exit_code = (int)raw_exit_code;
+                        process_finished = 1;
+                    } else if (wait_result != WAIT_TIMEOUT) {
+                        CloseHandle(process_info.hProcess);
+                        fe_error(ctx, "runprocess: could not wait for process");
+                        goto cleanup;
+                    }
+                }
+            }
+
+            CloseHandle(process_info.hProcess);
         }
-        CloseHandle(process_info.hProcess);
-        output->exit_code = (int)raw_exit_code;
     }
 #else
     {
@@ -3223,21 +3519,31 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
             if (dup2(stdin_file.fd, 0) < 0) {
                 _exit(127);
             }
-            if (options->stdout_mode != PROCESS_STREAM_INHERIT &&
-                dup2(stdout_file.fd, 1) < 0) {
-                _exit(127);
-            }
-            if (options->stderr_mode != PROCESS_STREAM_INHERIT &&
-                dup2(stderr_file.fd, 2) < 0) {
-                _exit(127);
-            }
 
             close(stdin_file.fd);
-            if (stdout_file.fd >= 0) {
-                close(stdout_file.fd);
+            if (options->stdout_mode == PROCESS_STREAM_CAPTURE) {
+                close_process_capture_pipe_read(&stdout_pipe);
+                if (dup2(stdout_pipe.write_fd, 1) < 0) {
+                    _exit(127);
+                }
+                close_process_capture_pipe_write(&stdout_pipe);
+            } else if (options->stdout_mode == PROCESS_STREAM_DISCARD) {
+                if (dup2(stdout_redirect.fd, 1) < 0) {
+                    _exit(127);
+                }
+                close_temp_redirect_file(&stdout_redirect);
             }
-            if (stderr_file.fd >= 0) {
-                close(stderr_file.fd);
+            if (options->stderr_mode == PROCESS_STREAM_CAPTURE) {
+                close_process_capture_pipe_read(&stderr_pipe);
+                if (dup2(stderr_pipe.write_fd, 2) < 0) {
+                    _exit(127);
+                }
+                close_process_capture_pipe_write(&stderr_pipe);
+            } else if (options->stderr_mode == PROCESS_STREAM_DISCARD) {
+                if (dup2(stderr_redirect.fd, 2) < 0) {
+                    _exit(127);
+                }
+                close_temp_redirect_file(&stderr_redirect);
             }
 
             if (options->use_env) {
@@ -3248,39 +3554,120 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
         }
 
         close_temp_redirect_file(&stdin_file);
-        close_temp_redirect_file(&stdout_file);
-        close_temp_redirect_file(&stderr_file);
+        close_temp_redirect_file(&stdout_redirect);
+        close_temp_redirect_file(&stderr_redirect);
+        close_process_capture_pipe_write(&stdout_pipe);
+        close_process_capture_pipe_write(&stderr_pipe);
 
-        if (waitpid(pid, &status, 0) < 0) {
-            fe_error(ctx, "runprocess: could not wait for process");
-            goto cleanup;
+        if (options->stdout_mode != PROCESS_STREAM_CAPTURE &&
+            options->stderr_mode != PROCESS_STREAM_CAPTURE) {
+            if (waitpid(pid, &status, 0) < 0) {
+                fe_error(ctx, "runprocess: could not wait for process");
+                goto cleanup;
+            }
+            output->exit_code = decode_process_exit_code(status);
+        } else {
+            int process_finished = 0;
+            int stdout_open = (options->stdout_mode == PROCESS_STREAM_CAPTURE);
+            int stderr_open = (options->stderr_mode == PROCESS_STREAM_CAPTURE);
+
+            while (!process_finished || stdout_open || stderr_open) {
+                int made_progress = 0;
+
+                if (!process_finished) {
+                    pid_t waited = waitpid(pid, &status, WNOHANG);
+                    if (waited == pid) {
+                        output->exit_code = decode_process_exit_code(status);
+                        process_finished = 1;
+                    } else if (waited < 0) {
+                        fe_error(ctx, "runprocess: could not wait for process");
+                        goto cleanup;
+                    }
+                }
+
+                if (stdout_open || stderr_open) {
+                    fd_set readfds;
+                    struct timeval timeout;
+                    int maxfd = -1;
+                    int select_result;
+
+                    FD_ZERO(&readfds);
+                    if (stdout_open) {
+                        FD_SET(stdout_pipe.read_fd, &readfds);
+                        if (stdout_pipe.read_fd > maxfd) {
+                            maxfd = stdout_pipe.read_fd;
+                        }
+                    }
+                    if (stderr_open) {
+                        FD_SET(stderr_pipe.read_fd, &readfds);
+                        if (stderr_pipe.read_fd > maxfd) {
+                            maxfd = stderr_pipe.read_fd;
+                        }
+                    }
+
+                    timeout.tv_sec = 0;
+                    timeout.tv_usec = process_finished ? 0 : 10000;
+                    select_result = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
+                    if (select_result < 0) {
+                        if (errno == EINTR) {
+                            continue;
+                        }
+                        fe_error(ctx, "runprocess: could not poll capture pipes");
+                        goto cleanup;
+                    }
+
+                    if (stdout_open &&
+                        (process_finished || FD_ISSET(stdout_pipe.read_fd, &readfds)) &&
+                        !drain_posix_capture_pipe(ctx, &stdout_pipe, &stdout_buf,
+                                                  options->max_stdout, &stdout_overflow,
+                                                  func_name, &stdout_open,
+                                                  &made_progress)) {
+                        goto cleanup;
+                    }
+                    if (stderr_open &&
+                        (process_finished || FD_ISSET(stderr_pipe.read_fd, &readfds)) &&
+                        !drain_posix_capture_pipe(ctx, &stderr_pipe, &stderr_buf,
+                                                  options->max_stderr, &stderr_overflow,
+                                                  func_name, &stderr_open,
+                                                  &made_progress)) {
+                        goto cleanup;
+                    }
+                }
+            }
         }
-
-        output->exit_code = decode_process_exit_code(status);
     }
 #endif
 
-    if (options->stdout_mode == PROCESS_STREAM_CAPTURE) {
-        if (!read_redirect_output(ctx, &stdout_file, func_name, "stdout",
-                                  options->max_stdout,
-                                  &output->stdout_data, &output->stdout_len)) {
-            goto cleanup;
-        }
+    if (stdout_overflow) {
+        fe_error(ctx, "runprocess stdout: file too large");
+        goto cleanup;
     }
-    if (options->stderr_mode == PROCESS_STREAM_CAPTURE) {
-        if (!read_redirect_output(ctx, &stderr_file, func_name, "stderr",
-                                  options->max_stderr,
-                                  &output->stderr_data, &output->stderr_len)) {
-            goto cleanup;
-        }
+    if (stderr_overflow) {
+        fe_error(ctx, "runprocess stderr: file too large");
+        goto cleanup;
     }
+
+    output->stdout_data = (unsigned char*)stdout_buf.data;
+    output->stdout_len = stdout_buf.len;
+    stdout_buf.data = NULL;
+    stdout_buf.len = 0;
+    stdout_buf.cap = 0;
+    output->stderr_data = (unsigned char*)stderr_buf.data;
+    output->stderr_len = stderr_buf.len;
+    stderr_buf.data = NULL;
+    stderr_buf.len = 0;
+    stderr_buf.cap = 0;
 
     ok = 1;
 
 cleanup:
     destroy_temp_redirect_file(&stdin_file);
-    destroy_temp_redirect_file(&stdout_file);
-    destroy_temp_redirect_file(&stderr_file);
+    destroy_temp_redirect_file(&stdout_redirect);
+    destroy_temp_redirect_file(&stderr_redirect);
+    destroy_process_capture_pipe(&stdout_pipe);
+    destroy_process_capture_pipe(&stderr_pipe);
+    buf_free(&stdout_buf);
+    buf_free(&stderr_buf);
     if (!ok) {
         free_process_output(output);
     }
