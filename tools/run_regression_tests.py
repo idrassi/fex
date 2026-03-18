@@ -144,6 +144,25 @@ CASES = [
         ),
     },
     {
+        "name": "module import aliasing",
+        "source": (
+            'println("--- Import Alias Regression ---");\n'
+            "import app;\n"
+            "import helper;\n"
+            "println(app.value);\n"
+            "println(helper.value);\n"
+        ),
+        "cwd": ROOT / "scripts" / "import_modules",
+        "exit_code": 0,
+        "stdout": (
+            "--- Import Alias Regression ---\n"
+            "loading app\n"
+            "loading helper\n"
+            "42\n"
+            "41\n"
+        ),
+    },
+    {
         "name": "package imports",
         "script": ROOT / "scripts" / "test_module_packages.fex",
         "args": [
