@@ -17,6 +17,19 @@ static int fail(const char *message) {
     return 1;
 }
 
+static int fail_status(const char *message, FexStatus status, const FexError *error) {
+    char buffer[512];
+    const char *detail = "<empty>";
+
+    if (error && error->message[0] != '\0') {
+        detail = error->message;
+    }
+
+    snprintf(buffer, sizeof(buffer), "%s (status=%d, message=%s)",
+        message, (int)status, detail);
+    return fail(buffer);
+}
+
 static int interrupt_once(fe_Context *ctx, void *udata) {
     int *calls = (int*)udata;
     (void)ctx;
@@ -35,6 +48,7 @@ int main(void) {
     FexError error;
     FexStatus status;
     char buffer[64];
+    const char *budget_loop_source = "while (true) { }\n";
 
     memory = malloc(TEST_MEM_SIZE);
     if (!memory) {
@@ -142,8 +156,7 @@ int main(void) {
     fe_set_step_limit(ctx, 64);
     status = fex_try_do_string(
         ctx,
-        "let n = 0;\n"
-        "while (true) { n = n + 1; }\n",
+        budget_loop_source,
         &result,
         &error
     );
@@ -151,7 +164,7 @@ int main(void) {
         strstr(error.message, "execution step limit exceeded") == NULL) {
         fe_close(ctx);
         free(memory);
-        return fail("expected execution step limit error");
+        return fail_status("expected execution step limit error", status, &error);
     }
     if (fe_get_steps_executed(ctx) <= 64) {
         fe_close(ctx);
@@ -160,11 +173,10 @@ int main(void) {
     }
     fe_set_step_limit(ctx, 0);
 
-    fe_set_timeout_ms(ctx, 10);
+    fe_set_timeout_ms(ctx, 50);
     status = fex_try_do_string(
         ctx,
-        "let n = 0;\n"
-        "while (true) { n = n + 1; }\n",
+        budget_loop_source,
         &result,
         &error
     );
@@ -172,7 +184,7 @@ int main(void) {
         strstr(error.message, "execution timeout exceeded") == NULL) {
         fe_close(ctx);
         free(memory);
-        return fail("expected execution timeout error");
+        return fail_status("expected execution timeout error", status, &error);
     }
     fe_set_timeout_ms(ctx, 0);
 
@@ -392,4 +404,3 @@ int main(void) {
     free(memory);
     return 0;
 }
-

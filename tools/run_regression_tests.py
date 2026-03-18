@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+BUDGET_LOOP_SOURCE = "while (true) { }\n"
 
 def fex_string_literal(text: str) -> str:
     escaped = (
@@ -250,7 +251,7 @@ CASES = [
     },
     {
         "name": "max step budget",
-        "source": "let n = 0;\nwhile (true) { n = n + 1; }\n",
+        "source": BUDGET_LOOP_SOURCE,
         "args": ["--max-steps", "64", "--spans"],
         "exit_code": 70,
         "stderr_contains": [
@@ -259,8 +260,8 @@ CASES = [
     },
     {
         "name": "timeout budget",
-        "source": "let n = 0;\nwhile (true) { n = n + 1; }\n",
-        "args": ["--timeout-ms", "10", "--spans"],
+        "source": BUDGET_LOOP_SOURCE,
+        "args": ["--timeout-ms", "50", "--spans"],
         "exit_code": 70,
         "stderr_contains": [
             "runtime error: execution timeout exceeded",
@@ -352,6 +353,12 @@ def should_run(case: dict[str, object], filters: list[str]) -> bool:
     return any(token.lower() in name for token in filters)
 
 
+def describe_stream(name: str, text: str) -> str:
+    if text:
+        return f"{name} was:\n{text}"
+    return f"{name} was empty"
+
+
 def run_case(exe: Path, case: dict[str, object]) -> list[str]:
     command = [str(exe)]
     temp_path: Path | None = None
@@ -403,11 +410,17 @@ def run_case(exe: Path, case: dict[str, object]) -> list[str]:
 
     for needle in case.get("stdout_contains", []):
         if str(needle) not in stdout:
-            errors.append(f"stdout missing expected text: {needle!r}")
+            errors.append(
+                f"stdout missing expected text: {needle!r}\n"
+                f"{describe_stream('stdout', stdout)}"
+            )
 
     for needle in case.get("stderr_contains", []):
         if str(needle) not in stderr:
-            errors.append(f"stderr missing expected text: {needle!r}")
+            errors.append(
+                f"stderr missing expected text: {needle!r}\n"
+                f"{describe_stream('stderr', stderr)}"
+            )
 
     return errors
 
@@ -455,4 +468,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
