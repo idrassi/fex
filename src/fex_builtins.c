@@ -51,6 +51,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #endif
@@ -75,6 +76,10 @@ typedef struct {
     char *cwd;
     CStringArray env;
     int use_env;
+    int stdout_mode;
+    int stderr_mode;
+    size_t max_stdout;
+    size_t max_stderr;
 } ProcessOptions;
 
 typedef struct {
@@ -83,6 +88,8 @@ typedef struct {
     size_t stdout_len;
     unsigned char *stderr_data;
     size_t stderr_len;
+    int stdout_captured;
+    int stderr_captured;
 } ProcessOutput;
 
 typedef struct {
@@ -95,6 +102,9 @@ typedef struct {
 } TempRedirectFile;
 
 #define FEX_COMMAND_OUTPUT_MAX_BYTES (4u * 1024u * 1024u)
+#define PROCESS_STREAM_CAPTURE 0
+#define PROCESS_STREAM_INHERIT 1
+#define PROCESS_STREAM_DISCARD 2
 
 #ifdef _WIN32
 #define FEX_POPEN  _popen
@@ -229,6 +239,10 @@ static void free_process_options(ProcessOptions *options) {
     options->cwd = NULL;
     free_cstring_array(&options->env);
     options->use_env = 0;
+    options->stdout_mode = PROCESS_STREAM_CAPTURE;
+    options->stderr_mode = PROCESS_STREAM_CAPTURE;
+    options->max_stdout = FEX_COMMAND_OUTPUT_MAX_BYTES;
+    options->max_stderr = FEX_COMMAND_OUTPUT_MAX_BYTES;
 }
 
 static void free_process_output(ProcessOutput *output) {
@@ -238,6 +252,8 @@ static void free_process_output(ProcessOutput *output) {
     free(output->stderr_data);
     output->stderr_data = NULL;
     output->stderr_len = 0;
+    output->stdout_captured = 0;
+    output->stderr_captured = 0;
     output->exit_code = 0;
 }
 
@@ -2561,6 +2577,86 @@ static int collect_process_env(fe_Context *ctx, fe_Object *env_obj,
     return 1;
 }
 
+static int parse_process_stream_mode(fe_Context *ctx, fe_Object *value,
+                                     const char *func_name,
+                                     const char *option_name,
+                                     int *out_mode) {
+    char *mode;
+    int result = 1;
+
+    if (fe_isnil(ctx, value)) {
+        *out_mode = PROCESS_STREAM_CAPTURE;
+        return 1;
+    }
+    if (fe_type(ctx, value) != FE_TSTRING) {
+        char msg[160];
+        sprintf(msg, "%s: %s must be a string or nil", func_name, option_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    mode = string_to_cstr(ctx, value, func_name);
+    if (!mode) {
+        return 0;
+    }
+
+    if (strcmp(mode, "capture") == 0) {
+        *out_mode = PROCESS_STREAM_CAPTURE;
+    } else if (strcmp(mode, "inherit") == 0) {
+        *out_mode = PROCESS_STREAM_INHERIT;
+    } else if (strcmp(mode, "discard") == 0) {
+        *out_mode = PROCESS_STREAM_DISCARD;
+    } else {
+        char msg[192];
+        sprintf(msg, "%s: %s must be 'capture', 'inherit', 'discard', or nil",
+                func_name, option_name);
+        fe_error(ctx, msg);
+        result = 0;
+    }
+
+    free(mode);
+    return result;
+}
+
+static int parse_process_size_limit(fe_Context *ctx, fe_Object *value,
+                                    const char *func_name,
+                                    const char *option_name,
+                                    size_t *out_limit) {
+    fe_Number number_value;
+
+    if (fe_isnil(ctx, value)) {
+        *out_limit = FEX_COMMAND_OUTPUT_MAX_BYTES;
+        return 1;
+    }
+
+    if (fe_type(ctx, value) != FE_TNUMBER) {
+        char msg[160];
+        sprintf(msg, "%s: %s must be a non-negative integer or nil",
+                func_name, option_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    number_value = fe_tonumber(ctx, value);
+    if (number_value < 0 || number_value != floor(number_value)) {
+        char msg[160];
+        sprintf(msg, "%s: %s must be a non-negative integer or nil",
+                func_name, option_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    if ((double)number_value > (double)((size_t)-1)) {
+        char msg[160];
+        sprintf(msg, "%s: %s is too large", func_name, option_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    *out_limit = (size_t)number_value;
+    return 1;
+}
+
 static int parse_process_options(fe_Context *ctx, fe_Object *opts_obj,
                                  const char *func_name,
                                  ProcessOptions *options) {
@@ -2568,6 +2664,10 @@ static int parse_process_options(fe_Context *ctx, fe_Object *opts_obj,
     fe_Object *value;
 
     memset(options, 0, sizeof(*options));
+    options->stdout_mode = PROCESS_STREAM_CAPTURE;
+    options->stderr_mode = PROCESS_STREAM_CAPTURE;
+    options->max_stdout = FEX_COMMAND_OUTPUT_MAX_BYTES;
+    options->max_stderr = FEX_COMMAND_OUTPUT_MAX_BYTES;
 
     if (fe_isnil(ctx, opts_obj)) {
         return 1;
@@ -2607,6 +2707,34 @@ static int parse_process_options(fe_Context *ctx, fe_Object *opts_obj,
             return 0;
         }
         options->use_env = 1;
+    }
+
+    value = map_get_named_value(ctx, opts_obj, "stdout", &present);
+    if (present &&
+        !parse_process_stream_mode(ctx, value, func_name, "stdout",
+                                   &options->stdout_mode)) {
+        return 0;
+    }
+
+    value = map_get_named_value(ctx, opts_obj, "stderr", &present);
+    if (present &&
+        !parse_process_stream_mode(ctx, value, func_name, "stderr",
+                                   &options->stderr_mode)) {
+        return 0;
+    }
+
+    value = map_get_named_value(ctx, opts_obj, "max_stdout", &present);
+    if (present &&
+        !parse_process_size_limit(ctx, value, func_name, "max_stdout",
+                                  &options->max_stdout)) {
+        return 0;
+    }
+
+    value = map_get_named_value(ctx, opts_obj, "max_stderr", &present);
+    if (present &&
+        !parse_process_size_limit(ctx, value, func_name, "max_stderr",
+                                  &options->max_stderr)) {
+        return 0;
     }
 
     return 1;
@@ -2700,6 +2828,58 @@ static int create_temp_redirect_file(fe_Context *ctx, TempRedirectFile *file,
 
     return 1;
 }
+
+static int open_null_redirect_file(fe_Context *ctx, TempRedirectFile *file,
+                                   int writable, const char *func_name) {
+    char msg[160];
+
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES sa;
+
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    file->handle = CreateFileA(
+        "NUL",
+        writable ? GENERIC_WRITE : GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &sa,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
+    );
+    if (file->handle == INVALID_HANDLE_VALUE) {
+        sprintf(msg, "%s: could not open null device", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#else
+    file->fd = open("/dev/null", writable ? O_WRONLY : O_RDONLY);
+    if (file->fd < 0) {
+        sprintf(msg, "%s: could not open null device", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#endif
+
+    return 1;
+}
+
+#ifdef _WIN32
+static HANDLE duplicate_inheritable_handle(HANDLE handle) {
+    HANDLE copy = INVALID_HANDLE_VALUE;
+
+    if (handle == NULL || handle == INVALID_HANDLE_VALUE) {
+        return INVALID_HANDLE_VALUE;
+    }
+    if (!DuplicateHandle(GetCurrentProcess(), handle,
+                         GetCurrentProcess(), &copy,
+                         0, TRUE, DUPLICATE_SAME_ACCESS)) {
+        return INVALID_HANDLE_VALUE;
+    }
+    return copy;
+}
+#endif
 
 static int write_temp_redirect_data(fe_Context *ctx, TempRedirectFile *file,
                                     const unsigned char *data, size_t len,
@@ -2888,12 +3068,17 @@ extern char **environ;
 
 static int read_redirect_output(fe_Context *ctx, TempRedirectFile *file,
                                 const char *func_name,
+                                const char *stream_name,
+                                size_t max_size,
                                 unsigned char **out_data, size_t *out_len) {
     char *buffer;
+    char helper_name[160];
 
     close_temp_redirect_file(file);
-    buffer = read_file_dynamic(ctx, file->path, FEX_COMMAND_OUTPUT_MAX_BYTES,
-                               out_len, func_name);
+    sprintf(helper_name, "%s %s", func_name, stream_name);
+    buffer = read_file_dynamic(ctx, file->path,
+                               (max_size == 0) ? (size_t)LONG_MAX : max_size,
+                               out_len, helper_name);
     if (!buffer) {
         return 0;
     }
@@ -2914,10 +3099,10 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     init_temp_redirect_file(&stdout_file);
     init_temp_redirect_file(&stderr_file);
     memset(output, 0, sizeof(*output));
+    output->stdout_captured = (options->stdout_mode == PROCESS_STREAM_CAPTURE);
+    output->stderr_captured = (options->stderr_mode == PROCESS_STREAM_CAPTURE);
 
-    if (!create_temp_redirect_file(ctx, &stdin_file, func_name) ||
-        !create_temp_redirect_file(ctx, &stdout_file, func_name) ||
-        !create_temp_redirect_file(ctx, &stderr_file, func_name)) {
+    if (!create_temp_redirect_file(ctx, &stdin_file, func_name)) {
         goto cleanup;
     }
 
@@ -2925,6 +3110,26 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
                                   options->stdin_data ? options->stdin_data : (const unsigned char*)"",
                                   options->stdin_len, func_name)) {
         goto cleanup;
+    }
+
+    if (options->stdout_mode == PROCESS_STREAM_CAPTURE) {
+        if (!create_temp_redirect_file(ctx, &stdout_file, func_name)) {
+            goto cleanup;
+        }
+    } else if (options->stdout_mode == PROCESS_STREAM_DISCARD) {
+        if (!open_null_redirect_file(ctx, &stdout_file, 1, func_name)) {
+            goto cleanup;
+        }
+    }
+
+    if (options->stderr_mode == PROCESS_STREAM_CAPTURE) {
+        if (!create_temp_redirect_file(ctx, &stderr_file, func_name)) {
+            goto cleanup;
+        }
+    } else if (options->stderr_mode == PROCESS_STREAM_DISCARD) {
+        if (!open_null_redirect_file(ctx, &stderr_file, 1, func_name)) {
+            goto cleanup;
+        }
     }
 
 #ifdef _WIN32
@@ -2954,6 +3159,24 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
         startup_info.cb = sizeof(startup_info);
         startup_info.dwFlags = STARTF_USESTDHANDLES;
         startup_info.hStdInput = stdin_file.handle;
+        if (options->stdout_mode == PROCESS_STREAM_INHERIT) {
+            stdout_file.handle = duplicate_inheritable_handle(GetStdHandle(STD_OUTPUT_HANDLE));
+            if (stdout_file.handle == INVALID_HANDLE_VALUE) {
+                free(command_line);
+                free(environment);
+                fe_error(ctx, "runprocess: could not inherit stdout");
+                goto cleanup;
+            }
+        }
+        if (options->stderr_mode == PROCESS_STREAM_INHERIT) {
+            stderr_file.handle = duplicate_inheritable_handle(GetStdHandle(STD_ERROR_HANDLE));
+            if (stderr_file.handle == INVALID_HANDLE_VALUE) {
+                free(command_line);
+                free(environment);
+                fe_error(ctx, "runprocess: could not inherit stderr");
+                goto cleanup;
+            }
+        }
         startup_info.hStdOutput = stdout_file.handle;
         startup_info.hStdError = stderr_file.handle;
 
@@ -2997,15 +3220,25 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
             if (options->cwd && chdir(options->cwd) != 0) {
                 _exit(127);
             }
-            if (dup2(stdin_file.fd, 0) < 0 ||
-                dup2(stdout_file.fd, 1) < 0 ||
+            if (dup2(stdin_file.fd, 0) < 0) {
+                _exit(127);
+            }
+            if (options->stdout_mode != PROCESS_STREAM_INHERIT &&
+                dup2(stdout_file.fd, 1) < 0) {
+                _exit(127);
+            }
+            if (options->stderr_mode != PROCESS_STREAM_INHERIT &&
                 dup2(stderr_file.fd, 2) < 0) {
                 _exit(127);
             }
 
             close(stdin_file.fd);
-            close(stdout_file.fd);
-            close(stderr_file.fd);
+            if (stdout_file.fd >= 0) {
+                close(stdout_file.fd);
+            }
+            if (stderr_file.fd >= 0) {
+                close(stderr_file.fd);
+            }
 
             if (options->use_env) {
                 environ = options->env.items;
@@ -3027,11 +3260,19 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     }
 #endif
 
-    if (!read_redirect_output(ctx, &stdout_file, func_name,
-                              &output->stdout_data, &output->stdout_len) ||
-        !read_redirect_output(ctx, &stderr_file, func_name,
-                              &output->stderr_data, &output->stderr_len)) {
-        goto cleanup;
+    if (options->stdout_mode == PROCESS_STREAM_CAPTURE) {
+        if (!read_redirect_output(ctx, &stdout_file, func_name, "stdout",
+                                  options->max_stdout,
+                                  &output->stdout_data, &output->stdout_len)) {
+            goto cleanup;
+        }
+    }
+    if (options->stderr_mode == PROCESS_STREAM_CAPTURE) {
+        if (!read_redirect_output(ctx, &stderr_file, func_name, "stderr",
+                                  options->max_stderr,
+                                  &output->stderr_data, &output->stderr_len)) {
+            goto cleanup;
+        }
     }
 
     ok = 1;
@@ -3049,23 +3290,33 @@ cleanup:
 static fe_Object* build_process_result(fe_Context *ctx,
                                        const ProcessOutput *output) {
     fe_Object *result = fe_map(ctx);
-    const unsigned char *stdout_data = output->stdout_data
-        ? output->stdout_data
-        : (const unsigned char*)"";
-    const unsigned char *stderr_data = output->stderr_data
-        ? output->stderr_data
-        : (const unsigned char*)"";
 
     fe_map_set(ctx, result, fe_symbol(ctx, "code"),
                fe_make_number(ctx, (fe_Number)output->exit_code));
     fe_map_set(ctx, result, fe_symbol(ctx, "ok"),
                fe_bool(ctx, output->exit_code == 0));
-    fe_map_set(ctx, result, fe_symbol(ctx, "stdout"),
-               fe_bytes(ctx, stdout_data,
-                        output->stdout_len));
-    fe_map_set(ctx, result, fe_symbol(ctx, "stderr"),
-               fe_bytes(ctx, stderr_data,
-                        output->stderr_len));
+    if (output->stdout_captured) {
+        const unsigned char *stdout_data = output->stdout_data
+            ? output->stdout_data
+            : (const unsigned char*)"";
+        fe_map_set(ctx, result, fe_symbol(ctx, "stdout"),
+                   fe_bytes(ctx, stdout_data,
+                            output->stdout_len));
+    } else {
+        fe_map_set(ctx, result, fe_symbol(ctx, "stdout"),
+                   fe_nil(ctx));
+    }
+    if (output->stderr_captured) {
+        const unsigned char *stderr_data = output->stderr_data
+            ? output->stderr_data
+            : (const unsigned char*)"";
+        fe_map_set(ctx, result, fe_symbol(ctx, "stderr"),
+                   fe_bytes(ctx, stderr_data,
+                            output->stderr_len));
+    } else {
+        fe_map_set(ctx, result, fe_symbol(ctx, "stderr"),
+                   fe_nil(ctx));
+    }
     return result;
 }
 

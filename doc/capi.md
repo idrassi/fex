@@ -341,17 +341,19 @@ The `FEX_BUILTINS_SYSTEM` category includes `cwd`, `chdir`, `getenv`, `time`, `e
 - `system(command)` executes a shell command and returns its exit code.
 - `runcommand(command)` executes a shell command and returns a map with `code`, `ok`, and `output`.
 - `runprocess(exe, args, opts)` launches `exe` directly, without an implicit shell, and returns a map with `code`, `ok`, `stdout`, and `stderr`.
-- `runcommand().output`, `runprocess().stdout`, and `runprocess().stderr` are `bytes` values.
-- Captured output is currently capped at 4 MiB per stream. Larger output raises a runtime error.
+- `runcommand().output` is a `bytes` value. `runprocess().stdout` and `runprocess().stderr` are `bytes` when captured, and `nil` when the stream is inherited or discarded.
+- Captured output defaults to a 4 MiB cap per stream. Larger output raises a runtime error unless the host overrides the cap.
 
 For `runprocess()`:
 
 - `exe` is a string executable path or program name.
 - `args` is a list of strings or `nil`.
-- `opts` is a map. Supported keys are `stdin`, `cwd`, and `env`.
+- `opts` is a map. Supported keys are `stdin`, `cwd`, `env`, `stdout`, `stderr`, `max_stdout`, and `max_stderr`.
 - `opts.stdin` may be a string, `bytes`, or `nil`.
 - `opts.cwd` must be a string when provided.
 - `opts.env` must be a string-valued map when provided. An empty map gives the child an empty environment; omitting `env` inherits the current process environment.
+- `opts.stdout` and `opts.stderr` may be `"capture"`, `"inherit"`, `"discard"`, or `nil`. Omitted and `nil` both mean capture.
+- `opts.max_stdout` and `opts.max_stderr` may be non-negative integers or `nil`. `nil` keeps the default 4 MiB cap; `0` disables that stream's capture cap.
 
 At the C API level, the results from `runcommand()` and `runprocess()` are ordinary FeX maps and bytes objects, so hosts can inspect them with `fe_map_get()`, `fe_tonumber()`, `fe_byteslen()`, and `fe_bytescopy()`.
 

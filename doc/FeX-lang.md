@@ -265,8 +265,12 @@ println(proc.stderr);
 - `stdin`: string, `bytes`, or `nil`
 - `cwd`: working-directory string
 - `env`: string-valued environment map
+- `stdout`: `"capture"`, `"inherit"`, `"discard"`, or `nil`
+- `stderr`: `"capture"`, `"inherit"`, `"discard"`, or `nil`
+- `max_stdout`: non-negative integer capture limit in bytes, or `0` to disable the cap
+- `max_stderr`: non-negative integer capture limit in bytes, or `0` to disable the cap
 
-The result is a map with `code`, `ok`, `stdout`, and `stderr`, where `stdout` and `stderr` are captured as `bytes`. Each stream is currently capped at 4 MiB.
+The result is a map with `code`, `ok`, `stdout`, and `stderr`. Captured streams are returned as `bytes`; inherited or discarded streams come back as `nil`. Each captured stream defaults to a 4 MiB cap.
 
 ### REPL Workflow
 

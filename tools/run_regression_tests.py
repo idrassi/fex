@@ -66,6 +66,32 @@ def runprocess_case_source() -> str:
         "println(proc.stderr);\n"
     )
 
+def runprocess_modes_case_source() -> str:
+    python_exe = str(Path(sys.executable).resolve())
+    script = (
+        "import sys; "
+        "print('inherit-out'); "
+        "sys.stderr.write('discard-err\\n')"
+    )
+    return (
+        f"let proc = runprocess({fex_string_literal(python_exe)}, "
+        f"[\"-c\", {fex_string_literal(script)}], "
+        'makemap("stdout", "inherit", "stderr", "discard"));\n'
+        "println(proc.code);\n"
+        "println(is(proc.stdout, nil));\n"
+        "println(is(proc.stderr, nil));\n"
+    )
+
+
+def runprocess_limit_case_source() -> str:
+    python_exe = str(Path(sys.executable).resolve())
+    script = "import sys; sys.stdout.write('abcdef')"
+    return (
+        f"runprocess({fex_string_literal(python_exe)}, "
+        f"[\"-c\", {fex_string_literal(script)}], "
+        'makemap("max_stdout", 4));\n'
+    )
+
 
 def fs_helpers_case_source() -> str:
     return (
@@ -284,6 +310,28 @@ CASES = [
             "#bytes[41 42 43]\n"
             "#bytes[65 6e 76 40 73 63 72 69 70 74 73]\n"
         ),
+    },
+    {
+        "name": "runprocess modes",
+        "source": runprocess_modes_case_source(),
+        "args": ["--builtin", "system,data"],
+        "exit_code": 0,
+        "stdout": (
+            "inherit-out\n"
+            "0\n"
+            "true\n"
+            "true\n"
+        ),
+        "stderr": "",
+    },
+    {
+        "name": "runprocess capture limit",
+        "source": runprocess_limit_case_source(),
+        "args": ["--builtin", "system,data"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: runprocess stdout: file too large",
+        ],
     },
     {
         "name": "cli -e",

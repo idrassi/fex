@@ -465,6 +465,46 @@ int main(void) {
         }
     }
 
+    status = fex_try_do_string(
+        ctx,
+        "let proc = runprocess(\"python\", [\"-c\", \"import sys; sys.stdout.write('inherit-out\\\\n'); sys.stderr.write('discard-err\\\\n')\"], "
+            "makemap(\"stdout\", \"inherit\", \"stderr\", \"discard\"));\n"
+        "proc;\n",
+        &result,
+        &error
+    );
+    if (status != FEX_STATUS_OK) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runprocess stream modes to execute successfully");
+    }
+    output = fe_map_get(ctx, result, fe_symbol(ctx, "stdout"));
+    if (!fe_isnil(ctx, output)) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected inherited stdout to return nil in the result map");
+    }
+    output = fe_map_get(ctx, result, fe_symbol(ctx, "stderr"));
+    if (!fe_isnil(ctx, output)) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected discarded stderr to return nil in the result map");
+    }
+
+    status = fex_try_do_string(
+        ctx,
+        "runprocess(\"python\", [\"-c\", \"import sys; sys.stdout.write('abcdef')\"], "
+            "makemap(\"max_stdout\", 4));\n",
+        &result,
+        &error
+    );
+    if (status != FEX_STATUS_RUNTIME_ERROR ||
+        strstr(error.message, "runprocess stdout: file too large") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail_status("expected runprocess capture limit error", status, &error);
+    }
+
     status = fex_try_do_string(ctx, "41 + 1;", &result, &error);
     if (status != FEX_STATUS_OK || fe_tonumber(ctx, result) != 42) {
         fe_close(ctx);

@@ -251,13 +251,17 @@ For non-shell process spawning, use `runprocess(exe, args, opts)`. It launches `
 - `opts.stdin`: optional string or `bytes`, passed to the child on stdin
 - `opts.cwd`: optional working-directory string
 - `opts.env`: optional string-valued map of environment overrides
+- `opts.stdout`: optional stream mode, one of `"capture"`, `"inherit"`, or `"discard"`
+- `opts.stderr`: optional stream mode, one of `"capture"`, `"inherit"`, or `"discard"`
+- `opts.max_stdout`: optional per-stream capture limit in bytes, or `0` to disable the cap
+- `opts.max_stderr`: optional per-stream capture limit in bytes, or `0` to disable the cap
 
 The result map contains:
 
 - `code`: the process exit code
 - `ok`: `true` when `code == 0`
-- `stdout`: captured stdout as `bytes`
-- `stderr`: captured stderr as `bytes`
+- `stdout`: captured stdout as `bytes`, or `nil` when the stream was inherited or discarded
+- `stderr`: captured stderr as `bytes`, or `nil` when the stream was inherited or discarded
 
 ```c
 let proc = runprocess(
@@ -272,7 +276,7 @@ println(proc.stdout);  // #bytes[6f 6b]
 println(proc.stderr);  // #bytes[]
 ```
 
-Like `runcommand()`, each captured output stream is currently capped at 4 MiB.
+By default, each captured output stream is capped at 4 MiB. Use `max_stdout` and `max_stderr` to lower or raise those caps, or set either option to `0` to disable that stream's cap. Use `stdout: "inherit"` to stream child stdout directly to the parent console, and `stderr: "discard"` to drop a stream completely.
 
 ## Embedding API
 
