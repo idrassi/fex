@@ -1325,9 +1325,16 @@ static fe_Object* builtin_list_length(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "length");
     fe_Object *list = fe_nextarg(ctx, &args);
     int count = 0;
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error;
     FEX_CHECK_TYPE(ctx, list, FE_TPAIR, "contains");
     
     while (!fe_isnil(ctx, list)) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         count++;
         list = fe_cdr(ctx, list);
     }
@@ -1339,13 +1346,19 @@ static fe_Object* builtin_list_nth(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 2, "nth");
     fe_Object *list = fe_nextarg(ctx, &args);
     fe_Object *index_obj = fe_nextarg(ctx, &args);
-    
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error;
     int index = (int)fe_tonumber(ctx, index_obj);
     int i;
 
     FEX_CHECK_TYPE(ctx, list, FE_TPAIR, "nth");
 
     for (i = 0; i < index && !fe_isnil(ctx, list); i++) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         list = fe_cdr(ctx, list);
     }
     
@@ -1360,6 +1373,8 @@ static fe_Object* builtin_list_append(fe_Context *ctx, fe_Object *args) {
     if (fe_isnil(ctx, args)) return fe_nil(ctx);
     
     fe_Object *first = fe_nextarg(ctx, &args);
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error;
     FEX_CHECK_TYPE(ctx, first, FE_TPAIR, "nth");
     if (fe_isnil(ctx, args)) return first;
     
@@ -1370,6 +1385,11 @@ static fe_Object* builtin_list_append(fe_Context *ctx, fe_Object *args) {
     /* Copy first list */
     fe_Object *current = first;
     while (!fe_isnil(ctx, current)) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         *tail = fe_cons(ctx, fe_car(ctx, current), fe_nil(ctx));
         tail = fe_cdr_ptr(ctx, *tail);
         current = fe_cdr(ctx, current);
@@ -1381,6 +1401,11 @@ static fe_Object* builtin_list_append(fe_Context *ctx, fe_Object *args) {
         FEX_CHECK_TYPE(ctx, list, FE_TPAIR, "nth");
         current = list;
         while (!fe_isnil(ctx, current)) {
+            abort_error = builtin_poll_abort(ctx, &poll_countdown);
+            if (abort_error != NULL) {
+                fe_error(ctx, abort_error);
+                return fe_nil(ctx);
+            }
             *tail = fe_cons(ctx, fe_car(ctx, current), fe_nil(ctx));
             tail = fe_cdr_ptr(ctx, *tail);
             current = fe_cdr(ctx, current);
@@ -1394,8 +1419,15 @@ static fe_Object* builtin_list_reverse(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "reverse");
     fe_Object *list = fe_nextarg(ctx, &args);
     fe_Object *result = fe_nil(ctx);
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error;
     FEX_CHECK_TYPE(ctx, list, FE_TPAIR, "reverse");
     while (!fe_isnil(ctx, list)) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         result = fe_cons(ctx, fe_car(ctx, list), result);
         list = fe_cdr(ctx, list);
     }
@@ -1476,8 +1508,15 @@ static fe_Object* builtin_fold(fe_Context *ctx, fe_Object *args) {
 
 static fe_Object* builtin_make_map(fe_Context *ctx, fe_Object *args) {
     fe_Object *map = fe_map(ctx);
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error;
 
     while (!fe_isnil(ctx, args)) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
+        }
         fe_Object *key = fe_nextarg(ctx, &args);
         fe_Object *value;
         if (fe_isnil(ctx, args)) {
@@ -2666,8 +2705,15 @@ static int count_list_length(fe_Context *ctx, fe_Object *list,
     int count = 0;
     fe_Object *node = list;
     char msg[160];
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error;
 
     while (!fe_isnil(ctx, node)) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return -1;
+        }
         if (fe_type(ctx, node) != FE_TPAIR) {
             sprintf(msg, "%s: %s must be a list", func_name, label);
             fe_error(ctx, msg);
@@ -2734,6 +2780,8 @@ static int collect_process_argv(fe_Context *ctx, fe_Object *exe_obj,
     int index;
     char **items;
     char msg[160];
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error;
 
     extra_count = count_list_length(ctx, args_obj, func_name, "args");
     if (extra_count < 0) {
@@ -2756,6 +2804,12 @@ static int collect_process_argv(fe_Context *ctx, fe_Object *exe_obj,
     node = args_obj;
     index = 1;
     while (!fe_isnil(ctx, node)) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            free_cstring_items(items, index);
+            fe_error(ctx, abort_error);
+            return 0;
+        }
         fe_Object *value = fe_car(ctx, node);
         if (fe_type(ctx, value) != FE_TSTRING) {
             free_cstring_items(items, index);
@@ -2784,6 +2838,8 @@ static int collect_process_env(fe_Context *ctx, fe_Object *env_obj,
     int index;
     char **items;
     char msg[160];
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error;
 
     keys = fe_map_keys(ctx, env_obj);
     count = count_list_length(ctx, keys, func_name, "env keys");
@@ -2801,6 +2857,12 @@ static int collect_process_env(fe_Context *ctx, fe_Object *env_obj,
     node = keys;
     index = 0;
     while (!fe_isnil(ctx, node)) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            free_cstring_items(items, index);
+            fe_error(ctx, abort_error);
+            return 0;
+        }
         fe_Object *key_obj = fe_car(ctx, node);
         fe_Object *value_obj = fe_map_get(ctx, env_obj, key_obj);
         char *key;

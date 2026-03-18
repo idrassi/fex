@@ -50,6 +50,28 @@ static int interrupt_once(fe_Context *ctx, void *udata) {
     return *calls >= 1;
 }
 
+static fe_Object* make_number_list(fe_Context *ctx, int count) {
+    fe_Object *nil_obj = fe_nil(ctx);
+    fe_Object *head = nil_obj;
+    fe_Object **tail = &head;
+    int gc_save = fe_savegc(ctx);
+    int i;
+
+    for (i = 0; i < count; i++) {
+        fe_Object *value = fe_make_number(ctx, (fe_Number)i);
+        fe_pushgc(ctx, value);
+        *tail = fe_cons(ctx, value, nil_obj);
+        tail = fe_cdr_ptr(ctx, *tail);
+        fe_restoregc(ctx, gc_save);
+        if (!fe_isnil(ctx, head)) {
+            fe_pushgc(ctx, head);
+        }
+    }
+
+    fe_restoregc(ctx, gc_save);
+    return head;
+}
+
 static char* make_large_parsejson_source(size_t item_count) {
     const char *prefix = "parsejson(\"[";
     const char *suffix = "]\");\n";
@@ -468,6 +490,33 @@ int main(void) {
             fe_close(ctx);
             free(memory);
             return fail("expected parsejson interrupt handler to run");
+        }
+    }
+
+    fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS, FEX_BUILTINS_LIST);
+    {
+        fe_Object *biglist;
+        int gc_save = fe_savegc(ctx);
+        int interrupt_calls = 0;
+
+        biglist = make_number_list(ctx, 4096);
+        fe_pushgc(ctx, biglist);
+        fe_set(ctx, fe_symbol(ctx, "biglist"), biglist);
+        fe_restoregc(ctx, gc_save);
+
+        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 1);
+        status = fex_try_do_string(ctx, "length(biglist);\n", &result, &error);
+        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "execution interrupted") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected list length to honor interrupt polling", status, &error);
+        }
+        if (interrupt_calls < 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected list length interrupt handler to run");
         }
     }
 
