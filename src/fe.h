@@ -29,6 +29,20 @@ typedef void (*fe_WriteFn)(fe_Context *ctx, void *udata, char chr);
 typedef char (*fe_ReadFn)(fe_Context *ctx, void *udata);
 typedef int (*fe_InterruptFn)(fe_Context *ctx, void *udata);
 typedef struct { fe_ErrorFn error; fe_CFunc mark, gc; } fe_Handlers;
+typedef struct {
+  size_t step_limit;
+  size_t steps_executed;
+  uint64_t timeout_ms;
+  size_t memory_limit;
+  size_t memory_used;
+  size_t peak_memory_used;
+  size_t base_memory_bytes;
+  size_t object_capacity;
+  size_t live_objects;
+  size_t object_allocations_total;
+  size_t allocs_since_gc;
+  size_t gc_runs;
+} fe_Stats;
 
 /**********************************
  *  Immediate representations
@@ -76,6 +90,7 @@ void fe_set_memory_limit(fe_Context *ctx, size_t max_bytes);
 size_t fe_get_memory_limit(fe_Context *ctx);
 size_t fe_get_memory_used(fe_Context *ctx);
 size_t fe_get_peak_memory_used(fe_Context *ctx);
+void fe_get_stats(fe_Context *ctx, fe_Stats *out_stats);
 void fe_set_timeout_ms(fe_Context *ctx, uint64_t timeout_ms);
 uint64_t fe_get_timeout_ms(fe_Context *ctx);
 void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,

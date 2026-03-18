@@ -114,6 +114,7 @@ void fe_set_memory_limit(fe_Context *ctx, size_t max_bytes);
 size_t fe_get_memory_limit(fe_Context *ctx);
 size_t fe_get_memory_used(fe_Context *ctx);
 size_t fe_get_peak_memory_used(fe_Context *ctx);
+void fe_get_stats(fe_Context *ctx, fe_Stats *out_stats);
 void fe_set_timeout_ms(fe_Context *ctx, uint64_t timeout_ms);
 uint64_t fe_get_timeout_ms(fe_Context *ctx);
 void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
@@ -127,9 +128,29 @@ These low-level `fe` APIs let a host bound script execution without killing the 
 - `fe_set_timeout_ms()` sets a per-top-level wall-clock timeout. `0` disables the timeout.
 - `fe_get_steps_executed()` reports the number of eval steps consumed by the current or most recent evaluation.
 - `fe_get_memory_used()` and `fe_get_peak_memory_used()` report current and peak tracked memory usage, including the base arena memory passed to `fe_open()`.
+- `fe_get_stats()` fills a `fe_Stats` snapshot with the current limits, memory usage, object-capacity figures, total object allocations, and GC run count.
 - `fe_set_interrupt_handler()` installs a callback that runs every `check_interval_steps` evaluations. If it returns non-zero, evaluation stops with the runtime error `"execution interrupted"`.
 
 Use `fe_set_timeout_ms()` when a simple wall-clock deadline is enough. Use `fe_set_interrupt_handler()` when the host needs custom timeout policy or external cancellation. Combine `fe_set_memory_limit()` with the step and timeout controls when embedding untrusted or potentially large workloads.
+
+`fe_Stats` is a plain snapshot struct:
+
+```c
+typedef struct {
+    size_t step_limit;
+    size_t steps_executed;
+    uint64_t timeout_ms;
+    size_t memory_limit;
+    size_t memory_used;
+    size_t peak_memory_used;
+    size_t base_memory_bytes;
+    size_t object_capacity;
+    size_t live_objects;
+    size_t object_allocations_total;
+    size_t allocs_since_gc;
+    size_t gc_runs;
+} fe_Stats;
+```
 
 ### Minimal Example
 

@@ -288,6 +288,19 @@ CASES = [
         "stdout": "FeX 1.0\n",
     },
     {
+        "name": "cli stats",
+        "skip_input_file": True,
+        "args": ["--stats", "-e", "println(40 + 2);"],
+        "exit_code": 0,
+        "stdout": "42\n",
+        "stderr_contains": [
+            "runtime stats:",
+            "steps_executed:",
+            "memory_used:",
+            "gc_runs:",
+        ],
+    },
+    {
         "name": "builtin categories",
         "source": "let q = substring(tojson(\"x\"), 0, 1);\nlet raw = concat(\"{\", q, \"name\", q, \":\", q, \"fex\", q, \"}\");\nprintln(parsejson(raw).name);\n",
         "args": ["--builtin", "string,data"],

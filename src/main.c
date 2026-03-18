@@ -191,6 +191,25 @@ static void print_version(void) {
   printf("FeX %s\n", FE_VERSION);
 }
 
+static void print_runtime_stats(FILE *fp, fe_Context *ctx) {
+  fe_Stats stats;
+
+  fe_get_stats(ctx, &stats);
+  fprintf(fp, "runtime stats:\n");
+  fprintf(fp, "  steps_executed: %zu\n", stats.steps_executed);
+  fprintf(fp, "  step_limit: %zu\n", stats.step_limit);
+  fprintf(fp, "  timeout_ms: %" PRIu64 "\n", stats.timeout_ms);
+  fprintf(fp, "  memory_used: %zu\n", stats.memory_used);
+  fprintf(fp, "  peak_memory_used: %zu\n", stats.peak_memory_used);
+  fprintf(fp, "  memory_limit: %zu\n", stats.memory_limit);
+  fprintf(fp, "  base_memory_bytes: %zu\n", stats.base_memory_bytes);
+  fprintf(fp, "  object_capacity: %zu\n", stats.object_capacity);
+  fprintf(fp, "  live_objects: %zu\n", stats.live_objects);
+  fprintf(fp, "  object_allocations_total: %zu\n", stats.object_allocations_total);
+  fprintf(fp, "  allocs_since_gc: %zu\n", stats.allocs_since_gc);
+  fprintf(fp, "  gc_runs: %zu\n", stats.gc_runs);
+}
+
 static void run_repl(fe_Context *ctx) {
   char buffer[REPL_BUFFER_SIZE];
   FexError error;
@@ -271,6 +290,7 @@ static void print_usage(const char *program_name) {
   fprintf(stderr, "  --max-steps N  Abort evaluation after approximately N eval steps (0 disables)\n");
   fprintf(stderr, "  --timeout-ms N  Abort evaluation after roughly N milliseconds (0 disables)\n");
   fprintf(stderr, "  --max-memory N  Abort when tracked context memory exceeds N bytes (0 disables)\n");
+  fprintf(stderr, "  --stats       Print runtime stats to stderr after non-REPL execution\n");
   fprintf(stderr, "  --memory-pool-size SIZE  Set memory pool size in MB (default: 5MB)\n");
   fprintf(stderr, "  --version, -V  Show version information\n");
   fprintf(stderr, "  --help        Show this help message\n");
@@ -283,7 +303,9 @@ int main(int argc, char **argv) {
   int enable_spans = 0, i, module_path_count = 0;
   int read_stdin = 0;
   int end_of_options = 0;
+  int show_stats = 0;
   int exit_code = 0;
+  int stdin_interactive;
   size_t memory_pool_size = MEMORY_POOL_SIZE;
   size_t max_steps = 0;
   size_t max_memory = 0;
@@ -428,6 +450,8 @@ int main(int argc, char **argv) {
         return 64;
       }
       max_memory = (size_t)parsed_max_memory;
+    } else if (!end_of_options && strcmp(argv[i], "--stats") == 0) {
+      show_stats = 1;
     } else if (!end_of_options && strcmp(argv[i], "--memory-pool-size") == 0) {
       char *endptr;
       long size_mb;
@@ -525,11 +549,12 @@ int main(int argc, char **argv) {
   }
   free(module_paths);
 
+  stdin_interactive = stdin_is_interactive();
   if (eval_source != NULL) {
     exit_code = run_source(ctx, eval_source, "<expr>");
   } else if (filename != NULL) {
     exit_code = run_file(ctx, filename);
-  } else if (read_stdin || !stdin_is_interactive()) {
+  } else if (read_stdin || !stdin_interactive) {
     char *stdin_source = NULL;
     if (!read_stream_source(stdin, &stdin_source)) {
       fprintf(stderr, "I/O error: could not read stdin\n");
@@ -540,6 +565,10 @@ int main(int argc, char **argv) {
     }
   } else {
     run_repl(ctx);
+  }
+
+  if (show_stats && (eval_source != NULL || filename != NULL || read_stdin || !stdin_interactive)) {
+    print_runtime_stats(stderr, ctx);
   }
 
   free(eval_source);

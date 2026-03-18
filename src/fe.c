@@ -164,6 +164,8 @@ struct fe_Context {
   int gc_threshold;        /* Trigger next GC when allocs_since_gc exceeds this */
   size_t bytes_since_gc;   /* String bytes allocated since last GC */
   size_t byte_threshold;   /* Trigger next GC when bytes_since_gc exceeds this */
+  size_t gc_runs;
+  size_t object_allocations_total;
   size_t base_memory_bytes;
   size_t memory_limit;
   size_t memory_used;
@@ -468,6 +470,24 @@ size_t fe_get_memory_used(fe_Context *ctx) {
 
 size_t fe_get_peak_memory_used(fe_Context *ctx) {
   return ctx->peak_memory_used;
+}
+
+
+void fe_get_stats(fe_Context *ctx, fe_Stats *out_stats) {
+  if (!out_stats) return;
+  memset(out_stats, 0, sizeof(*out_stats));
+  out_stats->step_limit = ctx->step_limit;
+  out_stats->steps_executed = ctx->steps_executed;
+  out_stats->timeout_ms = ctx->timeout_ms;
+  out_stats->memory_limit = ctx->memory_limit;
+  out_stats->memory_used = ctx->memory_used;
+  out_stats->peak_memory_used = ctx->peak_memory_used;
+  out_stats->base_memory_bytes = ctx->base_memory_bytes;
+  out_stats->object_capacity = (size_t)ctx->object_count;
+  out_stats->live_objects = (size_t)((ctx->live_count > 0) ? ctx->live_count : 0);
+  out_stats->object_allocations_total = ctx->object_allocations_total;
+  out_stats->allocs_since_gc = (size_t)((ctx->allocs_since_gc > 0) ? ctx->allocs_since_gc : 0);
+  out_stats->gc_runs = ctx->gc_runs;
 }
 
 
@@ -1227,6 +1247,7 @@ static void collectgarbage(fe_Context *ctx) {
   if (ctx->gc_threshold < GC_MIN_THRESHOLD) {
     ctx->gc_threshold = GC_MIN_THRESHOLD;
   }
+  ctx->gc_runs++;
 }
 
 /* -------------------------------------------------------------------------
@@ -1611,6 +1632,7 @@ static fe_Object* object(fe_Context *ctx) {
 
   /* Increment allocation counter and push to GC stack for protection */
   ctx->allocs_since_gc++;
+  ctx->object_allocations_total++;
   fe_pushgc(ctx, obj);
 
   return obj;
@@ -2878,6 +2900,8 @@ fe_Context* fe_open(void *ptr, size_t size) {
   }
   ctx->bytes_since_gc = 0;
   ctx->byte_threshold = (size_t)ctx->object_count * sizeof(fe_Object) / 3;
+  ctx->gc_runs = 0;
+  ctx->object_allocations_total = 0;
 
   /* init lists */
   ctx->calllist = &nil;

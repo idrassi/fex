@@ -96,7 +96,7 @@ If stdin is piped and no file or `-e` input is provided, FeX executes stdin inst
 
 ### CLI Flags
 
-Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, `--module-path PATH` adds file-based import search directories, `--max-steps N` aborts runaway evaluation after roughly `N` eval steps, `--timeout-ms N` adds a wall-clock timeout, `--max-memory N` aborts when tracked context memory exceeds `N` bytes, and `--version` prints the CLI version. Imports look for both `name.fex` and `name/index.fex`, so directory-style packages work out of the box. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
+Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, `--module-path PATH` adds file-based import search directories, `--max-steps N` aborts runaway evaluation after roughly `N` eval steps, `--timeout-ms N` adds a wall-clock timeout, `--max-memory N` aborts when tracked context memory exceeds `N` bytes, `--stats` prints a runtime stats snapshot to `stderr` after non-REPL execution, and `--version` prints the CLI version. Imports look for both `name.fex` and `name/index.fex`, so directory-style packages work out of the box. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
 
 ## Language Quick Tour
 
@@ -322,7 +322,7 @@ int main(void) {
 
 If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `pathjoin`, `exists`, `listdir`, `mkdirp`, `cwd`, `getenv`, `runcommand`, or `runprocess`, you can still use `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` for the full set. For production embedding, prefer `fex_init_with_builtins(ctx, flags, mask)` so you can expose only the categories you actually want, for example `FEX_BUILTINS_SAFE`, `FEX_BUILTINS_IO`, or `FEX_BUILTINS_SYSTEM`.
 
-For runtime sandboxing, the core `fe` API now also exposes `fe_set_step_limit(ctx, max_steps)`, `fe_set_memory_limit(ctx, max_bytes)`, `fe_set_timeout_ms(ctx, timeout_ms)`, and `fe_set_interrupt_handler(...)`. Hosts can inspect `fe_get_memory_used(ctx)` and `fe_get_peak_memory_used(ctx)` to observe current and peak tracked usage. Use the fixed step and memory limits for simple sandboxing, the timeout convenience layer for wall-clock deadlines, or an interrupt callback for custom cancellation policy.
+For runtime sandboxing, the core `fe` API now also exposes `fe_set_step_limit(ctx, max_steps)`, `fe_set_memory_limit(ctx, max_bytes)`, `fe_set_timeout_ms(ctx, timeout_ms)`, and `fe_set_interrupt_handler(...)`. Hosts can inspect `fe_get_memory_used(ctx)`, `fe_get_peak_memory_used(ctx)`, or take a full `fe_get_stats(ctx, &stats)` snapshot to observe current runtime state. Use the fixed step and memory limits for simple sandboxing, the timeout convenience layer for wall-clock deadlines, or an interrupt callback for custom cancellation policy.
 
 ## Architecture
 

@@ -143,7 +143,7 @@ The base FeX environment always includes:
 
 Pair selectors such as `.head` and `.tail`, and the `::` operator, are syntax sugar over these primitives rather than separate runtime functions.
 
-Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `exists`, `listdir`, `mkdirp`, `cwd`, `getenv`, `tobytes`, `readbytes`, `runcommand`, and `runprocess` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe`, `--builtin io`, or `--builtin system`. For runaway-script protection, the CLI also supports `--max-steps N`, `--timeout-ms N`, and `--max-memory N`. In embedded use, call:
+Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `exists`, `listdir`, `mkdirp`, `cwd`, `getenv`, `tobytes`, `readbytes`, `runcommand`, and `runprocess` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe`, `--builtin io`, or `--builtin system`. For runaway-script protection, the CLI also supports `--max-steps N`, `--timeout-ms N`, and `--max-memory N`, and `--stats` prints a post-run runtime snapshot to `stderr`. In embedded use, call:
 
 ```c
 fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
@@ -175,6 +175,7 @@ fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS,
 | Bound evaluation work | `fe_set_step_limit(ctx, 100000);` |
 | Cap tracked memory | `fe_set_memory_limit(ctx, 8 * 1024 * 1024);` |
 | Add a wall-clock timeout | `fe_set_timeout_ms(ctx, 250);` |
+| Snapshot runtime stats | `fe_Stats stats; fe_get_stats(ctx, &stats);` |
 | Install custom error behavior | Replace `fe_handlers(ctx)->error` before running code. |
 
 Compiled ASTs belong to the `fe_Context` that created them. Reuse them within that same context; do not pass them to another context or thread.

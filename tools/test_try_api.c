@@ -45,6 +45,7 @@ int main(void) {
     fe_Object *name_value;
     fe_Object *output;
     fe_Object *result;
+    fe_Stats stats;
     FexError error;
     FexStatus status;
     char buffer[64];
@@ -141,6 +142,24 @@ int main(void) {
         free(memory);
         return fail("expected peak memory usage to be at least current usage");
     }
+    memset(&stats, 0, sizeof(stats));
+    fe_get_stats(ctx, &stats);
+    if (stats.base_memory_bytes != TEST_MEM_SIZE) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected stats to report the configured base arena size");
+    }
+    if (stats.memory_used != fe_get_memory_used(ctx) ||
+        stats.peak_memory_used != fe_get_peak_memory_used(ctx)) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected stats memory fields to match the dedicated getters");
+    }
+    if (stats.object_capacity == 0 || stats.object_allocations_total == 0) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected stats to expose object-capacity and allocation counters");
+    }
 
     {
         static const unsigned char raw_bytes[3] = {0x41, 0x00, 0xff};
@@ -181,6 +200,12 @@ int main(void) {
         fe_close(ctx);
         free(memory);
         return fail("expected step counter to advance past the configured limit");
+    }
+    fe_get_stats(ctx, &stats);
+    if (stats.step_limit != 64 || stats.steps_executed != fe_get_steps_executed(ctx)) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected stats step counters to match the runtime state");
     }
     fe_set_step_limit(ctx, 0);
 
