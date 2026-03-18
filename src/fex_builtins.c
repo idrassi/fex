@@ -128,16 +128,6 @@ typedef struct {
 #define PROCESS_STREAM_INHERIT 1
 #define PROCESS_STREAM_DISCARD 2
 
-#ifdef _WIN32
-#define FEX_POPEN  _popen
-#define FEX_PCLOSE _pclose
-#define FEX_POPEN_MODE "rb"
-#else
-#define FEX_POPEN  popen
-#define FEX_PCLOSE pclose
-#define FEX_POPEN_MODE "r"
-#endif
-
 static int buf_reserve(TextBuffer *buf, size_t extra) {
     size_t needed;
     size_t new_cap;
@@ -461,10 +451,8 @@ static int is_path_separator_char(char chr) {
     return chr == '/' || chr == '\\';
 }
 
+#ifndef _WIN32
 static int decode_process_exit_code(int status) {
-#ifdef _WIN32
-    return status;
-#else
     if (status < 0) {
         return status;
     }
@@ -475,36 +463,8 @@ static int decode_process_exit_code(int status) {
         return 128 + WTERMSIG(status);
     }
     return status;
+}
 #endif
-}
-
-static int read_stream_into_buffer(fe_Context *ctx, FILE *stream, TextBuffer *buf,
-                                   size_t max_size, const char *func_name) {
-    unsigned char chunk[4096];
-    size_t bytes_read;
-    char msg[160];
-
-    while ((bytes_read = fread(chunk, 1, sizeof(chunk), stream)) > 0) {
-        if (buf->len + bytes_read > max_size) {
-            sprintf(msg, "%s: command output too large", func_name);
-            fe_error(ctx, msg);
-            return 0;
-        }
-        if (!buf_append_mem(buf, (const char*)chunk, bytes_read)) {
-            sprintf(msg, "%s: out of memory", func_name);
-            fe_error(ctx, msg);
-            return 0;
-        }
-    }
-
-    if (ferror(stream)) {
-        sprintf(msg, "%s: error reading command output", func_name);
-        fe_error(ctx, msg);
-        return 0;
-    }
-
-    return 1;
-}
 
 static char* build_merged_command(fe_Context *ctx, const char *command, const char *func_name) {
     const char *prefix = "(";
@@ -543,6 +503,38 @@ static int cstring_array_push_copy(CStringArray *array, const char *value) {
 
     array->items = new_items;
     array->items[array->count++] = copy;
+    return 1;
+}
+
+static int build_shell_process_argv(fe_Context *ctx, const char *command,
+                                    const char *func_name, CStringArray *argv) {
+    char msg[160];
+#ifdef _WIN32
+    const char *shell = getenv("ComSpec");
+
+    if (!shell || !*shell) {
+        shell = "cmd.exe";
+    }
+    if (!cstring_array_push_copy(argv, shell) ||
+        !cstring_array_push_copy(argv, "/d") ||
+        !cstring_array_push_copy(argv, "/s") ||
+        !cstring_array_push_copy(argv, "/c") ||
+        !cstring_array_push_copy(argv, command)) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#else
+    if (!cstring_array_push_copy(argv, "/bin/sh") ||
+        !cstring_array_push_copy(argv, "-c") ||
+        !cstring_array_push_copy(argv, command)) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#endif
+
+    (void)ctx;
     return 1;
 }
 
@@ -3968,7 +3960,14 @@ static fe_Object* builtin_exit(fe_Context *ctx, fe_Object *args) {
 static fe_Object* builtin_system(fe_Context *ctx, fe_Object *args) {
     fe_Object *command_obj;
     char *command;
-    int result;
+    CStringArray argv;
+    ProcessOptions options;
+    ProcessOutput output;
+    fe_Object *result;
+
+    memset(&argv, 0, sizeof(argv));
+    memset(&options, 0, sizeof(options));
+    memset(&output, 0, sizeof(output));
 
     FEX_CHECK_ARGS(ctx, args, 1, "system");
     command_obj = fe_nextarg(ctx, &args);
@@ -3978,20 +3977,38 @@ static fe_Object* builtin_system(fe_Context *ctx, fe_Object *args) {
         return fe_nil(ctx);
     }
 
-    result = system(command);
+    if (!build_shell_process_argv(ctx, command, "system", &argv)) {
+        free(command);
+        free_cstring_array(&argv);
+        return fe_nil(ctx);
+    }
     free(command);
-    return fe_make_number(ctx, (fe_Number)decode_process_exit_code(result));
+    options.stdout_mode = PROCESS_STREAM_INHERIT;
+    options.stderr_mode = PROCESS_STREAM_INHERIT;
+    if (!run_process_native(ctx, &argv, &options, &output, "system")) {
+        free_cstring_array(&argv);
+        free_process_output(&output);
+        return fe_nil(ctx);
+    }
+
+    result = fe_make_number(ctx, (fe_Number)output.exit_code);
+    free_cstring_array(&argv);
+    free_process_output(&output);
+    return result;
 }
 
 static fe_Object* builtin_run_command(fe_Context *ctx, fe_Object *args) {
     fe_Object *command_obj;
     char *command;
     char *merged_command;
-    FILE *pipe;
-    TextBuffer output;
-    int raw_status;
-    int exit_code;
+    CStringArray argv;
+    ProcessOptions options;
+    ProcessOutput output;
     fe_Object *result;
+
+    memset(&argv, 0, sizeof(argv));
+    memset(&options, 0, sizeof(options));
+    memset(&output, 0, sizeof(output));
 
     FEX_CHECK_ARGS(ctx, args, 1, "runcommand");
     command_obj = fe_nextarg(ctx, &args);
@@ -4006,38 +4023,31 @@ static fe_Object* builtin_run_command(fe_Context *ctx, fe_Object *args) {
         return fe_nil(ctx);
     }
 
-    pipe = FEX_POPEN(merged_command, FEX_POPEN_MODE);
+    if (!build_shell_process_argv(ctx, merged_command, "runcommand", &argv)) {
+        free(merged_command);
+        free_cstring_array(&argv);
+        return fe_nil(ctx);
+    }
     free(merged_command);
-    if (!pipe) {
-        fe_error(ctx, "runcommand: could not start command");
+    options.stdout_mode = PROCESS_STREAM_CAPTURE;
+    options.stderr_mode = PROCESS_STREAM_DISCARD;
+    options.max_stdout = FEX_COMMAND_OUTPUT_MAX_BYTES;
+    if (!run_process_native(ctx, &argv, &options, &output, "runcommand")) {
+        free_cstring_array(&argv);
+        free_process_output(&output);
         return fe_nil(ctx);
     }
 
-    output.data = NULL;
-    output.len = 0;
-    output.cap = 0;
-    if (!read_stream_into_buffer(ctx, pipe, &output,
-                                 FEX_COMMAND_OUTPUT_MAX_BYTES, "runcommand")) {
-        FEX_PCLOSE(pipe);
-        buf_free(&output);
-        return fe_nil(ctx);
-    }
-
-    raw_status = FEX_PCLOSE(pipe);
-    if (raw_status < 0) {
-        buf_free(&output);
-        fe_error(ctx, "runcommand: could not finish command");
-        return fe_nil(ctx);
-    }
-
-    exit_code = decode_process_exit_code(raw_status);
     result = fe_map(ctx);
     fe_map_set(ctx, result, fe_symbol(ctx, "code"),
-               fe_make_number(ctx, (fe_Number)exit_code));
-    fe_map_set(ctx, result, fe_symbol(ctx, "ok"), fe_bool(ctx, exit_code == 0));
+               fe_make_number(ctx, (fe_Number)output.exit_code));
+    fe_map_set(ctx, result, fe_symbol(ctx, "ok"), fe_bool(ctx, output.exit_code == 0));
     fe_map_set(ctx, result, fe_symbol(ctx, "output"),
-               fe_bytes(ctx, output.data ? output.data : "", output.len));
-    buf_free(&output);
+               fe_bytes(ctx,
+                        output.stdout_data ? output.stdout_data : (const unsigned char*)"",
+                        output.stdout_len));
+    free_cstring_array(&argv);
+    free_process_output(&output);
     return result;
 }
 

@@ -43,6 +43,22 @@ def runcommand_case_source() -> str:
     )
 
 
+def shell_sleep_command() -> str:
+    if sys.platform.startswith("win"):
+        script = "Start-Sleep -Seconds 5"
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        return f"powershell -NoProfile -EncodedCommand {encoded}"
+    return "sleep 5"
+
+
+def runcommand_timeout_case_source() -> str:
+    return f"runcommand({fex_string_literal(shell_sleep_command())});\n"
+
+
+def system_timeout_case_source() -> str:
+    return f"system({fex_string_literal(shell_sleep_command())});\n"
+
+
 def runprocess_case_source() -> str:
     python_exe = str(Path(sys.executable).resolve())
     cwd = str((ROOT / "scripts").resolve())
@@ -308,6 +324,24 @@ CASES = [
             "false\n"
             "#bytes[6f 75 74 65 72 72]\n"
         ),
+    },
+    {
+        "name": "runcommand timeout budget",
+        "source": runcommand_timeout_case_source(),
+        "args": ["--builtin", "system", "--timeout-ms", "50", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: execution timeout exceeded",
+        ],
+    },
+    {
+        "name": "system timeout budget",
+        "source": system_timeout_case_source(),
+        "args": ["--builtin", "system", "--timeout-ms", "50", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: execution timeout exceeded",
+        ],
     },
     {
         "name": "runprocess",
