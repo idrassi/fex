@@ -240,6 +240,38 @@ println(proc.output);
 
 Captured output is currently capped at 4 MiB. Larger command output raises a runtime error instead of growing without bound.
 
+### Structured Process Execution
+
+For non-shell process spawning, use `runprocess(exe, args, opts)`. It launches `exe` directly, so spaces and quoting in `args` are passed as real argv entries instead of being re-parsed by a shell.
+
+- `exe`: string executable path or program name
+- `args`: list of strings, or `nil`
+- `opts.stdin`: optional string or `bytes`, passed to the child on stdin
+- `opts.cwd`: optional working-directory string
+- `opts.env`: optional string-valued map of environment overrides
+
+The result map contains:
+
+- `code`: the process exit code
+- `ok`: `true` when `code == 0`
+- `stdout`: captured stdout as `bytes`
+- `stderr`: captured stderr as `bytes`
+
+```c
+let proc = runprocess(
+  "python",
+  ["-c", "import sys; sys.stdout.write('ok'); raise SystemExit(2)"],
+  makemap("env", makemap("MODE", "test"))
+);
+
+println(proc.code);    // 2
+println(proc.ok);      // false
+println(proc.stdout);  // #bytes[6f 6b]
+println(proc.stderr);  // #bytes[]
+```
+
+Like `runcommand()`, each captured output stream is currently capped at 4 MiB.
+
 ## Embedding API
 
 FeX is easy to embed. For host applications, prefer the recoverable `fex_try_*` APIs so script failures stay in-process and return structured diagnostics.
@@ -286,7 +318,7 @@ int main(void) {
 
 `fex_do_string()` and `fex_do_file()` are still available for simple tools, but on runtime faults they go through the installed error handler. The default FeX handler prints a traceback and exits.
 
-If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `pathjoin`, or `runcommand`, you can still use `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` for the full set. For production embedding, prefer `fex_init_with_builtins(ctx, flags, mask)` so you can expose only the categories you actually want, for example `FEX_BUILTINS_SAFE`, `FEX_BUILTINS_STRING | FEX_BUILTINS_DATA`, or `FEX_BUILTINS_SYSTEM`.
+If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `pathjoin`, `runcommand`, or `runprocess`, you can still use `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` for the full set. For production embedding, prefer `fex_init_with_builtins(ctx, flags, mask)` so you can expose only the categories you actually want, for example `FEX_BUILTINS_SAFE`, `FEX_BUILTINS_STRING | FEX_BUILTINS_DATA`, or `FEX_BUILTINS_SYSTEM`.
 
 For runtime sandboxing, the core `fe` API now also exposes `fe_set_step_limit(ctx, max_steps)`, `fe_set_timeout_ms(ctx, timeout_ms)`, and `fe_set_interrupt_handler(...)`. A host can use the fixed step limit directly, the timeout convenience layer for wall-clock deadlines, or install an interrupt callback that applies custom policy.
 

@@ -40,6 +40,30 @@ def runcommand_case_source() -> str:
         "println(proc.output);\n"
     )
 
+
+def runprocess_case_source() -> str:
+    python_exe = str(Path(sys.executable).resolve())
+    cwd = str((ROOT / "scripts").resolve())
+    script = (
+        "import os, pathlib, sys; "
+        "data = sys.stdin.buffer.read(); "
+        "sys.stdout.buffer.write(data.upper()); "
+        "sys.stderr.buffer.write(os.getenv('FEX_TEST', 'missing').encode('ascii')); "
+        "sys.stderr.buffer.write(b'@'); "
+        "sys.stderr.buffer.write(pathlib.Path().resolve().name.encode('ascii')); "
+        "raise SystemExit(5)"
+    )
+    return (
+        f"let proc = runprocess({fex_string_literal(python_exe)}, "
+        f"[\"-c\", {fex_string_literal(script)}], "
+        f"makemap(\"stdin\", tobytes(\"abc\"), \"cwd\", {fex_string_literal(cwd)}, "
+        f"\"env\", makemap(\"FEX_TEST\", \"env\")));\n"
+        "println(proc.code);\n"
+        "println(proc.ok);\n"
+        "println(proc.stdout);\n"
+        "println(proc.stderr);\n"
+    )
+
 CASES = [
     {
         "name": "basic module",
@@ -166,6 +190,18 @@ CASES = [
             "3\n"
             "false\n"
             "#bytes[6f 75 74 65 72 72]\n"
+        ),
+    },
+    {
+        "name": "runprocess",
+        "source": runprocess_case_source(),
+        "args": ["--builtin", "system,data"],
+        "exit_code": 0,
+        "stdout": (
+            "5\n"
+            "false\n"
+            "#bytes[41 42 43]\n"
+            "#bytes[65 6e 76 40 73 63 72 69 70 74 73]\n"
         ),
     },
     {
@@ -419,5 +455,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 

@@ -6,6 +6,11 @@
 #include "fex.h"
 
 #define TEST_MEM_SIZE (1024 * 1024)
+#ifdef _WIN32
+#define TEST_SCRIPTS_DIR "..\\scripts"
+#else
+#define TEST_SCRIPTS_DIR "../scripts"
+#endif
 
 static int fail(const char *message) {
     fprintf(stderr, "%s\n", message);
@@ -304,6 +309,78 @@ int main(void) {
         }
     }
 
+    fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS,
+        FEX_BUILTINS_SYSTEM | FEX_BUILTINS_DATA);
+    status = fex_try_do_string(
+        ctx,
+        "let proc = runprocess(\"python\", [\"-c\", \"import os, pathlib, sys; data = sys.stdin.buffer.read(); sys.stdout.buffer.write(data.upper()); sys.stderr.buffer.write(os.getenv('FEX_TEST', 'missing').encode('ascii')); sys.stderr.buffer.write(b'@'); sys.stderr.buffer.write(pathlib.Path().resolve().name.encode('ascii')); raise SystemExit(5)\"], "
+            "makemap(\"stdin\", tobytes(\"abc\"), \"cwd\", \"" TEST_SCRIPTS_DIR "\", "
+            "\"env\", makemap(\"FEX_TEST\", \"env\")));\n"
+        "proc;\n",
+        &result,
+        &error
+    );
+    if (status != FEX_STATUS_OK) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runprocess to execute successfully");
+    }
+    if (fe_type(ctx, result) != FE_TMAP) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runprocess to return a map");
+    }
+    if (fe_tonumber(ctx, fe_map_get(ctx, result, fe_symbol(ctx, "code"))) != 5) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runprocess to preserve the exit code");
+    }
+    if (fe_map_get(ctx, result, fe_symbol(ctx, "ok")) != FE_FALSE) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runprocess ok to be false for a non-zero exit");
+    }
+    output = fe_map_get(ctx, result, fe_symbol(ctx, "stdout"));
+    if (fe_type(ctx, output) != FE_TBYTES || fe_byteslen(ctx, output) != 3) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runprocess stdout to be captured as bytes");
+    }
+    {
+        unsigned char captured_stdout[3];
+        memset(captured_stdout, 0, sizeof(captured_stdout));
+        if (fe_bytescopy(ctx, output, 0, captured_stdout, sizeof(captured_stdout)) != sizeof(captured_stdout)) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected runprocess stdout bytes to be readable");
+        }
+        if (memcmp(captured_stdout, "ABC", sizeof(captured_stdout)) != 0) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected runprocess stdout to reflect redirected stdin");
+        }
+    }
+    output = fe_map_get(ctx, result, fe_symbol(ctx, "stderr"));
+    if (fe_type(ctx, output) != FE_TBYTES || fe_byteslen(ctx, output) != 11) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runprocess stderr to be captured as bytes");
+    }
+    {
+        unsigned char captured_stderr[11];
+        memset(captured_stderr, 0, sizeof(captured_stderr));
+        if (fe_bytescopy(ctx, output, 0, captured_stderr, sizeof(captured_stderr)) != sizeof(captured_stderr)) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected runprocess stderr bytes to be readable");
+        }
+        if (memcmp(captured_stderr, "env@scripts", sizeof(captured_stderr)) != 0) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected runprocess stderr to reflect env and cwd overrides");
+        }
+    }
+
     status = fex_try_do_string(ctx, "41 + 1;", &result, &error);
     if (status != FEX_STATUS_OK || fe_tonumber(ctx, result) != 42) {
         fe_close(ctx);
@@ -315,5 +392,4 @@ int main(void) {
     free(memory);
     return 0;
 }
-
 

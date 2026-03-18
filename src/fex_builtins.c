@@ -37,6 +37,8 @@
 
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
+#include <windows.h>
+#include <io.h>
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +48,8 @@
 #include <time.h>
 #include <ctype.h>
 #ifndef _WIN32
+#include <unistd.h>
+#include <errno.h>
 #include <sys/wait.h>
 #endif
 
@@ -57,6 +61,36 @@ typedef struct {
     size_t len;
     size_t cap;
 } TextBuffer;
+
+typedef struct {
+    char **items;
+    int count;
+} CStringArray;
+
+typedef struct {
+    unsigned char *stdin_data;
+    size_t stdin_len;
+    char *cwd;
+    CStringArray env;
+    int use_env;
+} ProcessOptions;
+
+typedef struct {
+    int exit_code;
+    unsigned char *stdout_data;
+    size_t stdout_len;
+    unsigned char *stderr_data;
+    size_t stderr_len;
+} ProcessOutput;
+
+typedef struct {
+    char *path;
+#ifdef _WIN32
+    HANDLE handle;
+#else
+    int fd;
+#endif
+} TempRedirectFile;
 
 #define FEX_COMMAND_OUTPUT_MAX_BYTES (4u * 1024u * 1024u)
 
@@ -141,6 +175,100 @@ static void buf_free(TextBuffer *buf) {
     buf->data = NULL;
     buf->len = 0;
     buf->cap = 0;
+}
+
+static char* copy_cstr(const char *str) {
+    size_t len;
+    char *copy;
+
+    len = strlen(str);
+    copy = malloc(len + 1);
+    if (!copy) {
+        return NULL;
+    }
+    memcpy(copy, str, len + 1);
+    return copy;
+}
+
+static void free_cstring_array(CStringArray *array) {
+    int i;
+
+    if (!array->items) {
+        array->count = 0;
+        return;
+    }
+
+    for (i = 0; i < array->count; i++) {
+        free(array->items[i]);
+    }
+    free(array->items);
+    array->items = NULL;
+    array->count = 0;
+}
+
+static void free_cstring_items(char **items, int count) {
+    int i;
+
+    if (!items) {
+        return;
+    }
+
+    for (i = 0; i < count; i++) {
+        free(items[i]);
+    }
+    free(items);
+}
+
+static void free_process_options(ProcessOptions *options) {
+    free(options->stdin_data);
+    options->stdin_data = NULL;
+    options->stdin_len = 0;
+    free(options->cwd);
+    options->cwd = NULL;
+    free_cstring_array(&options->env);
+    options->use_env = 0;
+}
+
+static void free_process_output(ProcessOutput *output) {
+    free(output->stdout_data);
+    output->stdout_data = NULL;
+    output->stdout_len = 0;
+    free(output->stderr_data);
+    output->stderr_data = NULL;
+    output->stderr_len = 0;
+    output->exit_code = 0;
+}
+
+static void init_temp_redirect_file(TempRedirectFile *file) {
+    file->path = NULL;
+#ifdef _WIN32
+    file->handle = INVALID_HANDLE_VALUE;
+#else
+    file->fd = -1;
+#endif
+}
+
+static void close_temp_redirect_file(TempRedirectFile *file) {
+#ifdef _WIN32
+    if (file->handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(file->handle);
+        file->handle = INVALID_HANDLE_VALUE;
+    }
+#else
+    if (file->fd >= 0) {
+        close(file->fd);
+        file->fd = -1;
+    }
+#endif
+}
+
+static void destroy_temp_redirect_file(TempRedirectFile *file) {
+    close_temp_redirect_file(file);
+    if (file->path) {
+        remove(file->path);
+        free(file->path);
+        file->path = NULL;
+    }
 }
 
 static char* string_to_cstr(fe_Context *ctx, fe_Object *str_obj, const char *func_name) {
@@ -1857,6 +1985,699 @@ static fe_Object* builtin_write_json(fe_Context *ctx, fe_Object *args) {
     return fe_make_number(ctx, (fe_Number)written);
 }
 
+static int count_list_length(fe_Context *ctx, fe_Object *list,
+                             const char *func_name, const char *label) {
+    int count = 0;
+    fe_Object *node = list;
+    char msg[160];
+
+    while (!fe_isnil(ctx, node)) {
+        if (fe_type(ctx, node) != FE_TPAIR) {
+            sprintf(msg, "%s: %s must be a list", func_name, label);
+            fe_error(ctx, msg);
+            return -1;
+        }
+        count++;
+        node = fe_cdr(ctx, node);
+    }
+
+    return count;
+}
+
+static fe_Object* map_get_named_value(fe_Context *ctx, fe_Object *map,
+                                      const char *name, int *present) {
+    fe_Object *key = fe_symbol(ctx, name);
+
+    if (fe_map_has(ctx, map, key)) {
+        *present = 1;
+        return fe_map_get(ctx, map, key);
+    }
+
+    *present = 0;
+    return fe_nil(ctx);
+}
+
+static int object_to_input_buffer(fe_Context *ctx, fe_Object *obj,
+                                  const char *func_name,
+                                  unsigned char **out_data,
+                                  size_t *out_len) {
+    size_t len;
+    char *string_buffer;
+
+    if (fe_isnil(ctx, obj)) {
+        *out_data = NULL;
+        *out_len = 0;
+        return 1;
+    }
+
+    if (fe_type(ctx, obj) == FE_TBYTES) {
+        *out_data = bytes_to_buffer(ctx, obj, func_name, out_len);
+        return *out_data != NULL;
+    }
+
+    if (fe_type(ctx, obj) == FE_TSTRING) {
+        len = fe_strlen(ctx, obj);
+        string_buffer = string_to_cstr(ctx, obj, func_name);
+        if (!string_buffer) {
+            return 0;
+        }
+        *out_data = (unsigned char*)string_buffer;
+        *out_len = len;
+        return 1;
+    }
+
+    fe_error(ctx, "runprocess: stdin must be a string, bytes, or nil");
+    return 0;
+}
+
+static int collect_process_argv(fe_Context *ctx, fe_Object *exe_obj,
+                                fe_Object *args_obj, const char *func_name,
+                                CStringArray *argv_out) {
+    int extra_count;
+    fe_Object *node;
+    int index;
+    char **items;
+    char msg[160];
+
+    extra_count = count_list_length(ctx, args_obj, func_name, "args");
+    if (extra_count < 0) {
+        return 0;
+    }
+
+    items = calloc((size_t)extra_count + 2, sizeof(char*));
+    if (!items) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    items[0] = string_to_cstr(ctx, exe_obj, func_name);
+    if (!items[0]) {
+        free(items);
+        return 0;
+    }
+
+    node = args_obj;
+    index = 1;
+    while (!fe_isnil(ctx, node)) {
+        fe_Object *value = fe_car(ctx, node);
+        if (fe_type(ctx, value) != FE_TSTRING) {
+            free_cstring_items(items, index);
+            fe_error(ctx, "runprocess: args must contain only strings");
+            return 0;
+        }
+        items[index] = string_to_cstr(ctx, value, func_name);
+        if (!items[index]) {
+            free_cstring_items(items, index);
+            return 0;
+        }
+        index++;
+        node = fe_cdr(ctx, node);
+    }
+
+    argv_out->items = items;
+    argv_out->count = index;
+    return 1;
+}
+
+static int collect_process_env(fe_Context *ctx, fe_Object *env_obj,
+                               const char *func_name, CStringArray *env_out) {
+    fe_Object *keys;
+    int count;
+    fe_Object *node;
+    int index;
+    char **items;
+    char msg[160];
+
+    keys = fe_map_keys(ctx, env_obj);
+    count = count_list_length(ctx, keys, func_name, "env keys");
+    if (count < 0) {
+        return 0;
+    }
+
+    items = calloc((size_t)count + 1, sizeof(char*));
+    if (!items) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    node = keys;
+    index = 0;
+    while (!fe_isnil(ctx, node)) {
+        fe_Object *key_obj = fe_car(ctx, node);
+        fe_Object *value_obj = fe_map_get(ctx, env_obj, key_obj);
+        char *key;
+        char *value;
+        size_t key_len;
+        size_t value_len;
+
+        if (fe_type(ctx, value_obj) != FE_TSTRING) {
+            free_cstring_items(items, index);
+            fe_error(ctx, "runprocess: env values must be strings");
+            return 0;
+        }
+
+        key = string_to_cstr(ctx, key_obj, func_name);
+        if (!key) {
+            free_cstring_items(items, index);
+            return 0;
+        }
+        value = string_to_cstr(ctx, value_obj, func_name);
+        if (!value) {
+            free(key);
+            free_cstring_items(items, index);
+            return 0;
+        }
+
+        key_len = strlen(key);
+        value_len = strlen(value);
+        items[index] = malloc(key_len + value_len + 2);
+        if (!items[index]) {
+            free(key);
+            free(value);
+            free_cstring_items(items, index);
+            sprintf(msg, "%s: out of memory", func_name);
+            fe_error(ctx, msg);
+            return 0;
+        }
+        memcpy(items[index], key, key_len);
+        items[index][key_len] = '=';
+        memcpy(items[index] + key_len + 1, value, value_len + 1);
+        free(key);
+        free(value);
+
+        index++;
+        node = fe_cdr(ctx, node);
+    }
+
+    env_out->items = items;
+    env_out->count = count;
+    return 1;
+}
+
+static int parse_process_options(fe_Context *ctx, fe_Object *opts_obj,
+                                 const char *func_name,
+                                 ProcessOptions *options) {
+    int present;
+    fe_Object *value;
+
+    memset(options, 0, sizeof(*options));
+
+    if (fe_isnil(ctx, opts_obj)) {
+        return 1;
+    }
+
+    if (fe_type(ctx, opts_obj) != FE_TMAP) {
+        fe_error(ctx, "runprocess: options must be a map");
+        return 0;
+    }
+
+    value = map_get_named_value(ctx, opts_obj, "stdin", &present);
+    if (present &&
+        !object_to_input_buffer(ctx, value, func_name,
+                                &options->stdin_data, &options->stdin_len)) {
+        return 0;
+    }
+
+    value = map_get_named_value(ctx, opts_obj, "cwd", &present);
+    if (present && !fe_isnil(ctx, value)) {
+        if (fe_type(ctx, value) != FE_TSTRING) {
+            fe_error(ctx, "runprocess: cwd must be a string");
+            return 0;
+        }
+        options->cwd = string_to_cstr(ctx, value, func_name);
+        if (!options->cwd) {
+            return 0;
+        }
+    }
+
+    value = map_get_named_value(ctx, opts_obj, "env", &present);
+    if (present && !fe_isnil(ctx, value)) {
+        if (fe_type(ctx, value) != FE_TMAP) {
+            fe_error(ctx, "runprocess: env must be a map");
+            return 0;
+        }
+        if (!collect_process_env(ctx, value, func_name, &options->env)) {
+            return 0;
+        }
+        options->use_env = 1;
+    }
+
+    return 1;
+}
+
+static int create_temp_redirect_file(fe_Context *ctx, TempRedirectFile *file,
+                                     const char *func_name) {
+    char msg[160];
+
+#ifdef _WIN32
+    char temp_dir[MAX_PATH + 1];
+    char temp_name[MAX_PATH + 1];
+    DWORD temp_dir_len;
+    SECURITY_ATTRIBUTES sa;
+
+    temp_dir_len = GetTempPathA(MAX_PATH, temp_dir);
+    if (temp_dir_len == 0 || temp_dir_len > MAX_PATH) {
+        sprintf(msg, "%s: could not create temp file", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+    if (GetTempFileNameA(temp_dir, "fex", 0, temp_name) == 0) {
+        sprintf(msg, "%s: could not create temp file", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    file->path = copy_cstr(temp_name);
+    if (!file->path) {
+        remove(temp_name);
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    file->handle = CreateFileA(
+        temp_name,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        &sa,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_TEMPORARY,
+        NULL
+    );
+    if (file->handle == INVALID_HANDLE_VALUE) {
+        remove(temp_name);
+        free(file->path);
+        file->path = NULL;
+        sprintf(msg, "%s: could not create temp file", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#else
+    const char *tmp_dir;
+    const char *name = "fexprocXXXXXX";
+    size_t tmp_dir_len;
+    int need_sep;
+    char *path;
+
+    tmp_dir = getenv("TMPDIR");
+    if (!tmp_dir || !*tmp_dir) {
+        tmp_dir = "/tmp";
+    }
+
+    tmp_dir_len = strlen(tmp_dir);
+    need_sep = (tmp_dir_len > 0 && tmp_dir[tmp_dir_len - 1] != '/');
+    path = malloc(tmp_dir_len + (size_t)need_sep + strlen(name) + 1);
+    if (!path) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+    memcpy(path, tmp_dir, tmp_dir_len);
+    if (need_sep) {
+        path[tmp_dir_len++] = '/';
+    }
+    memcpy(path + tmp_dir_len, name, strlen(name) + 1);
+
+    file->fd = mkstemp(path);
+    if (file->fd < 0) {
+        free(path);
+        sprintf(msg, "%s: could not create temp file", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+    file->path = path;
+#endif
+
+    return 1;
+}
+
+static int write_temp_redirect_data(fe_Context *ctx, TempRedirectFile *file,
+                                    const unsigned char *data, size_t len,
+                                    const char *func_name) {
+    char msg[160];
+    size_t offset = 0;
+
+    while (offset < len) {
+#ifdef _WIN32
+        DWORD written = 0;
+        DWORD chunk = (DWORD)((len - offset > 0x7fffffffU) ? 0x7fffffffU : (DWORD)(len - offset));
+        if (!WriteFile(file->handle, data + offset, chunk, &written, NULL) || written == 0) {
+            sprintf(msg, "%s: could not write stdin", func_name);
+            fe_error(ctx, msg);
+            return 0;
+        }
+        offset += (size_t)written;
+#else
+        ssize_t written = write(file->fd, data + offset, len - offset);
+        if (written <= 0) {
+            sprintf(msg, "%s: could not write stdin", func_name);
+            fe_error(ctx, msg);
+            return 0;
+        }
+        offset += (size_t)written;
+#endif
+    }
+
+#ifdef _WIN32
+    if (SetFilePointer(file->handle, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER &&
+        GetLastError() != NO_ERROR) {
+        sprintf(msg, "%s: could not rewind stdin", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#else
+    if (lseek(file->fd, 0, SEEK_SET) < 0) {
+        sprintf(msg, "%s: could not rewind stdin", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+#endif
+
+    return 1;
+}
+
+#ifdef _WIN32
+static int buf_append_repeat(TextBuffer *buf, char chr, size_t count) {
+    size_t i;
+
+    for (i = 0; i < count; i++) {
+        if (!buf_append_char(buf, chr)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int needs_windows_quotes(const char *arg) {
+    const char *p = arg;
+
+    if (*arg == '\0') {
+        return 1;
+    }
+
+    while (*p) {
+        if (*p == ' ' || *p == '\t' || *p == '"') {
+            return 1;
+        }
+        p++;
+    }
+
+    return 0;
+}
+
+static int append_windows_command_arg(TextBuffer *buf, const char *arg) {
+    const char *p = arg;
+    size_t backslashes = 0;
+
+    if (!needs_windows_quotes(arg)) {
+        return buf_append_str(buf, arg);
+    }
+
+    if (!buf_append_char(buf, '"')) {
+        return 0;
+    }
+
+    while (*p) {
+        if (*p == '\\') {
+            backslashes++;
+        } else if (*p == '"') {
+            if (!buf_append_repeat(buf, '\\', backslashes * 2 + 1) ||
+                !buf_append_char(buf, '"')) {
+                return 0;
+            }
+            backslashes = 0;
+        } else {
+            if (!buf_append_repeat(buf, '\\', backslashes) ||
+                !buf_append_char(buf, *p)) {
+                return 0;
+            }
+            backslashes = 0;
+        }
+        p++;
+    }
+
+    if (!buf_append_repeat(buf, '\\', backslashes * 2) ||
+        !buf_append_char(buf, '"')) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static char* build_windows_command_line(fe_Context *ctx, CStringArray *argv,
+                                        const char *func_name) {
+    TextBuffer buf;
+    int i;
+    char msg[160];
+
+    buf.data = NULL;
+    buf.len = 0;
+    buf.cap = 0;
+
+    for (i = 0; i < argv->count; i++) {
+        if (i > 0 && !buf_append_char(&buf, ' ')) {
+            buf_free(&buf);
+            sprintf(msg, "%s: out of memory", func_name);
+            fe_error(ctx, msg);
+            return NULL;
+        }
+        if (!append_windows_command_arg(&buf, argv->items[i])) {
+            buf_free(&buf);
+            sprintf(msg, "%s: out of memory", func_name);
+            fe_error(ctx, msg);
+            return NULL;
+        }
+    }
+
+    if (!buf.data) {
+        buf.data = copy_cstr("");
+        if (!buf.data) {
+            sprintf(msg, "%s: out of memory", func_name);
+            fe_error(ctx, msg);
+            return NULL;
+        }
+    }
+
+    (void)ctx;
+    return buf.data;
+}
+
+static char* build_windows_environment_block(fe_Context *ctx, CStringArray *env,
+                                             const char *func_name) {
+    size_t total = 2;
+    size_t offset = 0;
+    int i;
+    char *block;
+    char msg[160];
+
+    for (i = 0; i < env->count; i++) {
+        total += strlen(env->items[i]) + 1;
+    }
+
+    block = malloc(total);
+    if (!block) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+
+    for (i = 0; i < env->count; i++) {
+        size_t item_len = strlen(env->items[i]) + 1;
+        memcpy(block + offset, env->items[i], item_len);
+        offset += item_len;
+    }
+    block[offset++] = '\0';
+    block[offset] = '\0';
+
+    (void)ctx;
+    return block;
+}
+#else
+extern char **environ;
+#endif
+
+static int read_redirect_output(fe_Context *ctx, TempRedirectFile *file,
+                                const char *func_name,
+                                unsigned char **out_data, size_t *out_len) {
+    char *buffer;
+
+    close_temp_redirect_file(file);
+    buffer = read_file_dynamic(ctx, file->path, FEX_COMMAND_OUTPUT_MAX_BYTES,
+                               out_len, func_name);
+    if (!buffer) {
+        return 0;
+    }
+
+    *out_data = (unsigned char*)buffer;
+    return 1;
+}
+
+static int run_process_native(fe_Context *ctx, CStringArray *argv,
+                              ProcessOptions *options, ProcessOutput *output,
+                              const char *func_name) {
+    TempRedirectFile stdin_file;
+    TempRedirectFile stdout_file;
+    TempRedirectFile stderr_file;
+    int ok = 0;
+
+    init_temp_redirect_file(&stdin_file);
+    init_temp_redirect_file(&stdout_file);
+    init_temp_redirect_file(&stderr_file);
+    memset(output, 0, sizeof(*output));
+
+    if (!create_temp_redirect_file(ctx, &stdin_file, func_name) ||
+        !create_temp_redirect_file(ctx, &stdout_file, func_name) ||
+        !create_temp_redirect_file(ctx, &stderr_file, func_name)) {
+        goto cleanup;
+    }
+
+    if (!write_temp_redirect_data(ctx, &stdin_file,
+                                  options->stdin_data ? options->stdin_data : (const unsigned char*)"",
+                                  options->stdin_len, func_name)) {
+        goto cleanup;
+    }
+
+#ifdef _WIN32
+    {
+        STARTUPINFOA startup_info;
+        PROCESS_INFORMATION process_info;
+        char *command_line = NULL;
+        char *environment = NULL;
+        DWORD wait_result;
+        DWORD raw_exit_code = 0;
+
+        ZeroMemory(&startup_info, sizeof(startup_info));
+        ZeroMemory(&process_info, sizeof(process_info));
+
+        command_line = build_windows_command_line(ctx, argv, func_name);
+        if (!command_line) {
+            goto cleanup;
+        }
+        if (options->use_env) {
+            environment = build_windows_environment_block(ctx, &options->env, func_name);
+            if (!environment) {
+                free(command_line);
+                goto cleanup;
+            }
+        }
+
+        startup_info.cb = sizeof(startup_info);
+        startup_info.dwFlags = STARTF_USESTDHANDLES;
+        startup_info.hStdInput = stdin_file.handle;
+        startup_info.hStdOutput = stdout_file.handle;
+        startup_info.hStdError = stderr_file.handle;
+
+        if (!CreateProcessA(NULL, command_line, NULL, NULL, TRUE, 0,
+                            environment, options->cwd, &startup_info, &process_info)) {
+            free(command_line);
+            free(environment);
+            fe_error(ctx, "runprocess: could not start process");
+            goto cleanup;
+        }
+
+        free(command_line);
+        free(environment);
+        CloseHandle(process_info.hThread);
+        close_temp_redirect_file(&stdin_file);
+        close_temp_redirect_file(&stdout_file);
+        close_temp_redirect_file(&stderr_file);
+
+        wait_result = WaitForSingleObject(process_info.hProcess, INFINITE);
+        if (wait_result != WAIT_OBJECT_0 ||
+            !GetExitCodeProcess(process_info.hProcess, &raw_exit_code)) {
+            CloseHandle(process_info.hProcess);
+            fe_error(ctx, "runprocess: could not wait for process");
+            goto cleanup;
+        }
+        CloseHandle(process_info.hProcess);
+        output->exit_code = (int)raw_exit_code;
+    }
+#else
+    {
+        pid_t pid;
+        int status = 0;
+
+        pid = fork();
+        if (pid < 0) {
+            fe_error(ctx, "runprocess: could not start process");
+            goto cleanup;
+        }
+
+        if (pid == 0) {
+            if (options->cwd && chdir(options->cwd) != 0) {
+                _exit(127);
+            }
+            if (dup2(stdin_file.fd, 0) < 0 ||
+                dup2(stdout_file.fd, 1) < 0 ||
+                dup2(stderr_file.fd, 2) < 0) {
+                _exit(127);
+            }
+
+            close(stdin_file.fd);
+            close(stdout_file.fd);
+            close(stderr_file.fd);
+
+            if (options->use_env) {
+                environ = options->env.items;
+            }
+            execvp(argv->items[0], argv->items);
+            _exit(127);
+        }
+
+        close_temp_redirect_file(&stdin_file);
+        close_temp_redirect_file(&stdout_file);
+        close_temp_redirect_file(&stderr_file);
+
+        if (waitpid(pid, &status, 0) < 0) {
+            fe_error(ctx, "runprocess: could not wait for process");
+            goto cleanup;
+        }
+
+        output->exit_code = decode_process_exit_code(status);
+    }
+#endif
+
+    if (!read_redirect_output(ctx, &stdout_file, func_name,
+                              &output->stdout_data, &output->stdout_len) ||
+        !read_redirect_output(ctx, &stderr_file, func_name,
+                              &output->stderr_data, &output->stderr_len)) {
+        goto cleanup;
+    }
+
+    ok = 1;
+
+cleanup:
+    destroy_temp_redirect_file(&stdin_file);
+    destroy_temp_redirect_file(&stdout_file);
+    destroy_temp_redirect_file(&stderr_file);
+    if (!ok) {
+        free_process_output(output);
+    }
+    return ok;
+}
+
+static fe_Object* build_process_result(fe_Context *ctx,
+                                       const ProcessOutput *output) {
+    fe_Object *result = fe_map(ctx);
+
+    fe_map_set(ctx, result, fe_symbol(ctx, "code"),
+               fe_make_number(ctx, (fe_Number)output->exit_code));
+    fe_map_set(ctx, result, fe_symbol(ctx, "ok"),
+               fe_bool(ctx, output->exit_code == 0));
+    fe_map_set(ctx, result, fe_symbol(ctx, "stdout"),
+               fe_bytes(ctx, output->stdout_data ? output->stdout_data : "",
+                        output->stdout_len));
+    fe_map_set(ctx, result, fe_symbol(ctx, "stderr"),
+               fe_bytes(ctx, output->stderr_data ? output->stderr_data : "",
+                        output->stderr_len));
+    return result;
+}
+
 /*
 ================================================================================
 |                             SYSTEM FUNCTIONS                                |
@@ -1952,6 +2773,48 @@ static fe_Object* builtin_run_command(fe_Context *ctx, fe_Object *args) {
     fe_map_set(ctx, result, fe_symbol(ctx, "output"),
                fe_bytes(ctx, output.data ? output.data : "", output.len));
     buf_free(&output);
+    return result;
+}
+
+static fe_Object* builtin_run_process(fe_Context *ctx, fe_Object *args) {
+    fe_Object *exe_obj;
+    fe_Object *argv_obj = fe_nil(ctx);
+    fe_Object *opts_obj = fe_nil(ctx);
+    CStringArray argv;
+    ProcessOptions options;
+    ProcessOutput output;
+    fe_Object *result;
+
+    memset(&argv, 0, sizeof(argv));
+    memset(&options, 0, sizeof(options));
+    memset(&output, 0, sizeof(output));
+
+    FEX_CHECK_ARGS(ctx, args, 1, "runprocess");
+    exe_obj = fe_nextarg(ctx, &args);
+    if (!fe_isnil(ctx, args)) {
+        argv_obj = fe_nextarg(ctx, &args);
+    }
+    if (!fe_isnil(ctx, args)) {
+        opts_obj = fe_nextarg(ctx, &args);
+    }
+    if (!fe_isnil(ctx, args)) {
+        fe_error(ctx, "runprocess: too many arguments");
+        return fe_nil(ctx);
+    }
+
+    if (!collect_process_argv(ctx, exe_obj, argv_obj, "runprocess", &argv) ||
+        !parse_process_options(ctx, opts_obj, "runprocess", &options) ||
+        !run_process_native(ctx, &argv, &options, &output, "runprocess")) {
+        free_cstring_array(&argv);
+        free_process_options(&options);
+        free_process_output(&output);
+        return fe_nil(ctx);
+    }
+
+    result = build_process_result(ctx, &output);
+    free_cstring_array(&argv);
+    free_process_options(&options);
+    free_process_output(&output);
     return result;
 }
 
@@ -2160,6 +3023,7 @@ static void register_system_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "exit"), fe_cfunc(ctx, builtin_exit));
     fe_set(ctx, fe_symbol(ctx, "system"), fe_cfunc(ctx, builtin_system));
     fe_set(ctx, fe_symbol(ctx, "runcommand"), fe_cfunc(ctx, builtin_run_command));
+    fe_set(ctx, fe_symbol(ctx, "runprocess"), fe_cfunc(ctx, builtin_run_process));
     
     fe_restoregc(ctx, gc_save);
 }

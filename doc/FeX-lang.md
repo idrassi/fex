@@ -142,7 +142,7 @@ The base FeX environment always includes:
 
 Pair selectors such as `.head` and `.tail`, and the `::` operator, are syntax sugar over these primitives rather than separate runtime functions.
 
-Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `tobytes`, `readbytes`, and `runcommand` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe`, `--builtin string,data`, or `--builtin system`. For runaway-script protection, the CLI also supports `--max-steps N` and `--timeout-ms N`. In embedded use, call:
+Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `tobytes`, `readbytes`, `runcommand`, and `runprocess` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe`, `--builtin string,data`, or `--builtin system`. For runaway-script protection, the CLI also supports `--max-steps N` and `--timeout-ms N`. In embedded use, call:
 
 ```c
 fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
@@ -232,6 +232,29 @@ println(proc.output);
 ```
 
 `runcommand()` is part of the `system` builtin group. It returns a map with `code`, `ok`, and `output`, where `output` is merged stdout/stderr stored as `bytes`. Captured output is currently capped at 4 MiB.
+
+### Structured Process Execution
+
+```fex
+let proc = runprocess(
+  "python",
+  ["-c", "import sys; sys.stdout.write('ok'); raise SystemExit(2)"],
+  makemap("env", makemap("MODE", "test"))
+);
+
+println(proc.code);
+println(proc.ok);
+println(proc.stdout);
+println(proc.stderr);
+```
+
+`runprocess()` is also part of the `system` builtin group. It launches the given executable directly rather than routing through a shell. The `args` parameter is a list of strings or `nil`, and the optional `opts` map supports:
+
+- `stdin`: string, `bytes`, or `nil`
+- `cwd`: working-directory string
+- `env`: string-valued environment map
+
+The result is a map with `code`, `ok`, `stdout`, and `stderr`, where `stdout` and `stderr` are captured as `bytes`. Each stream is currently capped at 4 MiB.
 
 ### REPL Workflow
 

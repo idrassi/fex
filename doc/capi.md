@@ -74,7 +74,7 @@ void fex_init_with_config(fe_Context *ctx, FexConfig config);
 Like `fex_init()`, but enables optional features through flags:
 
 - `FEX_CONFIG_ENABLE_SPANS` enables source span tracking.
-- `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` registers the optional extended builtins set, including helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, and `runcommand`.
+- `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` registers the optional extended builtins set, including helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `runcommand`, and `runprocess`.
 
 ### fex_init_with_builtins()
 
@@ -287,14 +287,24 @@ At the language level, extended builtins expose helpers such as `tobytes`, `make
 
 ### System Helpers
 
-The `FEX_BUILTINS_SYSTEM` category includes `time`, `exit`, `system`, and `runcommand`.
+The `FEX_BUILTINS_SYSTEM` category includes `time`, `exit`, `system`, `runcommand`, and `runprocess`.
 
 - `system(command)` executes a shell command and returns its exit code.
 - `runcommand(command)` executes a shell command and returns a map with `code`, `ok`, and `output`.
-- `output` is a `bytes` value containing merged stdout/stderr.
-- Captured output is currently capped at 4 MiB. Larger output raises a runtime error.
+- `runprocess(exe, args, opts)` launches `exe` directly, without an implicit shell, and returns a map with `code`, `ok`, `stdout`, and `stderr`.
+- `runcommand().output`, `runprocess().stdout`, and `runprocess().stderr` are `bytes` values.
+- Captured output is currently capped at 4 MiB per stream. Larger output raises a runtime error.
 
-At the C API level, the result from `runcommand()` is just an ordinary FeX map and bytes object, so hosts can inspect it with `fe_map_get()`, `fe_tonumber()`, `fe_byteslen()`, and `fe_bytescopy()`.
+For `runprocess()`:
+
+- `exe` is a string executable path or program name.
+- `args` is a list of strings or `nil`.
+- `opts` is a map. Supported keys are `stdin`, `cwd`, and `env`.
+- `opts.stdin` may be a string, `bytes`, or `nil`.
+- `opts.cwd` must be a string when provided.
+- `opts.env` must be a string-valued map when provided. An empty map gives the child an empty environment; omitting `env` inherits the current process environment.
+
+At the C API level, the results from `runcommand()` and `runprocess()` are ordinary FeX maps and bytes objects, so hosts can inspect them with `fe_map_get()`, `fe_tonumber()`, `fe_byteslen()`, and `fe_bytescopy()`.
 
 ### Maps
 
@@ -448,5 +458,5 @@ The interpreter is re-entrant on a single context: a host `fe_CFunc` may call ba
 - Forgetting GC protection for temporary objects across further allocations.
 - Returning `NULL` from a `fe_CFunc`.
 - Passing a compiled AST or other `fe_Object *` from one context into another.
-- Assuming optional helpers such as `sqrt`, `map`, `parsejson`, or `runcommand` are always present. They require `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS`, `fex_init_with_builtins(...)`, `--builtins`, or `--builtin NAME`.
+- Assuming optional helpers such as `sqrt`, `map`, `parsejson`, `runcommand`, or `runprocess` are always present. They require `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS`, `fex_init_with_builtins(...)`, `--builtins`, or `--builtin NAME`.
 - Using `fe_cdr_ptr()` without first ensuring the target is non-nil.
