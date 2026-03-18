@@ -654,9 +654,14 @@ static void string_array_clear(fe_Context *ctx, char ***items, int *count, int *
   *capacity = 0;
 }
 
-static int string_array_contains(char **items, int count, const char *value) {
+static int string_array_contains(fe_Context *ctx, char **items, int count, const char *value) {
   int i;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
   for (i = 0; i < count; i++) {
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
     if (strcmp(items[i], value) == 0) return 1;
   }
   return 0;
@@ -673,10 +678,15 @@ static int is_path_separator(char chr) {
   return chr == '/' || chr == '\\';
 }
 
-static void normalize_path_chars(char *path) {
+static void normalize_path_chars(fe_Context *ctx, char *path) {
   char *p;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
   if (!path) return;
   for (p = path; *p; p++) {
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
     if (is_path_separator(*p)) {
       *p = '/';
 #ifdef _WIN32
@@ -690,7 +700,7 @@ static void normalize_path_chars(char *path) {
 static char* dup_normalized_path(fe_Context *ctx, const char *path) {
   char *copy = dup_cstring(ctx, path);
   if (!copy) return NULL;
-  normalize_path_chars(copy);
+  normalize_path_chars(ctx, copy);
   return copy;
 }
 
@@ -708,7 +718,7 @@ static char* normalize_existing_path(fe_Context *ctx, const char *path) {
 #endif
   copy = dup_cstring(ctx, resolved);
   if (!copy) return NULL;
-  normalize_path_chars(copy);
+  normalize_path_chars(ctx, copy);
   return copy;
 }
 
@@ -717,9 +727,14 @@ static char* path_dirname_copy(fe_Context *ctx, const char *path) {
   const char *p;
   size_t len;
   char *dir;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
 
   if (!path || !*path) return dup_cstring(ctx, ".");
   for (p = path; *p; p++) {
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
     if (is_path_separator(*p)) last_sep = p;
   }
   if (!last_sep) return dup_cstring(ctx, ".");
@@ -918,6 +933,7 @@ static char* resolve_module_file(fe_Context *ctx, const char *module_name,
   char **searched = NULL;
   int searched_count = 0;
   int searched_capacity = 0;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
 
   if (searched_paths) *searched_paths = NULL;
 
@@ -933,6 +949,10 @@ static char* resolve_module_file(fe_Context *ctx, const char *module_name,
   }
 
   for (i = 0; i < ctx->import_path_count; i++) {
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
     status = try_resolve_module_under_base(ctx, ctx->import_paths[i], module_name,
                                            searched_paths ? &searched : NULL,
                                            &searched_count, &searched_capacity,
@@ -1380,6 +1400,7 @@ static fe_Object* normalize_map_key(fe_Context *ctx, fe_Object *key) {
 
 static unsigned long hash_string_obj(fe_Context *ctx, fe_Object *obj) {
   unsigned long hash = 2166136261u;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
 #ifdef FE_OPT_NO_MALLOC_STRINGS
   size_t remaining = FE_STR_LEN(obj);
   uint32_t offset = obj->cdr.u32;
@@ -1388,6 +1409,10 @@ static unsigned long hash_string_obj(fe_Context *ctx, fe_Object *obj) {
     size_t to_hash = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
     size_t i;
     for (i = 0; i < to_hash; i++) {
+      const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+      if (abort_msg != NULL) {
+        fe_error(ctx, abort_msg);
+      }
       hash ^= (unsigned char)slab->data[i];
       hash *= 16777619u;
     }
@@ -1399,6 +1424,10 @@ static unsigned long hash_string_obj(fe_Context *ctx, fe_Object *obj) {
   size_t i;
   size_t len = FE_STR_LEN(obj);
   for (i = 0; i < len; i++) {
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
     hash ^= p[i];
     hash *= 16777619u;
   }
@@ -1434,6 +1463,7 @@ static fe_Map* map_alloc(fe_Context *ctx, int capacity) {
 static int map_resize(fe_Context *ctx, fe_Map *map, int capacity) {
   fe_Map *grown;
   int i;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
 
   grown = map_alloc(ctx, capacity);
   if (!grown) {
@@ -1443,6 +1473,10 @@ static int map_resize(fe_Context *ctx, fe_Map *map, int capacity) {
   for (i = 0; i < map->capacity; i++) {
     int found;
     int slot;
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
     if (map->states[i] != MAP_USED) {
       continue;
     }
@@ -1494,6 +1528,7 @@ static int map_find_slot(fe_Context *ctx, fe_Map *map, fe_Object *key, int *foun
   int index;
   int first_tombstone = -1;
   int steps;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
 
   *found = 0;
   if (map->capacity <= 0) {
@@ -1505,6 +1540,10 @@ static int map_find_slot(fe_Context *ctx, fe_Map *map, fe_Object *key, int *foun
 
   for (steps = 0; steps < map->capacity; steps++) {
     int slot = (index + steps) % map->capacity;
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
     if (map->states[slot] == MAP_EMPTY) {
       return (first_tombstone >= 0) ? first_tombstone : slot;
     }
@@ -1629,9 +1668,14 @@ fe_Object* fe_map_keys(fe_Context *ctx, fe_Object *map_obj) {
   fe_Map *map;
   fe_Object *result = &nil;
   int i;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
   checktype(ctx, map_obj, FE_TMAP);
   map = mapdata(map_obj);
   for (i = map->capacity - 1; i >= 0; i--) {
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
     if (map->states[i] == MAP_USED) {
       result = fe_cons(ctx, map->keys[i], result);
     }
@@ -1804,8 +1848,13 @@ fe_Object* fe_bytes_raw(fe_Context *ctx, size_t len, unsigned char fill_byte)
 
 fe_Object* fe_symbol(fe_Context *ctx, const char *name) {
   fe_Object *obj;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
   /* try to find in symlist */
   for (obj = ctx->symlist; !isnil(obj); obj = cdr(obj)) {
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      fe_error(ctx, abort_msg);
+    }
     if (streq(ctx, car(cdr(car(obj))), name)) {
       return car(obj);
     }
@@ -2479,12 +2528,12 @@ static fe_Object* import_module(fe_Context *ctx, fe_Object *sym) {
     fe_error(ctx, error_buf);
   }
 
-  if (string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, module_path)) {
+  if (string_array_contains(ctx, ctx->loaded_modules, ctx->loaded_module_count, module_path)) {
     tracked_free(ctx, module_path);
     return cdr(getbound(sym, &nil));
   }
 
-  if (string_array_contains(ctx->loading_modules, ctx->loading_module_count, module_path)) {
+  if (string_array_contains(ctx, ctx->loading_modules, ctx->loading_module_count, module_path)) {
     tracked_free(ctx, module_path);
     sprintf(error_buf, "cyclic import detected for module '%s'", module_name);
     fe_error(ctx, error_buf);
@@ -2505,7 +2554,7 @@ static fe_Object* import_module(fe_Context *ctx, fe_Object *sym) {
   }
 
   string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
-  if (!string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, module_path)) {
+  if (!string_array_contains(ctx, ctx->loaded_modules, ctx->loaded_module_count, module_path)) {
     if (!string_array_push_owned(ctx, &ctx->loaded_modules, &ctx->loaded_module_count,
                                  &ctx->loaded_module_capacity, module_path)) {
       tracked_free(ctx, module_path);

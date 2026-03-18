@@ -104,6 +104,31 @@ static fe_Object* make_number_list(fe_Context *ctx, int count) {
     return head;
 }
 
+static fe_Object* make_string_key_map(fe_Context *ctx, int count) {
+    fe_Object *map = fe_map(ctx);
+    int gc_save = fe_savegc(ctx);
+    int i;
+
+    fe_pushgc(ctx, map);
+    for (i = 0; i < count; i++) {
+        char key_buffer[32];
+        fe_Object *key;
+        fe_Object *value;
+
+        snprintf(key_buffer, sizeof(key_buffer), "key_%05d", i);
+        key = fe_string(ctx, key_buffer, strlen(key_buffer));
+        fe_pushgc(ctx, key);
+        value = fe_make_number(ctx, (fe_Number)i);
+        fe_pushgc(ctx, value);
+        fe_map_set(ctx, map, key, value);
+        fe_restoregc(ctx, gc_save);
+        fe_pushgc(ctx, map);
+    }
+
+    fe_restoregc(ctx, gc_save);
+    return map;
+}
+
 static char* make_large_parsejson_source(size_t item_count) {
     const char *prefix = "parsejson(\"[";
     const char *suffix = "]\");\n";
@@ -592,6 +617,104 @@ int main(void) {
             fe_close(ctx);
             free(memory);
             return fail("expected parsejson interrupt handler to run");
+        }
+    }
+
+    {
+        void *map_memory = malloc(TEST_MEM_SIZE);
+        fe_Context *map_ctx;
+        fe_Object *bigmap;
+        fe_ErrorFn previous_error;
+        ReadTryScope direct_try;
+        int interrupt_calls = 0;
+
+        if (!map_memory) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to allocate mapkeys interrupt context");
+        }
+
+        map_ctx = fe_open(map_memory, TEST_MEM_SIZE);
+        if (!map_ctx) {
+            free(map_memory);
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to open mapkeys interrupt context");
+        }
+
+        fex_init_with_config(map_ctx, FEX_CONFIG_ENABLE_SPANS);
+        bigmap = make_string_key_map(map_ctx, 4096);
+        previous_error = fe_handlers(map_ctx)->error;
+        fe_handlers(map_ctx)->error = read_try_error_handler;
+        g_read_try_scope = &direct_try;
+        direct_try.message[0] = '\0';
+        fe_set_interrupt_handler(map_ctx, interrupt_once, &interrupt_calls, 1);
+
+        if (setjmp(direct_try.env) == 0) {
+            (void)fe_map_keys(map_ctx, bigmap);
+            g_read_try_scope = NULL;
+            fe_handlers(map_ctx)->error = previous_error;
+            fe_set_interrupt_handler(map_ctx, NULL, NULL, 0);
+            fe_close(map_ctx);
+            free(map_memory);
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_map_keys to honor interrupt polling");
+        }
+
+        g_read_try_scope = NULL;
+        fe_handlers(map_ctx)->error = previous_error;
+        fe_set_interrupt_handler(map_ctx, NULL, NULL, 0);
+        if (strstr(direct_try.message, "execution interrupted") == NULL) {
+            fe_close(map_ctx);
+            free(map_memory);
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_map_keys interrupt message");
+        }
+        if (interrupt_calls < 1) {
+            fe_close(map_ctx);
+            free(map_memory);
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_map_keys interrupt handler to run");
+        }
+        fe_close(map_ctx);
+        free(map_memory);
+    }
+
+    {
+        fe_ErrorFn previous_error = fe_handlers(ctx)->error;
+        ReadTryScope direct_try;
+        int interrupt_calls = 0;
+
+        fe_handlers(ctx)->error = read_try_error_handler;
+        g_read_try_scope = &direct_try;
+        direct_try.message[0] = '\0';
+        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 1);
+
+        if (setjmp(direct_try.env) == 0) {
+            (void)fe_symbol(ctx, "sym_interrupt_target");
+            g_read_try_scope = NULL;
+            fe_handlers(ctx)->error = previous_error;
+            fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_symbol to honor interrupt polling");
+        }
+
+        g_read_try_scope = NULL;
+        fe_handlers(ctx)->error = previous_error;
+        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+        if (strstr(direct_try.message, "execution interrupted") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_symbol interrupt message");
+        }
+        if (interrupt_calls < 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fe_symbol interrupt handler to run");
         }
     }
 
