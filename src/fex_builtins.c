@@ -48,8 +48,10 @@
 #include <time.h>
 #include <ctype.h>
 #ifndef _WIN32
+#include <dirent.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #endif
 
@@ -412,6 +414,219 @@ static char* build_merged_command(fe_Context *ctx, const char *command, const ch
     memcpy(merged + strlen(prefix), command, command_len);
     memcpy(merged + strlen(prefix) + command_len, suffix, strlen(suffix) + 1);
     return merged;
+}
+
+static int cstring_array_push_copy(CStringArray *array, const char *value) {
+    char **new_items;
+    char *copy;
+
+    copy = copy_cstr(value);
+    if (!copy) {
+        return 0;
+    }
+
+    new_items = realloc(array->items, sizeof(*array->items) * (size_t)(array->count + 1));
+    if (!new_items) {
+        free(copy);
+        return 0;
+    }
+
+    array->items = new_items;
+    array->items[array->count++] = copy;
+    return 1;
+}
+
+static int compare_cstring_items(const void *lhs, const void *rhs) {
+    const char *left = *(const char* const*)lhs;
+    const char *right = *(const char* const*)rhs;
+    return strcmp(left, right);
+}
+
+static void cstring_array_sort(CStringArray *array) {
+    if (array->count > 1) {
+        qsort(array->items, (size_t)array->count, sizeof(*array->items),
+              compare_cstring_items);
+    }
+}
+
+static fe_Object* cstring_array_to_list(fe_Context *ctx, const CStringArray *array) {
+    fe_Object **items;
+    fe_Object *result;
+    int i;
+    int gc_save;
+
+    if (array->count == 0) {
+        return fe_nil(ctx);
+    }
+
+    items = malloc(sizeof(*items) * (size_t)array->count);
+    if (!items) {
+        fe_error(ctx, "listdir: out of memory");
+        return fe_nil(ctx);
+    }
+
+    gc_save = fe_savegc(ctx);
+    for (i = 0; i < array->count; i++) {
+        items[i] = fe_string(ctx, array->items[i], strlen(array->items[i]));
+        fe_pushgc(ctx, items[i]);
+    }
+
+    result = fe_list(ctx, items, array->count);
+    fe_restoregc(ctx, gc_save);
+    free(items);
+    return result;
+}
+
+static int path_exists_cstr(const char *path) {
+#ifdef _WIN32
+    DWORD attrs = GetFileAttributesA(path);
+    return attrs != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st;
+    return stat(path, &st) == 0;
+#endif
+}
+
+static int path_is_directory_cstr(const char *path) {
+#ifdef _WIN32
+    DWORD attrs = GetFileAttributesA(path);
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        return 0;
+    }
+    return (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return 0;
+    }
+    return S_ISDIR(st.st_mode);
+#endif
+}
+
+static int create_directory_cstr(const char *path) {
+#ifdef _WIN32
+    if (CreateDirectoryA(path, NULL)) {
+        return 1;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS && path_is_directory_cstr(path)) {
+        return 1;
+    }
+    return 0;
+#else
+    if (mkdir(path, 0777) == 0) {
+        return 1;
+    }
+    if (errno == EEXIST && path_is_directory_cstr(path)) {
+        return 1;
+    }
+    return 0;
+#endif
+}
+
+static size_t path_root_length(const char *path) {
+    size_t len = strlen(path);
+
+#ifdef _WIN32
+    if (len >= 2 && isalpha((unsigned char)path[0]) && path[1] == ':') {
+        if (len >= 3 && is_path_separator_char(path[2])) {
+            return 3;
+        }
+        return 2;
+    }
+#endif
+    if (len > 0 && is_path_separator_char(path[0])) {
+        return 1;
+    }
+    return 0;
+}
+
+static int ensure_directory_tree_cstr(char *path) {
+    size_t len;
+    size_t root_len;
+    size_t i;
+
+    len = strlen(path);
+    root_len = path_root_length(path);
+    while (len > root_len && is_path_separator_char(path[len - 1])) {
+        path[len - 1] = '\0';
+        len--;
+    }
+
+    if (len == 0) {
+        return 0;
+    }
+
+    for (i = root_len; i < len; i++) {
+        char saved;
+
+        if (!is_path_separator_char(path[i])) {
+            continue;
+        }
+        if (i == root_len) {
+            continue;
+        }
+
+        saved = path[i];
+        path[i] = '\0';
+        if (path[0] != '\0' && !(i == 2 && path[1] == ':') &&
+            !create_directory_cstr(path)) {
+            path[i] = saved;
+            return 0;
+        }
+        path[i] = saved;
+    }
+
+    return create_directory_cstr(path);
+}
+
+static char* current_working_directory_cstr(void) {
+#ifdef _WIN32
+    DWORD size = MAX_PATH;
+    char *buffer = NULL;
+
+    for (;;) {
+        char *new_buffer = realloc(buffer, size);
+        DWORD written;
+
+        if (!new_buffer) {
+            free(buffer);
+            return NULL;
+        }
+        buffer = new_buffer;
+
+        written = GetCurrentDirectoryA(size, buffer);
+        if (written == 0) {
+            free(buffer);
+            return NULL;
+        }
+        if (written < size) {
+            return buffer;
+        }
+        size = written + 1;
+    }
+#else
+    size_t size = 256;
+    char *buffer = NULL;
+
+    for (;;) {
+        char *new_buffer = realloc(buffer, size);
+
+        if (!new_buffer) {
+            free(buffer);
+            return NULL;
+        }
+        buffer = new_buffer;
+
+        if (getcwd(buffer, size) != NULL) {
+            return buffer;
+        }
+        if (errno != ERANGE) {
+            free(buffer);
+            return NULL;
+        }
+        size *= 2;
+    }
+#endif
 }
 
 /*
@@ -1783,6 +1998,176 @@ static fe_Object* builtin_basename(fe_Context *ctx, fe_Object *args) {
     return result;
 }
 
+static fe_Object* builtin_exists(fe_Context *ctx, fe_Object *args) {
+    fe_Object *path_obj;
+    char *path;
+    int exists;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "exists");
+    path_obj = fe_nextarg(ctx, &args);
+    path = string_to_cstr(ctx, path_obj, "exists");
+    if (!path) {
+        return fe_nil(ctx);
+    }
+
+    exists = path_exists_cstr(path);
+    free(path);
+    return fe_bool(ctx, exists);
+}
+
+static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
+    fe_Object *path_obj;
+    char *path;
+    CStringArray entries;
+    fe_Object *result;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "listdir");
+    path_obj = fe_nextarg(ctx, &args);
+    path = string_to_cstr(ctx, path_obj, "listdir");
+    if (!path) {
+        return fe_nil(ctx);
+    }
+
+    entries.items = NULL;
+    entries.count = 0;
+
+    if (!path_is_directory_cstr(path)) {
+        free(path);
+        fe_error(ctx, "listdir: not a directory");
+        return fe_nil(ctx);
+    }
+
+#ifdef _WIN32
+    {
+        TextBuffer pattern;
+        WIN32_FIND_DATAA find_data;
+        HANDLE find_handle;
+
+        pattern.data = NULL;
+        pattern.len = 0;
+        pattern.cap = 0;
+        if (!buf_append_str(&pattern, path)) {
+            free(path);
+            fe_error(ctx, "listdir: out of memory");
+            return fe_nil(ctx);
+        }
+        if (pattern.len == 0 || !is_path_separator_char(pattern.data[pattern.len - 1])) {
+            if (!buf_append_char(&pattern, '\\')) {
+                free(path);
+                buf_free(&pattern);
+                fe_error(ctx, "listdir: out of memory");
+                return fe_nil(ctx);
+            }
+        }
+        if (!buf_append_char(&pattern, '*')) {
+            free(path);
+            buf_free(&pattern);
+            fe_error(ctx, "listdir: out of memory");
+            return fe_nil(ctx);
+        }
+
+        find_handle = FindFirstFileA(pattern.data, &find_data);
+        buf_free(&pattern);
+        if (find_handle == INVALID_HANDLE_VALUE) {
+            free(path);
+            fe_error(ctx, "listdir: could not read directory");
+            return fe_nil(ctx);
+        }
+
+        do {
+            if (strcmp(find_data.cFileName, ".") == 0 ||
+                strcmp(find_data.cFileName, "..") == 0) {
+                continue;
+            }
+            if (!cstring_array_push_copy(&entries, find_data.cFileName)) {
+                FindClose(find_handle);
+                free(path);
+                free_cstring_array(&entries);
+                fe_error(ctx, "listdir: out of memory");
+                return fe_nil(ctx);
+            }
+        } while (FindNextFileA(find_handle, &find_data));
+
+        FindClose(find_handle);
+    }
+#else
+    {
+        DIR *dir = opendir(path);
+        struct dirent *entry;
+
+        if (!dir) {
+            free(path);
+            fe_error(ctx, "listdir: could not read directory");
+            return fe_nil(ctx);
+        }
+
+        while ((entry = readdir(dir)) != NULL) {
+            if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
+            if (!cstring_array_push_copy(&entries, entry->d_name)) {
+                closedir(dir);
+                free(path);
+                free_cstring_array(&entries);
+                fe_error(ctx, "listdir: out of memory");
+                return fe_nil(ctx);
+            }
+        }
+
+        closedir(dir);
+    }
+#endif
+
+    cstring_array_sort(&entries);
+    result = cstring_array_to_list(ctx, &entries);
+    free_cstring_array(&entries);
+    free(path);
+    return result;
+}
+
+static fe_Object* builtin_make_dir(fe_Context *ctx, fe_Object *args) {
+    fe_Object *path_obj;
+    char *path;
+    int ok;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "mkdir");
+    path_obj = fe_nextarg(ctx, &args);
+    path = string_to_cstr(ctx, path_obj, "mkdir");
+    if (!path) {
+        return fe_nil(ctx);
+    }
+
+    ok = create_directory_cstr(path);
+    free(path);
+    if (!ok) {
+        fe_error(ctx, "mkdir: could not create directory");
+        return fe_nil(ctx);
+    }
+    return fe_bool(ctx, 1);
+}
+
+static fe_Object* builtin_make_dir_parents(fe_Context *ctx, fe_Object *args) {
+    fe_Object *path_obj;
+    char *path;
+    int ok;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "mkdirp");
+    path_obj = fe_nextarg(ctx, &args);
+    path = string_to_cstr(ctx, path_obj, "mkdirp");
+    if (!path) {
+        return fe_nil(ctx);
+    }
+
+    ok = ensure_directory_tree_cstr(path);
+    free(path);
+    if (!ok) {
+        fe_error(ctx, "mkdirp: could not create directory tree");
+        return fe_nil(ctx);
+    }
+    return fe_bool(ctx, 1);
+}
+
 static fe_Object* builtin_read_file(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "readfile");
     fe_Object *filename_obj = fe_nextarg(ctx, &args);
@@ -2690,6 +3075,71 @@ static fe_Object* build_process_result(fe_Context *ctx,
 ================================================================================
 */
 
+static fe_Object* builtin_cwd(fe_Context *ctx, fe_Object *args) {
+    char *path;
+    fe_Object *result;
+
+    FEX_CHECK_NO_ARGS(ctx, args, "cwd");
+    path = current_working_directory_cstr();
+    if (!path) {
+        fe_error(ctx, "cwd: could not determine current directory");
+        return fe_nil(ctx);
+    }
+
+    result = fe_string(ctx, path, strlen(path));
+    free(path);
+    return result;
+}
+
+static fe_Object* builtin_chdir(fe_Context *ctx, fe_Object *args) {
+    fe_Object *path_obj;
+    char *path;
+    int ok;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "chdir");
+    path_obj = fe_nextarg(ctx, &args);
+    path = string_to_cstr(ctx, path_obj, "chdir");
+    if (!path) {
+        return fe_nil(ctx);
+    }
+
+#ifdef _WIN32
+    ok = SetCurrentDirectoryA(path) != 0;
+#else
+    ok = chdir(path) == 0;
+#endif
+    free(path);
+
+    if (!ok) {
+        fe_error(ctx, "chdir: could not change directory");
+        return fe_nil(ctx);
+    }
+    return fe_bool(ctx, 1);
+}
+
+static fe_Object* builtin_get_env(fe_Context *ctx, fe_Object *args) {
+    fe_Object *name_obj;
+    char *name;
+    const char *value;
+    fe_Object *result;
+
+    FEX_CHECK_ARGS(ctx, args, 1, "getenv");
+    name_obj = fe_nextarg(ctx, &args);
+    name = string_to_cstr(ctx, name_obj, "getenv");
+    if (!name) {
+        return fe_nil(ctx);
+    }
+
+    value = getenv(name);
+    free(name);
+    if (!value) {
+        return fe_nil(ctx);
+    }
+
+    result = fe_string(ctx, value, strlen(value));
+    return result;
+}
+
 static fe_Object* builtin_time(fe_Context *ctx, fe_Object *args) {
     (void)args; /* Unused */
     time_t current_time = time(NULL);
@@ -2991,6 +3441,10 @@ static void register_io_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "pathjoin"), fe_cfunc(ctx, builtin_path_join));
     fe_set(ctx, fe_symbol(ctx, "dirname"), fe_cfunc(ctx, builtin_dirname));
     fe_set(ctx, fe_symbol(ctx, "basename"), fe_cfunc(ctx, builtin_basename));
+    fe_set(ctx, fe_symbol(ctx, "exists"), fe_cfunc(ctx, builtin_exists));
+    fe_set(ctx, fe_symbol(ctx, "listdir"), fe_cfunc(ctx, builtin_list_dir));
+    fe_set(ctx, fe_symbol(ctx, "mkdir"), fe_cfunc(ctx, builtin_make_dir));
+    fe_set(ctx, fe_symbol(ctx, "mkdirp"), fe_cfunc(ctx, builtin_make_dir_parents));
     fe_set(ctx, fe_symbol(ctx, "readfile"), fe_cfunc(ctx, builtin_read_file));
     fe_set(ctx, fe_symbol(ctx, "readbytes"), fe_cfunc(ctx, builtin_read_bytes));
     fe_set(ctx, fe_symbol(ctx, "writefile"), fe_cfunc(ctx, builtin_write_file));
@@ -3025,6 +3479,9 @@ static void register_data_functions(fe_Context *ctx) {
 static void register_system_functions(fe_Context *ctx) {
     int gc_save = fe_savegc(ctx);
     
+    fe_set(ctx, fe_symbol(ctx, "cwd"), fe_cfunc(ctx, builtin_cwd));
+    fe_set(ctx, fe_symbol(ctx, "chdir"), fe_cfunc(ctx, builtin_chdir));
+    fe_set(ctx, fe_symbol(ctx, "getenv"), fe_cfunc(ctx, builtin_get_env));
     fe_set(ctx, fe_symbol(ctx, "time"), fe_cfunc(ctx, builtin_time));
     fe_set(ctx, fe_symbol(ctx, "exit"), fe_cfunc(ctx, builtin_exit));
     fe_set(ctx, fe_symbol(ctx, "system"), fe_cfunc(ctx, builtin_system));

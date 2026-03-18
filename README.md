@@ -197,17 +197,19 @@ println(mapcount(cfg));            // 2
 
 Module exports now use the same map representation internally, so `settings.mode = "debug";` updates an imported module property directly.
 
-### JSON And Path Helpers
+### JSON, Path, And Filesystem Helpers
 
-The extended builtins set also includes lightweight JSON and path/file helpers for scripting and config loading:
+The extended builtins set also includes lightweight JSON, path, and filesystem helpers for scripting and config loading:
 
 ```c
 let cfg = makemap("env", "prod", "port", 8080);
 println(tojson([1, 2, 3]));              // [1,2,3]
 
 let path = pathjoin("config", "app.json");
+mkdirp("config");
 writejson(path, cfg);
 println(readjson(path).port);            // 8080
+println(listdir("config"));              // ("app.json")
 ```
 
 ### Bytes And Binary I/O
@@ -318,7 +320,7 @@ int main(void) {
 
 `fex_do_string()` and `fex_do_file()` are still available for simple tools, but on runtime faults they go through the installed error handler. The default FeX handler prints a traceback and exits.
 
-If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `pathjoin`, `runcommand`, or `runprocess`, you can still use `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` for the full set. For production embedding, prefer `fex_init_with_builtins(ctx, flags, mask)` so you can expose only the categories you actually want, for example `FEX_BUILTINS_SAFE`, `FEX_BUILTINS_STRING | FEX_BUILTINS_DATA`, or `FEX_BUILTINS_SYSTEM`.
+If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `pathjoin`, `exists`, `listdir`, `mkdirp`, `cwd`, `getenv`, `runcommand`, or `runprocess`, you can still use `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` for the full set. For production embedding, prefer `fex_init_with_builtins(ctx, flags, mask)` so you can expose only the categories you actually want, for example `FEX_BUILTINS_SAFE`, `FEX_BUILTINS_IO`, or `FEX_BUILTINS_SYSTEM`.
 
 For runtime sandboxing, the core `fe` API now also exposes `fe_set_step_limit(ctx, max_steps)`, `fe_set_timeout_ms(ctx, timeout_ms)`, and `fe_set_interrupt_handler(...)`. A host can use the fixed step limit directly, the timeout convenience layer for wall-clock deadlines, or install an interrupt callback that applies custom policy.
 

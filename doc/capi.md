@@ -74,7 +74,7 @@ void fex_init_with_config(fe_Context *ctx, FexConfig config);
 Like `fex_init()`, but enables optional features through flags:
 
 - `FEX_CONFIG_ENABLE_SPANS` enables source span tracking.
-- `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` registers the optional extended builtins set, including helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `runcommand`, and `runprocess`.
+- `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS` registers the optional extended builtins set, including helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `exists`, `listdir`, `mkdirp`, `cwd`, `getenv`, `runcommand`, and `runprocess`.
 
 ### fex_init_with_builtins()
 
@@ -285,10 +285,23 @@ fe_bytescopy(ctx, bytes, 0, copy, sizeof(copy));
 
 At the language level, extended builtins expose helpers such as `tobytes`, `makebytes`, `byteslen`, `byteat`, `byteslice`, `readbytes`, and `writebytes`.
 
+### Filesystem Helpers
+
+The `FEX_BUILTINS_IO` category also includes:
+
+- `exists(path)` to test whether a file or directory exists.
+- `listdir(path)` to return a lexicographically sorted list of entry names.
+- `mkdir(path)` to create a single directory and return `true` on success.
+- `mkdirp(path)` to create a full directory tree and return `true` on success.
+- `readfile`, `writefile`, `readbytes`, `writebytes`, `readjson`, and `writejson` for file content access.
+
 ### System Helpers
 
-The `FEX_BUILTINS_SYSTEM` category includes `time`, `exit`, `system`, `runcommand`, and `runprocess`.
+The `FEX_BUILTINS_SYSTEM` category includes `cwd`, `chdir`, `getenv`, `time`, `exit`, `system`, `runcommand`, and `runprocess`.
 
+- `cwd()` returns the current working directory as a string.
+- `chdir(path)` changes the current working directory and returns `true` on success.
+- `getenv(name)` returns the environment-variable value as a string, or `nil` when it is unset.
 - `system(command)` executes a shell command and returns its exit code.
 - `runcommand(command)` executes a shell command and returns a map with `code`, `ok`, and `output`.
 - `runprocess(exe, args, opts)` launches `exe` directly, without an implicit shell, and returns a map with `code`, `ok`, `stdout`, and `stderr`.

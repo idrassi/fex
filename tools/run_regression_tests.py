@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import difflib
+import os
 import subprocess
 import sys
 import tempfile
@@ -63,6 +64,26 @@ def runprocess_case_source() -> str:
         "println(proc.ok);\n"
         "println(proc.stdout);\n"
         "println(proc.stderr);\n"
+    )
+
+
+def fs_helpers_case_source() -> str:
+    return (
+        'println("--- FS Helpers Regression ---");\n'
+        'println("mkdir.workspace:", mkdir("workspace"));\n'
+        'println("chdir.workspace:", chdir("workspace"));\n'
+        'println("mkdir.plain:", mkdir("plain"));\n'
+        'println("mkdirp.nested:", mkdirp(pathjoin("sandbox", "inner")));\n'
+        'writefile(pathjoin("sandbox", "note.txt"), "hi");\n'
+        'println("exists.missing:", exists("missing"));\n'
+        'println("exists.plain:", exists("plain"));\n'
+        'println("exists.inner:", exists(pathjoin("sandbox", "inner")));\n'
+        'println("exists.note:", exists(pathjoin("sandbox", "note.txt")));\n'
+        'println("listdir.root:", listdir("."));\n'
+        'println("listdir.sandbox:", listdir("sandbox"));\n'
+        'println("env:", getenv("FEX_TEST_ENV"));\n'
+        'println("chdir.inner:", chdir(pathjoin("sandbox", "inner")));\n'
+        'println("cwd.base:", basename(cwd()));\n'
     )
 
 CASES = [
@@ -162,6 +183,30 @@ CASES = [
             "basename:app.json\n"
             "loaded.meta.env:prod\n"
             "loaded.items.tail.head:2\n"
+        ),
+    },
+    {
+        "name": "filesystem helpers",
+        "source": fs_helpers_case_source(),
+        "args": ["--builtin", "io", "--builtin", "system"],
+        "env": {"FEX_TEST_ENV": "from-env"},
+        "use_temp_dir_as_cwd": True,
+        "exit_code": 0,
+        "stdout": (
+            "--- FS Helpers Regression ---\n"
+            "mkdir.workspace:true\n"
+            "chdir.workspace:true\n"
+            "mkdir.plain:true\n"
+            "mkdirp.nested:true\n"
+            "exists.missing:false\n"
+            "exists.plain:true\n"
+            "exists.inner:true\n"
+            "exists.note:true\n"
+            'listdir.root:("plain" "sandbox")\n'
+            'listdir.sandbox:("inner" "note.txt")\n'
+            "env:from-env\n"
+            "chdir.inner:true\n"
+            "cwd.base:inner\n"
         ),
     },
     {
@@ -364,6 +409,8 @@ def run_case(exe: Path, case: dict[str, object]) -> list[str]:
     temp_path: Path | None = None
     temp_dir_obj = None
     stdin_text = case.get("stdin")
+    case_cwd = None
+    case_env = None
 
     try:
         if not case.get("skip_input_file", False):
@@ -376,11 +423,21 @@ def run_case(exe: Path, case: dict[str, object]) -> list[str]:
                 command.append(str(case["script"]))
 
         command.extend(str(arg) for arg in case.get("args", []))
+        if case.get("use_temp_dir_as_cwd") and temp_dir_obj is not None:
+            case_cwd = temp_dir_obj.name
+        elif case.get("cwd") is not None:
+            case_cwd = str(case["cwd"])
+
+        if case.get("env") is not None:
+            case_env = os.environ.copy()
+            case_env.update({str(k): str(v) for k, v in dict(case["env"]).items()})
 
         completed = subprocess.run(
             command,
             input=str(stdin_text) if stdin_text is not None else None,
             capture_output=True,
+            cwd=case_cwd,
+            env=case_env,
             text=True,
             encoding="utf-8",
             errors="replace",

@@ -142,7 +142,7 @@ The base FeX environment always includes:
 
 Pair selectors such as `.head` and `.tail`, and the `::` operator, are syntax sugar over these primitives rather than separate runtime functions.
 
-Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `tobytes`, `readbytes`, `runcommand`, and `runprocess` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe`, `--builtin string,data`, or `--builtin system`. For runaway-script protection, the CLI also supports `--max-steps N` and `--timeout-ms N`. In embedded use, call:
+Optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `readjson`, `pathjoin`, `exists`, `listdir`, `mkdirp`, `cwd`, `getenv`, `tobytes`, `readbytes`, `runcommand`, and `runprocess` are part of the extended builtins set. In the CLI, enable the full set with `--builtins`, or opt into specific capability groups with repeated `--builtin NAME` flags such as `--builtin safe`, `--builtin io`, or `--builtin system`. For runaway-script protection, the CLI also supports `--max-steps N` and `--timeout-ms N`. In embedded use, call:
 
 ```c
 fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);
@@ -209,6 +209,15 @@ let path = pathjoin("build", "app.json");
 
 writejson(path, cfg);
 println(readjson(path).workers);
+```
+
+### Filesystem Helpers
+
+```fex
+mkdirp(pathjoin("tmp", "logs"));
+println(exists("tmp"));
+println(listdir("tmp"));
+println(getenv("HOME"));
 ```
 
 ### Bytes And Binary Files
