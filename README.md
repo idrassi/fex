@@ -96,7 +96,7 @@ If stdin is piped and no file or `-e` input is provided, FeX executes stdin inst
 
 ### CLI Flags
 
-Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, `--module-path PATH` adds file-based import search directories, `--max-steps N` aborts runaway evaluation after roughly `N` eval steps, `--timeout-ms N` adds a wall-clock timeout, `--max-memory N` aborts when tracked context memory exceeds `N` bytes, `--stats` prints a runtime stats snapshot to `stderr` after non-REPL execution, and `--version` prints the CLI version. Imports look for both `name.fex` and `name/index.fex`, so directory-style packages work out of the box. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
+Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, `--module-path PATH` adds file-based import search directories, `--max-steps N` aborts runaway evaluation after roughly `N` eval steps, `--timeout-ms N` adds a wall-clock timeout, `--max-memory N` aborts when tracked context memory exceeds `N` bytes, `--stats` prints a runtime stats snapshot to `stderr` after non-REPL execution, and `--version` prints the CLI version. Imports accept bare names (`import settings;`), dotted package names (`import feature.helper;`), and string paths (`import "./helper";`). Resolution still tries both `name.fex` and `name/index.fex`, so directory-style packages work out of the box. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
 
 ## Language Quick Tour
 
@@ -196,6 +196,19 @@ println(mapcount(cfg));            // 2
 ```
 
 Module exports now use the same map representation internally, so `settings.mode = "debug";` updates an imported module property directly.
+
+### Modules and Packages
+
+Imports can use simple module names, dotted package paths, or explicit string paths:
+
+```c
+import settings;
+import feature.helper;
+import "./local_helper";
+
+println(settings.mode);
+println(feature.helper.value);
+```
 
 ### JSON, Path, And Filesystem Helpers
 

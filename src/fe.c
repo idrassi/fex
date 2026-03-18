@@ -678,6 +678,8 @@ static int is_path_separator(char chr) {
   return chr == '/' || chr == '\\';
 }
 
+static fe_Object* getbound(fe_Object *sym, fe_Object *env);
+
 static void normalize_path_chars(fe_Context *ctx, char *path) {
   char *p;
   size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
@@ -778,6 +780,193 @@ static char* join_module_file_path(fe_Context *ctx, const char *base,
 static char* join_module_index_path(fe_Context *ctx, const char *base,
                                     const char *module_name) {
   return join_path_suffix(ctx, base, module_name, "/index.fex");
+}
+
+static int module_spec_uses_path_mode(const char *spec) {
+  const char *p;
+  if (!spec) return 0;
+  for (p = spec; *p; p++) {
+    if (is_path_separator(*p)) return 1;
+  }
+  return 0;
+}
+
+static int module_spec_is_relative(const char *spec) {
+  if (!spec || !*spec) return 0;
+  return spec[0] == '.';
+}
+
+static char* module_spec_to_lookup_name(fe_Context *ctx, const char *spec) {
+  char *copy;
+  char *p;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
+
+  copy = dup_cstring(ctx, spec);
+  if (!copy) return NULL;
+  if (module_spec_uses_path_mode(spec)) {
+    normalize_path_chars(ctx, copy);
+    return copy;
+  }
+
+  for (p = copy; *p; p++) {
+    const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+    if (abort_msg != NULL) {
+      tracked_free(ctx, copy);
+      fe_error(ctx, abort_msg);
+    }
+    if (*p == '.') *p = '/';
+  }
+  return copy;
+}
+
+static int split_module_spec_segments(fe_Context *ctx, const char *spec,
+                                      char ***segments, int *count,
+                                      int *capacity) {
+  int path_mode = module_spec_uses_path_mode(spec);
+  const char *segment_start = spec;
+  const char *p;
+  size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
+
+  *segments = NULL;
+  *count = 0;
+  *capacity = 0;
+
+  if (!spec || !*spec) return 1;
+
+  for (p = spec;; p++) {
+    int at_end = (*p == '\0');
+    int is_sep = 0;
+    size_t len;
+
+    if (!at_end) {
+      const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
+      if (abort_msg != NULL) {
+        string_array_clear(ctx, segments, count, capacity);
+        fe_error(ctx, abort_msg);
+      }
+      is_sep = path_mode ? is_path_separator(*p) : (*p == '.');
+    }
+
+    if (!at_end && !is_sep) {
+      continue;
+    }
+
+    len = (size_t)(p - segment_start);
+    if (len > 0) {
+      if (!(path_mode && len == 1 && segment_start[0] == '.') &&
+          !(path_mode && len == 2 && segment_start[0] == '.' &&
+            segment_start[1] == '.')) {
+        if (!string_array_push_copy(ctx, segments, count, capacity, segment_start)) {
+          string_array_clear(ctx, segments, count, capacity);
+          return 0;
+        }
+        (*segments)[*count - 1][len] = '\0';
+      }
+    }
+
+    if (at_end) {
+      break;
+    }
+    segment_start = p + 1;
+  }
+
+  return 1;
+}
+
+static char* join_module_segments(fe_Context *ctx, char **segments, int count,
+                                  char sep) {
+  size_t total = 1;
+  char *joined;
+  char *out;
+  int i;
+
+  for (i = 0; i < count; i++) {
+    total += strlen(segments[i]);
+    if (i + 1 < count) total++;
+  }
+
+  joined = tracked_alloc(ctx, total);
+  if (!joined) return NULL;
+
+  out = joined;
+  for (i = 0; i < count; i++) {
+    size_t len = strlen(segments[i]);
+    memcpy(out, segments[i], len);
+    out += len;
+    if (i + 1 < count) *out++ = sep;
+  }
+  *out = '\0';
+  return joined;
+}
+
+static fe_Object* lookup_global_module(fe_Context *ctx, const char *name) {
+  fe_Object *value;
+  if (!name || !*name) return &nil;
+  value = cdr(getbound(fe_symbol(ctx, name), &nil));
+  return type(value) == FE_TMAP ? value : &nil;
+}
+
+static fe_Object* lookup_module_chain(fe_Context *ctx, char **segments, int count) {
+  fe_Object *current;
+  int i;
+
+  if (count <= 0) return &nil;
+  current = lookup_global_module(ctx, segments[0]);
+  if (type(current) != FE_TMAP) return &nil;
+
+  for (i = 1; i < count; i++) {
+    current = fe_map_get(ctx, current, fe_symbol(ctx, segments[i]));
+    if (type(current) != FE_TMAP) return &nil;
+  }
+
+  return current;
+}
+
+static fe_Object* ensure_package_chain(fe_Context *ctx, char **segments, int count) {
+  fe_Object *current;
+  fe_Object *next;
+  int i;
+
+  if (count <= 0) return NULL;
+  current = lookup_global_module(ctx, segments[0]);
+  if (type(current) != FE_TMAP) {
+    current = fe_map(ctx);
+    fe_set(ctx, fe_symbol(ctx, segments[0]), current);
+  }
+
+  for (i = 1; i < count; i++) {
+    fe_Object *segment_sym = fe_symbol(ctx, segments[i]);
+    next = fe_map_get(ctx, current, segment_sym);
+    if (fe_isnil(ctx, next)) {
+      next = fe_map(ctx);
+      fe_map_set(ctx, current, segment_sym, next);
+    } else if (type(next) != FE_TMAP) {
+      char error_buf[256];
+      sprintf(error_buf, "package segment '%s' is not a module/map", segments[i]);
+      fe_error(ctx, error_buf);
+    }
+    current = next;
+  }
+
+  return current;
+}
+
+static void bind_imported_module(fe_Context *ctx, const char *spec,
+                                 char **segments, int count, int is_relative,
+                                 fe_Object *module_obj) {
+  if (count <= 0 || type(module_obj) != FE_TMAP) return;
+
+  if (!is_relative && count > 1) {
+    fe_Object *parent = ensure_package_chain(ctx, segments, count - 1);
+    fe_map_set(ctx, parent, fe_symbol(ctx, segments[count - 1]), module_obj);
+    return;
+  }
+
+  fe_set(ctx, fe_symbol(ctx, segments[count - 1]), module_obj);
+  if (spec && strcmp(spec, segments[count - 1]) != 0 &&
+      !module_spec_uses_path_mode(spec) && strchr(spec, '.') == NULL) {
+    fe_set(ctx, fe_symbol(ctx, spec), module_obj);
+  }
 }
 
 static int file_exists(const char *path) {
@@ -2481,67 +2670,178 @@ static fe_Object* argstoenv(fe_Context *ctx, fe_Object *prm, fe_Object *arg, fe_
 }
 
 
-static fe_Object* import_module(fe_Context *ctx, fe_Object *sym) {
-  char module_name[128];
-  char error_buf[2048];
-  char *module_path;
-  char *searched_paths = NULL;
-  fe_Object *result;
-  size_t error_len;
+static char* import_spec_to_cstring(fe_Context *ctx, fe_Object *spec_obj) {
+  size_t len;
+  char *module_spec;
 
-  checktype(ctx, sym, FE_TSYMBOL);
-  fe_tostring(ctx, sym, module_name, sizeof(module_name));
-  result = cdr(getbound(sym, &nil));
-  if (type(result) == FE_TMAP) {
-    return result;
+  if (type(spec_obj) != FE_TSTRING && type(spec_obj) != FE_TSYMBOL) {
+    checktype(ctx, spec_obj, FE_TSTRING);
   }
 
-  module_path = resolve_module_file(ctx, module_name, &searched_paths);
+  len = fe_strlen(ctx, spec_obj);
+  module_spec = tracked_alloc(ctx, len + 1);
+  if (!module_spec) {
+    memory_error(ctx, "out of memory (module spec)");
+  }
+  fe_tostring(ctx, spec_obj, module_spec, (int)len + 1);
+  return module_spec;
+}
+
+static void append_module_search_error(char *error_buf, size_t error_buf_size,
+                                       const char *module_spec,
+                                       const char *searched_paths) {
+  size_t error_len;
+  size_t remaining;
+
+  sprintf(error_buf, "could not resolve module '%s'", module_spec);
+  if (!searched_paths || !*searched_paths) return;
+
+  error_len = strlen(error_buf);
+  remaining = error_buf_size - error_len - 1;
+  if (remaining > 0) {
+    static const char searched_label[] = "\nsearched:\n";
+    size_t label_len = sizeof(searched_label) - 1;
+    size_t copy_len;
+    if (label_len > remaining) label_len = remaining;
+    memcpy(error_buf + error_len, searched_label, label_len);
+    error_len += label_len;
+    remaining = error_buf_size - error_len - 1;
+    copy_len = strlen(searched_paths);
+    if (copy_len > remaining) copy_len = remaining;
+    memcpy(error_buf + error_len, searched_paths, copy_len);
+    error_len += copy_len;
+    error_buf[error_len] = '\0';
+  }
+}
+
+static fe_Object* resolve_imported_module_value(fe_Context *ctx, const char *module_spec,
+                                                char **segments, int segment_count,
+                                                fe_Object *eval_result) {
+  fe_Object *module_obj;
+
+  if (eval_result != NULL && type(eval_result) == FE_TMAP) {
+    return eval_result;
+  }
+
+  module_obj = lookup_module_chain(ctx, segments, segment_count);
+  if (type(module_obj) == FE_TMAP) {
+    return module_obj;
+  }
+
+  if (segment_count > 0) {
+    module_obj = lookup_global_module(ctx, segments[segment_count - 1]);
+    if (type(module_obj) == FE_TMAP) {
+      return module_obj;
+    }
+  }
+
+  module_obj = lookup_global_module(ctx, module_spec);
+  if (type(module_obj) == FE_TMAP) {
+    return module_obj;
+  }
+
+  return &nil;
+}
+
+static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
+                                     int optional) {
+  char error_buf[2048];
+  char *lookup_name = NULL;
+  char *module_path;
+  char *searched_paths = NULL;
+  char **segments = NULL;
+  int segment_count = 0;
+  int segment_capacity = 0;
+  int is_relative;
+  fe_Object *result = NULL;
+  fe_Object *module_obj = NULL;
+  int i;
+
+  lookup_name = module_spec_to_lookup_name(ctx, module_spec);
+  if (!lookup_name) {
+    memory_error(ctx, "out of memory (module lookup)");
+  }
+  if (!split_module_spec_segments(ctx, module_spec, &segments, &segment_count,
+                                  &segment_capacity)) {
+    tracked_free(ctx, lookup_name);
+    memory_error(ctx, "out of memory (module segments)");
+  }
+  is_relative = module_spec_is_relative(module_spec);
+
+  if (!is_relative && segment_count > 1) {
+    for (i = 1; i < segment_count; i++) {
+      char *prefix_spec = join_module_segments(ctx, segments, i, '/');
+      if (!prefix_spec) {
+        tracked_free(ctx, lookup_name);
+        string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+        memory_error(ctx, "out of memory (module prefix)");
+      }
+      (void)import_module_spec(ctx, prefix_spec, 1);
+      tracked_free(ctx, prefix_spec);
+    }
+  }
+
+  module_path = resolve_module_file(ctx, lookup_name, optional ? NULL : &searched_paths);
   if (!module_path) {
+    module_obj = resolve_imported_module_value(ctx, module_spec, segments,
+                                               segment_count, NULL);
+    if (type(module_obj) == FE_TMAP) {
+      bind_imported_module(ctx, module_spec, segments, segment_count,
+                           is_relative, module_obj);
+      tracked_free(ctx, lookup_name);
+      tracked_free(ctx, searched_paths);
+      string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+      return module_obj;
+    }
+
+    tracked_free(ctx, lookup_name);
+    if (optional) {
+      tracked_free(ctx, searched_paths);
+      string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+      return NULL;
+    }
+
     if (searched_paths && ctx->alloc_failure_active) {
       tracked_free(ctx, searched_paths);
     }
     if (ctx->alloc_failure_active) {
+      string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
       memory_error(ctx, "out of memory (module path)");
     }
-    sprintf(error_buf, "could not resolve module '%s'", module_name);
-    if (searched_paths && *searched_paths) {
-      static const char searched_label[] = "\nsearched:\n";
-      size_t remaining;
-      error_len = strlen(error_buf);
-      remaining = sizeof(error_buf) - error_len - 1;
-      if (remaining > 0) {
-        size_t label_len = sizeof(searched_label) - 1;
-        size_t copy_len;
-        if (label_len > remaining) label_len = remaining;
-        memcpy(error_buf + error_len, searched_label, label_len);
-        error_len += label_len;
-        remaining = sizeof(error_buf) - error_len - 1;
-        copy_len = strlen(searched_paths);
-        if (copy_len > remaining) copy_len = remaining;
-        memcpy(error_buf + error_len, searched_paths, copy_len);
-        error_len += copy_len;
-        error_buf[error_len] = '\0';
-      }
-    }
+    append_module_search_error(error_buf, sizeof(error_buf), module_spec,
+                               searched_paths);
     tracked_free(ctx, searched_paths);
+    string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     fe_error(ctx, error_buf);
   }
+  tracked_free(ctx, lookup_name);
 
   if (string_array_contains(ctx, ctx->loaded_modules, ctx->loaded_module_count, module_path)) {
+    module_obj = resolve_imported_module_value(ctx, module_spec, segments,
+                                               segment_count, NULL);
     tracked_free(ctx, module_path);
-    return cdr(getbound(sym, &nil));
+    if (type(module_obj) != FE_TMAP) {
+      string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+      sprintf(error_buf, "loaded module '%s' is not bound as a module", module_spec);
+      fe_error(ctx, error_buf);
+    }
+    bind_imported_module(ctx, module_spec, segments, segment_count,
+                         is_relative, module_obj);
+    string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    return module_obj;
   }
 
   if (string_array_contains(ctx, ctx->loading_modules, ctx->loading_module_count, module_path)) {
     tracked_free(ctx, module_path);
-    sprintf(error_buf, "cyclic import detected for module '%s'", module_name);
+    string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    sprintf(error_buf, "cyclic import detected for module '%s'", module_spec);
     fe_error(ctx, error_buf);
   }
 
   if (!string_array_push_copy(ctx, &ctx->loading_modules, &ctx->loading_module_count,
                               &ctx->loading_module_capacity, module_path)) {
     tracked_free(ctx, module_path);
+    string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     memory_error(ctx, "out of memory (import state)");
   }
 
@@ -2550,21 +2850,43 @@ static fe_Object* import_module(fe_Context *ctx, fe_Object *sym) {
   if (result == NULL) {
     string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
     tracked_free(ctx, module_path);
+    string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     fe_error(ctx, "failed to import module");
   }
 
   string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
+  module_obj = resolve_imported_module_value(ctx, module_spec, segments,
+                                             segment_count, result);
+  if (type(module_obj) != FE_TMAP) {
+    tracked_free(ctx, module_path);
+    string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    sprintf(error_buf, "module '%s' did not produce a module value", module_spec);
+    fe_error(ctx, error_buf);
+  }
+
+  bind_imported_module(ctx, module_spec, segments, segment_count,
+                       is_relative, module_obj);
+
   if (!string_array_contains(ctx, ctx->loaded_modules, ctx->loaded_module_count, module_path)) {
     if (!string_array_push_owned(ctx, &ctx->loaded_modules, &ctx->loaded_module_count,
                                  &ctx->loaded_module_capacity, module_path)) {
       tracked_free(ctx, module_path);
+      string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
       memory_error(ctx, "out of memory (module cache)");
     }
     module_path = NULL;
   }
   tracked_free(ctx, module_path);
+  string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
 
-  return cdr(getbound(sym, &nil));
+  return module_obj;
+}
+
+static fe_Object* import_module(fe_Context *ctx, fe_Object *spec_obj) {
+  char *module_spec = import_spec_to_cstring(ctx, spec_obj);
+  fe_Object *result = import_module_spec(ctx, module_spec, 0);
+  tracked_free(ctx, module_spec);
+  return result;
 }
 
 

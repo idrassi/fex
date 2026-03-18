@@ -767,6 +767,79 @@ static fe_Object* parse_number() {
   return fe_make_number(P.ctx, (fe_Number)value);
 }
 
+static fe_Object* make_import_spec_string(const char *spec, size_t len) {
+    return fe_string(P.ctx, spec, len);
+}
+
+static int append_import_segment(char **buffer, size_t *length, size_t *capacity,
+                                 const char *start, size_t len) {
+    char *grown;
+    size_t needed;
+
+    needed = *length + len + 1;
+    if (needed > *capacity) {
+        size_t new_capacity = *capacity ? *capacity : 32;
+        while (new_capacity < needed) {
+            new_capacity *= 2;
+        }
+        grown = (char*)realloc(*buffer, new_capacity);
+        if (!grown) {
+            return 0;
+        }
+        *buffer = grown;
+        *capacity = new_capacity;
+    }
+    memcpy(*buffer + *length, start, len);
+    *length += len;
+    (*buffer)[*length] = '\0';
+    return 1;
+}
+
+static fe_Object* parse_import_specifier() {
+    fe_Object *name;
+
+    if (parser_match(TOKEN_STRING)) {
+        return parse_string();
+    }
+
+    consume(TOKEN_IDENTIFIER, "Expect module name to import.");
+    if (!check(TOKEN_DOT)) {
+        return make_import_spec_string(P.previous.start, (size_t)P.previous.length);
+    }
+
+    {
+        char *buffer = NULL;
+        size_t length = 0;
+        size_t capacity = 0;
+
+        if (!append_import_segment(&buffer, &length, &capacity,
+                                   P.previous.start, (size_t)P.previous.length)) {
+            error("Out of memory while parsing import.");
+            free(buffer);
+            return fe_nil(P.ctx);
+        }
+
+        while (parser_match(TOKEN_DOT)) {
+            if (!append_import_segment(&buffer, &length, &capacity, ".", 1)) {
+                error("Out of memory while parsing import.");
+                free(buffer);
+                return fe_nil(P.ctx);
+            }
+            consume(TOKEN_IDENTIFIER, "Expect package name after '.' in import.");
+            if (!append_import_segment(&buffer, &length, &capacity,
+                                       P.previous.start, (size_t)P.previous.length)) {
+                error("Out of memory while parsing import.");
+                free(buffer);
+                return fe_nil(P.ctx);
+            }
+        }
+
+        name = make_import_spec_string(buffer, length);
+        free(buffer);
+        return name;
+    }
+}
+
 static fe_Object* parse_string() {
     char buffer[1024];
     int len = P.previous.length - 2;
@@ -1017,11 +1090,10 @@ static fe_Object* module_declaration() {
 }
 
 static fe_Object* import_declaration() {
-    consume(TOKEN_IDENTIFIER, "Expect module name to import.");
-    fe_Object* name = symbol_from_token(&P.previous);
+    fe_Object* name = parse_import_specifier();
     consume(TOKEN_SEMICOLON, "Expect ';' after import statement.");
 
-    /* Build (import name) */
+    /* Build (import "name" | "pkg.name" | "./path") */
    fe_Object* list = fe_cons(P.ctx, name, fex_nil(P.ctx));
     return CONS1(fe_symbol(P.ctx, "import"), list);
 }

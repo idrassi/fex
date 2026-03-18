@@ -1,0 +1,6 @@
+println("--- Package Ergonomics Regression ---");
+import feature.helper;
+import feature.relative_importer;
+println(feature.helper.value);
+println(feature.relative_importer.value);
+println(feature.value);

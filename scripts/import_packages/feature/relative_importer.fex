@@ -1,0 +1,5 @@
+println("loading feature relative importer");
+import "./helper";
+module ("relative_importer") {
+  export let value = helper.value + 2;
+}

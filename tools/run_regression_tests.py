@@ -231,6 +231,21 @@ CASES = [
         ),
     },
     {
+        "name": "package ergonomics",
+        "script": ROOT / "scripts" / "test_module_package_ergonomics.fex",
+        "args": ["--module-path", ROOT / "scripts" / "import_packages"],
+        "exit_code": 0,
+        "stdout": (
+            "--- Package Ergonomics Regression ---\n"
+            "loading feature package\n"
+            "loading feature helper\n"
+            "loading feature relative importer\n"
+            "41\n"
+            "43\n"
+            "42\n"
+        ),
+    },
+    {
         "name": "maps",
         "script": ROOT / "scripts" / "test_maps.fex",
         "args": ["--builtins"],
