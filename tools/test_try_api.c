@@ -108,6 +108,21 @@ static char* make_large_parsejson_source(size_t item_count) {
     return source;
 }
 
+static char* make_large_path_string(size_t length) {
+    char *path = (char*)malloc(length + 1);
+    size_t i;
+
+    if (!path) {
+        return NULL;
+    }
+
+    for (i = 0; i < length; i++) {
+        path[i] = ((i + 1) % 17 == 0) ? '/' : 'a';
+    }
+    path[length] = '\0';
+    return path;
+}
+
 static int write_large_test_file(const char *path, size_t size, unsigned char fill_byte) {
     FILE *file;
     unsigned char chunk[4096];
@@ -539,6 +554,40 @@ int main(void) {
         fe_close(ctx);
         free(memory);
         return fail("unexpected pathjoin result after enabling I/O builtins");
+    }
+
+    {
+        char *large_path = make_large_path_string(256 * 1024);
+        fe_Object *bigpath;
+        int gc_save = fe_savegc(ctx);
+        int interrupt_calls = 0;
+
+        if (!large_path) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to allocate pathjoin interrupt source");
+        }
+
+        bigpath = fe_string(ctx, large_path, strlen(large_path));
+        free(large_path);
+        fe_pushgc(ctx, bigpath);
+        fe_set(ctx, fe_symbol(ctx, "bigpath"), bigpath);
+        fe_restoregc(ctx, gc_save);
+
+        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 1);
+        status = fex_try_do_string(ctx, "pathjoin(bigpath);\n", &result, &error);
+        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "execution interrupted") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected pathjoin to honor interrupt polling", status, &error);
+        }
+        if (interrupt_calls < 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected pathjoin interrupt handler to run");
+        }
     }
 
     {

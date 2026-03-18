@@ -175,6 +175,30 @@ static const char* builtin_poll_abort(fe_Context *ctx, size_t *countdown) {
     return fe_poll_abort(ctx);
 }
 
+static int buf_append_mem_polling(fe_Context *ctx, TextBuffer *buf,
+                                  const char *data, size_t len,
+                                  size_t *poll_countdown,
+                                  const char **abort_error) {
+    size_t offset = 0;
+
+    while (offset < len) {
+        size_t chunk_size = len - offset;
+        if (chunk_size > FEX_FILE_IO_CHUNK_SIZE) {
+            chunk_size = FEX_FILE_IO_CHUNK_SIZE;
+        }
+        *abort_error = builtin_poll_abort(ctx, poll_countdown);
+        if (*abort_error != NULL) {
+            return 0;
+        }
+        if (!buf_append_mem(buf, data + offset, chunk_size)) {
+            return 0;
+        }
+        offset += chunk_size;
+    }
+
+    return 1;
+}
+
 static int buf_append_str(TextBuffer *buf, const char *str) {
     return buf_append_mem(buf, str, strlen(str));
 }
@@ -1017,42 +1041,40 @@ static fe_Object* builtin_string_lower(fe_Context *ctx, fe_Object *args) {
 }
 
 static fe_Object* builtin_string_concat(fe_Context *ctx, fe_Object *args) {
-    /* Use dynamic allocation for large concatenations */
-    size_t capacity = 1024;
-    char *result = malloc(capacity);
-    if (!result) {
-        fe_error(ctx, "concat: out of memory");
-        return fe_nil(ctx);
-    }
-    
-    size_t result_len = 0;
-    result[0] = '\0';
+    TextBuffer result;
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
+
+    result.data = NULL;
+    result.len = 0;
+    result.cap = 0;
     
     while (!fe_isnil(ctx, args)) {
         fe_Object *arg = fe_nextarg(ctx, &args);
         char buffer[1024];
         fe_tostring(ctx, arg, buffer, sizeof(buffer));
-        
-        size_t buffer_len = strlen(buffer);
-        
-        /* Grow buffer if needed */
-        if (result_len + buffer_len >= capacity) {
-            capacity = (result_len + buffer_len + 1) * 2;
-            char *new_result = realloc(result, capacity);
-            if (!new_result) {
-                free(result);
-                fe_error(ctx, "concat: out of memory");
-                return fe_nil(ctx);
-            }
-            result = new_result;
+
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            buf_free(&result);
+            fe_error(ctx, abort_error);
+            return fe_nil(ctx);
         }
-        
-        strcpy(result + result_len, buffer);
-        result_len += buffer_len;
+
+        if (!buf_append_mem_polling(ctx, &result, buffer, strlen(buffer),
+                                    &poll_countdown, &abort_error)) {
+            buf_free(&result);
+            if (abort_error != NULL) {
+                fe_error(ctx, abort_error);
+            } else {
+                fe_error(ctx, "concat: out of memory");
+            }
+            return fe_nil(ctx);
+        }
     }
-    
-    fe_Object *obj = fe_string(ctx, result, result_len);
-    free(result);
+
+    fe_Object *obj = fe_string(ctx, result.data ? result.data : "", result.len);
+    buf_free(&result);
     return obj;
 }
 
@@ -2125,6 +2147,8 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
 static fe_Object* builtin_path_join(fe_Context *ctx, fe_Object *args) {
     TextBuffer buf;
     int need_sep = 0;
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
 
     FEX_CHECK_ARGS(ctx, args, 1, "pathjoin");
     buf.data = NULL;
@@ -2145,9 +2169,23 @@ static fe_Object* builtin_path_join(fe_Context *ctx, fe_Object *args) {
 
         end = strlen(part);
         while (start < end && is_path_separator_char(part[start]) && buf.len > 0) {
+            abort_error = builtin_poll_abort(ctx, &poll_countdown);
+            if (abort_error != NULL) {
+                free(part);
+                buf_free(&buf);
+                fe_error(ctx, abort_error);
+                return fe_nil(ctx);
+            }
             start++;
         }
         while (end > start && is_path_separator_char(part[end - 1])) {
+            abort_error = builtin_poll_abort(ctx, &poll_countdown);
+            if (abort_error != NULL) {
+                free(part);
+                buf_free(&buf);
+                fe_error(ctx, abort_error);
+                return fe_nil(ctx);
+            }
             end--;
         }
 
@@ -2162,6 +2200,13 @@ static fe_Object* builtin_path_join(fe_Context *ctx, fe_Object *args) {
 
         for (i = start; i < end; i++) {
             char chr = is_path_separator_char(part[i]) ? '/' : part[i];
+            abort_error = builtin_poll_abort(ctx, &poll_countdown);
+            if (abort_error != NULL) {
+                free(part);
+                buf_free(&buf);
+                fe_error(ctx, abort_error);
+                return fe_nil(ctx);
+            }
             if (!buf_append_char(&buf, chr)) {
                 free(part);
                 buf_free(&buf);
@@ -3457,10 +3502,16 @@ static int drain_posix_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
 #endif
 
 #ifdef _WIN32
-static int buf_append_repeat(TextBuffer *buf, char chr, size_t count) {
+static int buf_append_repeat(fe_Context *ctx, TextBuffer *buf, char chr,
+                             size_t count, size_t *poll_countdown,
+                             const char **abort_error) {
     size_t i;
 
     for (i = 0; i < count; i++) {
+        *abort_error = builtin_poll_abort(ctx, poll_countdown);
+        if (*abort_error != NULL) {
+            return 0;
+        }
         if (!buf_append_char(buf, chr)) {
             return 0;
         }
@@ -3468,7 +3519,9 @@ static int buf_append_repeat(TextBuffer *buf, char chr, size_t count) {
     return 1;
 }
 
-static int needs_windows_quotes(const char *arg) {
+static int needs_windows_quotes(fe_Context *ctx, const char *arg,
+                                size_t *poll_countdown,
+                                const char **abort_error) {
     const char *p = arg;
 
     if (*arg == '\0') {
@@ -3476,6 +3529,10 @@ static int needs_windows_quotes(const char *arg) {
     }
 
     while (*p) {
+        *abort_error = builtin_poll_abort(ctx, poll_countdown);
+        if (*abort_error != NULL) {
+            return -1;
+        }
         if (*p == ' ' || *p == '\t' || *p == '"') {
             return 1;
         }
@@ -3485,12 +3542,20 @@ static int needs_windows_quotes(const char *arg) {
     return 0;
 }
 
-static int append_windows_command_arg(TextBuffer *buf, const char *arg) {
+static int append_windows_command_arg(fe_Context *ctx, TextBuffer *buf,
+                                      const char *arg,
+                                      size_t *poll_countdown,
+                                      const char **abort_error) {
     const char *p = arg;
     size_t backslashes = 0;
+    int quote_mode = needs_windows_quotes(ctx, arg, poll_countdown, abort_error);
 
-    if (!needs_windows_quotes(arg)) {
-        return buf_append_str(buf, arg);
+    if (quote_mode < 0) {
+        return 0;
+    }
+    if (!quote_mode) {
+        return buf_append_mem_polling(ctx, buf, arg, strlen(arg),
+                                      poll_countdown, abort_error);
     }
 
     if (!buf_append_char(buf, '"')) {
@@ -3498,16 +3563,22 @@ static int append_windows_command_arg(TextBuffer *buf, const char *arg) {
     }
 
     while (*p) {
+        *abort_error = builtin_poll_abort(ctx, poll_countdown);
+        if (*abort_error != NULL) {
+            return 0;
+        }
         if (*p == '\\') {
             backslashes++;
         } else if (*p == '"') {
-            if (!buf_append_repeat(buf, '\\', backslashes * 2 + 1) ||
+            if (!buf_append_repeat(ctx, buf, '\\', backslashes * 2 + 1,
+                                   poll_countdown, abort_error) ||
                 !buf_append_char(buf, '"')) {
                 return 0;
             }
             backslashes = 0;
         } else {
-            if (!buf_append_repeat(buf, '\\', backslashes) ||
+            if (!buf_append_repeat(ctx, buf, '\\', backslashes,
+                                   poll_countdown, abort_error) ||
                 !buf_append_char(buf, *p)) {
                 return 0;
             }
@@ -3516,7 +3587,8 @@ static int append_windows_command_arg(TextBuffer *buf, const char *arg) {
         p++;
     }
 
-    if (!buf_append_repeat(buf, '\\', backslashes * 2) ||
+    if (!buf_append_repeat(ctx, buf, '\\', backslashes * 2,
+                           poll_countdown, abort_error) ||
         !buf_append_char(buf, '"')) {
         return 0;
     }
@@ -3529,22 +3601,35 @@ static char* build_windows_command_line(fe_Context *ctx, CStringArray *argv,
     TextBuffer buf;
     int i;
     char msg[160];
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
 
     buf.data = NULL;
     buf.len = 0;
     buf.cap = 0;
 
     for (i = 0; i < argv->count; i++) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            buf_free(&buf);
+            fe_error(ctx, abort_error);
+            return NULL;
+        }
         if (i > 0 && !buf_append_char(&buf, ' ')) {
             buf_free(&buf);
             sprintf(msg, "%s: out of memory", func_name);
             fe_error(ctx, msg);
             return NULL;
         }
-        if (!append_windows_command_arg(&buf, argv->items[i])) {
+        if (!append_windows_command_arg(ctx, &buf, argv->items[i],
+                                        &poll_countdown, &abort_error)) {
             buf_free(&buf);
-            sprintf(msg, "%s: out of memory", func_name);
-            fe_error(ctx, msg);
+            if (abort_error != NULL) {
+                fe_error(ctx, abort_error);
+            } else {
+                sprintf(msg, "%s: out of memory", func_name);
+                fe_error(ctx, msg);
+            }
             return NULL;
         }
     }
@@ -3569,8 +3654,15 @@ static char* build_windows_environment_block(fe_Context *ctx, CStringArray *env,
     int i;
     char *block;
     char msg[160];
+    size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
+    const char *abort_error = NULL;
 
     for (i = 0; i < env->count; i++) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+            return NULL;
+        }
         total += strlen(env->items[i]) + 1;
     }
 
@@ -3582,6 +3674,12 @@ static char* build_windows_environment_block(fe_Context *ctx, CStringArray *env,
     }
 
     for (i = 0; i < env->count; i++) {
+        abort_error = builtin_poll_abort(ctx, &poll_countdown);
+        if (abort_error != NULL) {
+            free(block);
+            fe_error(ctx, abort_error);
+            return NULL;
+        }
         size_t item_len = strlen(env->items[i]) + 1;
         memcpy(block + offset, env->items[i], item_len);
         offset += item_len;
