@@ -1690,7 +1690,6 @@ static uint32_t str_alloc(fe_Context *ctx, const char *src, size_t len, char fil
     uint32_t head_offset = str_slab_alloc(ctx);
     fe_Slab *head_slab = (fe_Slab*)(ctx->str_base + head_offset);
 
-    uint32_t current_offset = head_offset;
     fe_Slab *current_slab = head_slab;
 
     const char *p = src;
@@ -2022,6 +2021,7 @@ size_t fe_strlen(fe_Context *ctx, fe_Object *obj)
 {
   /* caller must ensure obj is a string */
 #ifdef FE_OPT_NO_MALLOC_STRINGS
+  unused(ctx);
   return FE_STR_LEN(obj);
 #else
   return strlen(FE_STR_DATA(ctx, obj));

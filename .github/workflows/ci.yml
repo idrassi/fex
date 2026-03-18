@@ -22,7 +22,7 @@ jobs:
           python-version: "3.x"
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DFEX_WARNINGS_AS_ERRORS=ON
 
       - name: Build
         run: cmake --build build
@@ -45,7 +45,7 @@ jobs:
           python-version: "3.x"
 
       - name: Configure
-        run: cmake -S . -B build-sanitize -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DFEX_ENABLE_SANITIZERS=ON
+        run: cmake -S . -B build-sanitize -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DFEX_ENABLE_SANITIZERS=ON -DFEX_WARNINGS_AS_ERRORS=ON
 
       - name: Build
         run: cmake --build build-sanitize

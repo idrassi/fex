@@ -196,18 +196,18 @@ static void print_runtime_stats(FILE *fp, fe_Context *ctx) {
 
   fe_get_stats(ctx, &stats);
   fprintf(fp, "runtime stats:\n");
-  fprintf(fp, "  steps_executed: %zu\n", stats.steps_executed);
-  fprintf(fp, "  step_limit: %zu\n", stats.step_limit);
+  fprintf(fp, "  steps_executed: %llu\n", (unsigned long long)stats.steps_executed);
+  fprintf(fp, "  step_limit: %llu\n", (unsigned long long)stats.step_limit);
   fprintf(fp, "  timeout_ms: %" PRIu64 "\n", stats.timeout_ms);
-  fprintf(fp, "  memory_used: %zu\n", stats.memory_used);
-  fprintf(fp, "  peak_memory_used: %zu\n", stats.peak_memory_used);
-  fprintf(fp, "  memory_limit: %zu\n", stats.memory_limit);
-  fprintf(fp, "  base_memory_bytes: %zu\n", stats.base_memory_bytes);
-  fprintf(fp, "  object_capacity: %zu\n", stats.object_capacity);
-  fprintf(fp, "  live_objects: %zu\n", stats.live_objects);
-  fprintf(fp, "  object_allocations_total: %zu\n", stats.object_allocations_total);
-  fprintf(fp, "  allocs_since_gc: %zu\n", stats.allocs_since_gc);
-  fprintf(fp, "  gc_runs: %zu\n", stats.gc_runs);
+  fprintf(fp, "  memory_used: %llu\n", (unsigned long long)stats.memory_used);
+  fprintf(fp, "  peak_memory_used: %llu\n", (unsigned long long)stats.peak_memory_used);
+  fprintf(fp, "  memory_limit: %llu\n", (unsigned long long)stats.memory_limit);
+  fprintf(fp, "  base_memory_bytes: %llu\n", (unsigned long long)stats.base_memory_bytes);
+  fprintf(fp, "  object_capacity: %llu\n", (unsigned long long)stats.object_capacity);
+  fprintf(fp, "  live_objects: %llu\n", (unsigned long long)stats.live_objects);
+  fprintf(fp, "  object_allocations_total: %llu\n", (unsigned long long)stats.object_allocations_total);
+  fprintf(fp, "  allocs_since_gc: %llu\n", (unsigned long long)stats.allocs_since_gc);
+  fprintf(fp, "  gc_runs: %llu\n", (unsigned long long)stats.gc_runs);
 }
 
 static void run_repl(fe_Context *ctx) {
@@ -513,7 +513,8 @@ int main(int argc, char **argv) {
 
   mem = malloc(memory_pool_size);
   if (!mem) {
-    fprintf(stderr, "Failed to allocate %zu bytes for interpreter.\n", memory_pool_size);
+    fprintf(stderr, "Failed to allocate %llu bytes for interpreter.\n",
+            (unsigned long long)memory_pool_size);
     free(eval_source);
     free(module_paths);
     return 1;

@@ -701,7 +701,7 @@ static int parser_match(TokenType type) {
 static fe_Object* symbol_from_token(Token *token) {
     char buffer[256];
     fe_Object* nil_obj = fe_nil(P.ctx);
-    if (token->length >= sizeof(buffer)) {
+    if ((size_t)token->length >= sizeof(buffer)) {
         error("Identifier too long.");
         return nil_obj;
     }
@@ -771,7 +771,7 @@ static fe_Object* parse_string() {
     char buffer[1024];
     int len = P.previous.length - 2;
     if (len < 0) len = 0;
-    if (len >= sizeof(buffer)) {
+    if ((size_t)len >= sizeof(buffer)) {
         error("String too long.");
         return fe_nil(P.ctx);
     }
