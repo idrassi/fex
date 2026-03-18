@@ -131,6 +131,17 @@ int main(void) {
         return fail("expected file I/O error");
     }
 
+    if (fe_get_memory_used(ctx) < TEST_MEM_SIZE) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected tracked memory usage to include the base arena");
+    }
+    if (fe_get_peak_memory_used(ctx) < fe_get_memory_used(ctx)) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected peak memory usage to be at least current usage");
+    }
+
     {
         static const unsigned char raw_bytes[3] = {0x41, 0x00, 0xff};
         unsigned char copied_bytes[3];
@@ -210,6 +221,41 @@ int main(void) {
             fe_close(ctx);
             free(memory);
             return fail("expected interrupt handler to run at least once");
+        }
+    }
+
+    {
+        size_t baseline_used = fe_get_memory_used(ctx);
+        fe_set_memory_limit(ctx, baseline_used);
+        if (fe_get_memory_limit(ctx) != baseline_used) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected memory limit getter to report the configured value");
+        }
+        status = fex_try_do_string(
+            ctx,
+            "module(\"mem_limit_test\") {\n"
+            "  export let x = 1;\n"
+            "}\n",
+            &result,
+            &error
+        );
+        fe_set_memory_limit(ctx, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "memory limit exceeded") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected memory limit error", status, &error);
+        }
+        if (fe_get_memory_limit(ctx) != 0) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected resetting the memory limit to disable it");
+        }
+        if (fe_get_memory_used(ctx) > baseline_used) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected tracked memory usage to stay within the configured limit");
         }
     }
 

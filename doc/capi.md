@@ -110,6 +110,10 @@ Releases resources associated with the interpreter. If pointer objects have GC f
 void fe_set_step_limit(fe_Context *ctx, size_t max_steps);
 size_t fe_get_step_limit(fe_Context *ctx);
 size_t fe_get_steps_executed(fe_Context *ctx);
+void fe_set_memory_limit(fe_Context *ctx, size_t max_bytes);
+size_t fe_get_memory_limit(fe_Context *ctx);
+size_t fe_get_memory_used(fe_Context *ctx);
+size_t fe_get_peak_memory_used(fe_Context *ctx);
 void fe_set_timeout_ms(fe_Context *ctx, uint64_t timeout_ms);
 uint64_t fe_get_timeout_ms(fe_Context *ctx);
 void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
@@ -119,11 +123,13 @@ void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
 These low-level `fe` APIs let a host bound script execution without killing the process.
 
 - `fe_set_step_limit()` sets a per-top-level evaluation budget. `0` disables the limit.
+- `fe_set_memory_limit()` sets a tracked per-context memory ceiling in bytes. `0` disables the limit.
 - `fe_set_timeout_ms()` sets a per-top-level wall-clock timeout. `0` disables the timeout.
 - `fe_get_steps_executed()` reports the number of eval steps consumed by the current or most recent evaluation.
+- `fe_get_memory_used()` and `fe_get_peak_memory_used()` report current and peak tracked memory usage, including the base arena memory passed to `fe_open()`.
 - `fe_set_interrupt_handler()` installs a callback that runs every `check_interval_steps` evaluations. If it returns non-zero, evaluation stops with the runtime error `"execution interrupted"`.
 
-Use `fe_set_timeout_ms()` when a simple wall-clock deadline is enough. Use `fe_set_interrupt_handler()` when the host needs custom timeout policy or external cancellation.
+Use `fe_set_timeout_ms()` when a simple wall-clock deadline is enough. Use `fe_set_interrupt_handler()` when the host needs custom timeout policy or external cancellation. Combine `fe_set_memory_limit()` with the step and timeout controls when embedding untrusted or potentially large workloads.
 
 ### Minimal Example
 

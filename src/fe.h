@@ -72,6 +72,10 @@ fe_Handlers* fe_handlers(fe_Context *ctx);
 void fe_set_step_limit(fe_Context *ctx, size_t max_steps);
 size_t fe_get_step_limit(fe_Context *ctx);
 size_t fe_get_steps_executed(fe_Context *ctx);
+void fe_set_memory_limit(fe_Context *ctx, size_t max_bytes);
+size_t fe_get_memory_limit(fe_Context *ctx);
+size_t fe_get_memory_used(fe_Context *ctx);
+size_t fe_get_peak_memory_used(fe_Context *ctx);
 void fe_set_timeout_ms(fe_Context *ctx, uint64_t timeout_ms);
 uint64_t fe_get_timeout_ms(fe_Context *ctx);
 void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,

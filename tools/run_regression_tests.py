@@ -313,6 +313,15 @@ CASES = [
         ],
     },
     {
+        "name": "memory budget",
+        "source": 'module("mem_limit_cli") {\n  export let x = 1;\n}\n',
+        "args": ["--memory-pool-size", "1", "--max-memory", "1048576"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: memory limit exceeded",
+        ],
+    },
+    {
         "name": "bad module syntax",
         "source": 'module(123) {\n    export let y = 20;\n}\n',
         "exit_code": 65,
@@ -409,7 +418,7 @@ def run_case(exe: Path, case: dict[str, object]) -> list[str]:
     temp_path: Path | None = None
     temp_dir_obj = None
     stdin_text = case.get("stdin")
-    case_cwd = None
+    case_cwd = str(ROOT)
     case_env = None
 
     try:

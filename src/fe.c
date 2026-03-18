@@ -107,6 +107,13 @@ typedef struct {
   unsigned char *states;
 } fe_Map;
 
+typedef union {
+  size_t size;
+  void *ptr;
+  double dbl;
+  long double ldouble;
+} fe_AllocHeader;
+
 typedef union { fe_Object *o; fe_CFunc f; fe_Number n; char c; char *s; void *p; uint32_t u32; } Value;
 
 struct fe_Object {
@@ -157,6 +164,12 @@ struct fe_Context {
   int gc_threshold;        /* Trigger next GC when allocs_since_gc exceeds this */
   size_t bytes_since_gc;   /* String bytes allocated since last GC */
   size_t byte_threshold;   /* Trigger next GC when bytes_since_gc exceeds this */
+  size_t base_memory_bytes;
+  size_t memory_limit;
+  size_t memory_used;
+  size_t peak_memory_used;
+  int alloc_failure_active;
+  int alloc_failure_is_limit;
 #ifdef FE_OPT_NO_MALLOC_STRINGS
   uint8_t *str_base;
   uint8_t *str_end;
@@ -184,6 +197,126 @@ static fe_Map* mapdata(fe_Object *obj);
 static fe_Object* normalize_map_key(fe_Context *ctx, fe_Object *key);
 static int map_find_slot(fe_Context *ctx, fe_Map *map, fe_Object *key, int *found);
 static fe_Object* object(fe_Context *ctx);
+static void tracked_free(fe_Context *ctx, void *ptr);
+
+static int memory_would_exceed_limit(fe_Context *ctx, size_t extra) {
+  if (ctx->memory_limit == 0) {
+    return 0;
+  }
+  if (ctx->memory_used > ctx->memory_limit) {
+    return 1;
+  }
+  return extra > ctx->memory_limit - ctx->memory_used;
+}
+
+static void memory_note_alloc(fe_Context *ctx, size_t size) {
+  ctx->memory_used += size;
+  if (ctx->memory_used > ctx->peak_memory_used) {
+    ctx->peak_memory_used = ctx->memory_used;
+  }
+  ctx->alloc_failure_active = 0;
+  ctx->alloc_failure_is_limit = 0;
+}
+
+static void memory_note_free(fe_Context *ctx, size_t size) {
+  size_t floor = ctx->base_memory_bytes;
+  if (ctx->memory_used >= floor + size) {
+    ctx->memory_used -= size;
+  } else {
+    ctx->memory_used = floor;
+  }
+}
+
+static void* tracked_alloc(fe_Context *ctx, size_t size) {
+  fe_AllocHeader *header;
+  size_t payload = (size > 0) ? size : 1;
+
+  if (size > SIZE_MAX - sizeof(*header)) {
+    ctx->alloc_failure_active = 1;
+    ctx->alloc_failure_is_limit = 0;
+    return NULL;
+  }
+  if (memory_would_exceed_limit(ctx, size)) {
+    ctx->alloc_failure_active = 1;
+    ctx->alloc_failure_is_limit = 1;
+    return NULL;
+  }
+
+  header = malloc(sizeof(*header) + payload);
+  if (!header) {
+    ctx->alloc_failure_active = 1;
+    ctx->alloc_failure_is_limit = 0;
+    return NULL;
+  }
+
+  header->size = size;
+  memory_note_alloc(ctx, size);
+  return header + 1;
+}
+
+static void* tracked_realloc(fe_Context *ctx, void *ptr, size_t new_size) {
+  fe_AllocHeader *header;
+  fe_AllocHeader *grown;
+  size_t payload;
+  size_t old_size;
+
+  if (!ptr) {
+    return tracked_alloc(ctx, new_size);
+  }
+  if (new_size == 0) {
+    tracked_free(ctx, ptr);
+    return NULL;
+  }
+
+  header = ((fe_AllocHeader*)ptr) - 1;
+  old_size = header->size;
+  if (new_size > SIZE_MAX - sizeof(*header)) {
+    ctx->alloc_failure_active = 1;
+    ctx->alloc_failure_is_limit = 0;
+    return NULL;
+  }
+  if (new_size > old_size && memory_would_exceed_limit(ctx, new_size - old_size)) {
+    ctx->alloc_failure_active = 1;
+    ctx->alloc_failure_is_limit = 1;
+    return NULL;
+  }
+
+  payload = new_size;
+  grown = realloc(header, sizeof(*header) + payload);
+  if (!grown) {
+    ctx->alloc_failure_active = 1;
+    ctx->alloc_failure_is_limit = 0;
+    return NULL;
+  }
+
+  grown->size = new_size;
+  if (new_size > old_size) {
+    memory_note_alloc(ctx, new_size - old_size);
+  } else if (old_size > new_size) {
+    memory_note_free(ctx, old_size - new_size);
+  } else {
+    ctx->alloc_failure_active = 0;
+    ctx->alloc_failure_is_limit = 0;
+  }
+  return grown + 1;
+}
+
+static void tracked_free(fe_Context *ctx, void *ptr) {
+  fe_AllocHeader *header;
+  if (!ptr) {
+    return;
+  }
+  header = ((fe_AllocHeader*)ptr) - 1;
+  memory_note_free(ctx, header->size);
+  free(header);
+}
+
+static void memory_error(fe_Context *ctx, const char *fallback_msg) {
+  if (ctx->alloc_failure_is_limit) {
+    fe_error(ctx, "memory limit exceeded");
+  }
+  fe_error(ctx, fallback_msg);
+}
 
 static int list_has(fe_Object *list, fe_Object *item) {
   for (; !isnil(list); list = cdr(list)) {
@@ -318,6 +451,26 @@ size_t fe_get_steps_executed(fe_Context *ctx) {
 }
 
 
+void fe_set_memory_limit(fe_Context *ctx, size_t max_bytes) {
+  ctx->memory_limit = max_bytes;
+}
+
+
+size_t fe_get_memory_limit(fe_Context *ctx) {
+  return ctx->memory_limit;
+}
+
+
+size_t fe_get_memory_used(fe_Context *ctx) {
+  return ctx->memory_used;
+}
+
+
+size_t fe_get_peak_memory_used(fe_Context *ctx) {
+  return ctx->peak_memory_used;
+}
+
+
 void fe_set_timeout_ms(fe_Context *ctx, uint64_t timeout_ms) {
   ctx->timeout_ms = timeout_ms;
   if (timeout_ms > 0) {
@@ -400,18 +553,18 @@ static void check_eval_budget(fe_Context *ctx) {
 }
 
 
-static char* dup_cstring(const char *src) {
+static char* dup_cstring(fe_Context *ctx, const char *src) {
   size_t len;
   char *copy;
   if (!src) return NULL;
   len = strlen(src) + 1;
-  copy = malloc(len);
+  copy = tracked_alloc(ctx, len);
   if (!copy) return NULL;
   memcpy(copy, src, len);
   return copy;
 }
 
-static int ensure_string_array_capacity(char ***items, int *capacity, int needed) {
+static int ensure_string_array_capacity(fe_Context *ctx, char ***items, int *capacity, int needed) {
   int new_capacity;
   char **new_items;
   if (needed <= *capacity) return 1;
@@ -419,36 +572,36 @@ static int ensure_string_array_capacity(char ***items, int *capacity, int needed
   while (new_capacity < needed) {
     new_capacity *= 2;
   }
-  new_items = realloc(*items, sizeof(char*) * new_capacity);
+  new_items = tracked_realloc(ctx, *items, sizeof(char*) * (size_t)new_capacity);
   if (!new_items) return 0;
   *items = new_items;
   *capacity = new_capacity;
   return 1;
 }
 
-static int string_array_push_owned(char ***items, int *count, int *capacity, char *value) {
-  if (!ensure_string_array_capacity(items, capacity, *count + 1)) return 0;
+static int string_array_push_owned(fe_Context *ctx, char ***items, int *count, int *capacity, char *value) {
+  if (!ensure_string_array_capacity(ctx, items, capacity, *count + 1)) return 0;
   (*items)[*count] = value;
   (*count)++;
   return 1;
 }
 
-static int string_array_push_copy(char ***items, int *count, int *capacity, const char *value) {
-  char *copy = dup_cstring(value);
+static int string_array_push_copy(fe_Context *ctx, char ***items, int *count, int *capacity, const char *value) {
+  char *copy = dup_cstring(ctx, value);
   if (!copy) return 0;
-  if (!string_array_push_owned(items, count, capacity, copy)) {
-    free(copy);
+  if (!string_array_push_owned(ctx, items, count, capacity, copy)) {
+    tracked_free(ctx, copy);
     return 0;
   }
   return 1;
 }
 
-static void string_array_clear(char ***items, int *count, int *capacity) {
+static void string_array_clear(fe_Context *ctx, char ***items, int *count, int *capacity) {
   int i;
   for (i = 0; i < *count; i++) {
-    free((*items)[i]);
+    tracked_free(ctx, (*items)[i]);
   }
-  free(*items);
+  tracked_free(ctx, *items);
   *items = NULL;
   *count = 0;
   *capacity = 0;
@@ -462,10 +615,10 @@ static int string_array_contains(char **items, int count, const char *value) {
   return 0;
 }
 
-static void string_array_pop(char **items, int *count) {
+static void string_array_pop(fe_Context *ctx, char **items, int *count) {
   if (*count <= 0) return;
   (*count)--;
-  free(items[*count]);
+  tracked_free(ctx, items[*count]);
   items[*count] = NULL;
 }
 
@@ -473,28 +626,28 @@ static int is_path_separator(char chr) {
   return chr == '/' || chr == '\\';
 }
 
-static char* path_dirname_copy(const char *path) {
+static char* path_dirname_copy(fe_Context *ctx, const char *path) {
   const char *last_sep = NULL;
   const char *p;
   size_t len;
   char *dir;
 
-  if (!path || !*path) return dup_cstring(".");
+  if (!path || !*path) return dup_cstring(ctx, ".");
   for (p = path; *p; p++) {
     if (is_path_separator(*p)) last_sep = p;
   }
-  if (!last_sep) return dup_cstring(".");
+  if (!last_sep) return dup_cstring(ctx, ".");
 
   len = (size_t)(last_sep - path);
   if (len == 0) len = 1;
-  dir = malloc(len + 1);
+  dir = tracked_alloc(ctx, len + 1);
   if (!dir) return NULL;
   memcpy(dir, path, len);
   dir[len] = '\0';
   return dir;
 }
 
-static char* join_module_path(const char *base, const char *module_name) {
+static char* join_module_path(fe_Context *ctx, const char *base, const char *module_name) {
   static const char suffix[] = ".fex";
   size_t base_len;
   size_t module_len;
@@ -504,7 +657,7 @@ static char* join_module_path(const char *base, const char *module_name) {
   base_len = strlen(base);
   module_len = strlen(module_name);
   needs_sep = (base_len > 0 && !is_path_separator(base[base_len - 1])) ? 1 : 0;
-  path = malloc(base_len + needs_sep + module_len + sizeof(suffix));
+  path = tracked_alloc(ctx, base_len + needs_sep + module_len + sizeof(suffix));
   if (!path) return NULL;
   memcpy(path, base, base_len);
   if (needs_sep) path[base_len++] = '/';
@@ -521,7 +674,8 @@ static int file_exists(const char *path) {
   return 1;
 }
 
-static char* read_text_file(const char *path) {
+static char* read_text_file(fe_Context *ctx, const char *path) {
+  enum { SOURCE_BUFFER_TAIL_SLACK = 8 };
   FILE *file;
   long file_size;
   size_t bytes_read;
@@ -540,35 +694,37 @@ static char* read_text_file(const char *path) {
   }
   rewind(file);
 
-  buffer = malloc((size_t)file_size + 1);
+  /* Keep a few trailing NUL bytes so lexer/parser lookahead never steps
+   * into uninitialized heap memory at the end of file-backed sources. */
+  buffer = tracked_alloc(ctx, (size_t)file_size + SOURCE_BUFFER_TAIL_SLACK);
   if (!buffer) {
     fclose(file);
     return NULL;
   }
   bytes_read = fread(buffer, 1, (size_t)file_size, file);
   if (bytes_read != (size_t)file_size && ferror(file)) {
-    free(buffer);
+    tracked_free(ctx, buffer);
     fclose(file);
     return NULL;
   }
-  buffer[bytes_read] = '\0';
+  memset(buffer + bytes_read, 0, SOURCE_BUFFER_TAIL_SLACK);
   fclose(file);
   return buffer;
 }
 
 static int push_source_dir_from_file(fe_Context *ctx, const char *path) {
-  char *dir = path_dirname_copy(path);
+  char *dir = path_dirname_copy(ctx, path);
   if (!dir) return 0;
-  if (!string_array_push_owned(&ctx->source_dirs, &ctx->source_dir_count,
+  if (!string_array_push_owned(ctx, &ctx->source_dirs, &ctx->source_dir_count,
                                &ctx->source_dir_capacity, dir)) {
-    free(dir);
+    tracked_free(ctx, dir);
     return 0;
   }
   return 1;
 }
 
 static void pop_source_dir(fe_Context *ctx) {
-  string_array_pop(ctx->source_dirs, &ctx->source_dir_count);
+  string_array_pop(ctx, ctx->source_dirs, &ctx->source_dir_count);
 }
 
 static char* resolve_module_file(fe_Context *ctx, const char *module_name) {
@@ -576,45 +732,45 @@ static char* resolve_module_file(fe_Context *ctx, const char *module_name) {
   char *candidate;
 
   if (ctx->source_dir_count > 0) {
-    candidate = join_module_path(ctx->source_dirs[ctx->source_dir_count - 1], module_name);
+    candidate = join_module_path(ctx, ctx->source_dirs[ctx->source_dir_count - 1], module_name);
     if (!candidate) return NULL;
     if (file_exists(candidate)) return candidate;
-    free(candidate);
+    tracked_free(ctx, candidate);
   }
 
   for (i = 0; i < ctx->import_path_count; i++) {
-    candidate = join_module_path(ctx->import_paths[i], module_name);
+    candidate = join_module_path(ctx, ctx->import_paths[i], module_name);
     if (!candidate) return NULL;
     if (file_exists(candidate)) return candidate;
-    free(candidate);
+    tracked_free(ctx, candidate);
   }
 
-  candidate = join_module_path(".", module_name);
+  candidate = join_module_path(ctx, ".", module_name);
   if (!candidate) return NULL;
   if (file_exists(candidate)) return candidate;
-  free(candidate);
+  tracked_free(ctx, candidate);
   return NULL;
 }
 
 void fex_clear_import_paths(fe_Context *ctx) {
-  string_array_clear(&ctx->import_paths, &ctx->import_path_count, &ctx->import_path_capacity);
+  string_array_clear(ctx, &ctx->import_paths, &ctx->import_path_count, &ctx->import_path_capacity);
 }
 
 int fex_add_import_path(fe_Context *ctx, const char *path) {
   if (!path || !*path) return 0;
-  return string_array_push_copy(&ctx->import_paths, &ctx->import_path_count,
+  return string_array_push_copy(ctx, &ctx->import_paths, &ctx->import_path_count,
                                 &ctx->import_path_capacity, path);
 }
 
 void fex_reset_import_state(fe_Context *ctx) {
   while (ctx->source_buffer_count > 0) {
-    string_array_pop(ctx->source_buffers, &ctx->source_buffer_count);
+    string_array_pop(ctx, ctx->source_buffers, &ctx->source_buffer_count);
   }
   while (ctx->source_dir_count > 0) {
     pop_source_dir(ctx);
   }
   while (ctx->loading_module_count > 0) {
-    string_array_pop(ctx->loading_modules, &ctx->loading_module_count);
+    string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
   }
 }
 
@@ -623,26 +779,29 @@ fe_Object* fex_do_file(fe_Context *ctx, const char *path) {
   fe_Object *result;
 
   if (!push_source_dir_from_file(ctx, path)) {
-    fe_error(ctx, "out of memory (source path)");
+    memory_error(ctx, "out of memory (source path)");
   }
 
-  source = read_text_file(path);
+  source = read_text_file(ctx, path);
   if (!source) {
     pop_source_dir(ctx);
+    if (ctx->alloc_failure_active) {
+      memory_error(ctx, "out of memory (source file)");
+    }
     if (fex_try_is_active()) {
       fex_try_raise(FEX_STATUS_IO_ERROR, path, 0, 0, "could not open input file");
     }
     return NULL;
   }
-  if (!string_array_push_owned(&ctx->source_buffers, &ctx->source_buffer_count,
+  if (!string_array_push_owned(ctx, &ctx->source_buffers, &ctx->source_buffer_count,
                                &ctx->source_buffer_capacity, source)) {
     pop_source_dir(ctx);
-    free(source);
-    fe_error(ctx, "out of memory (source path)");
+    tracked_free(ctx, source);
+    memory_error(ctx, "out of memory (source path)");
   }
 
   result = fex_do_string_named(ctx, source, path);
-  string_array_pop(ctx->source_buffers, &ctx->source_buffer_count);
+  string_array_pop(ctx, ctx->source_buffers, &ctx->source_buffer_count);
   pop_source_dir(ctx);
   return result;
 }
@@ -868,15 +1027,15 @@ static void collectgarbage(fe_Context *ctx) {
       }
 #else
       if ((type(obj)==FE_TSTRING || type(obj)==FE_TBYTES) && FE_STR_DATA(ctx, obj)) {
-          free(FE_STR_DATA(ctx, obj));
+          tracked_free(ctx, FE_STR_DATA(ctx, obj));
       }
 #endif
       if (type(obj) == FE_TMAP && mapdata(obj)) {
         fe_Map *map = mapdata(obj);
-        free(map->keys);
-        free(map->values);
-        free(map->states);
-        free(map);
+        tracked_free(ctx, map->keys);
+        tracked_free(ctx, map->values);
+        tracked_free(ctx, map->states);
+        tracked_free(ctx, map);
       }
       if (type(obj) == FE_TPTR && ctx->handlers.gc) {
         ctx->handlers.gc(ctx, obj);
@@ -1029,23 +1188,23 @@ static unsigned long hash_string_obj(fe_Context *ctx, fe_Object *obj) {
   return hash;
 }
 
-static fe_Map* map_alloc(int capacity) {
+static fe_Map* map_alloc(fe_Context *ctx, int capacity) {
   fe_Map *map;
-  map = malloc(sizeof(*map));
+  map = tracked_alloc(ctx, sizeof(*map));
   if (!map) {
     return NULL;
   }
   map->count = 0;
   map->used = 0;
   map->capacity = capacity;
-  map->keys = malloc(sizeof(fe_Object*) * capacity);
-  map->values = malloc(sizeof(fe_Object*) * capacity);
-  map->states = malloc(sizeof(unsigned char) * capacity);
+  map->keys = tracked_alloc(ctx, sizeof(fe_Object*) * (size_t)capacity);
+  map->values = tracked_alloc(ctx, sizeof(fe_Object*) * (size_t)capacity);
+  map->states = tracked_alloc(ctx, sizeof(unsigned char) * (size_t)capacity);
   if (!map->keys || !map->values || !map->states) {
-    free(map->keys);
-    free(map->values);
-    free(map->states);
-    free(map);
+    tracked_free(ctx, map->keys);
+    tracked_free(ctx, map->values);
+    tracked_free(ctx, map->states);
+    tracked_free(ctx, map);
     return NULL;
   }
   memset(map->keys, 0, sizeof(fe_Object*) * capacity);
@@ -1058,7 +1217,7 @@ static int map_resize(fe_Context *ctx, fe_Map *map, int capacity) {
   fe_Map *grown;
   int i;
 
-  grown = map_alloc(capacity);
+  grown = map_alloc(ctx, capacity);
   if (!grown) {
     return 0;
   }
@@ -1071,10 +1230,10 @@ static int map_resize(fe_Context *ctx, fe_Map *map, int capacity) {
     }
     slot = map_find_slot(ctx, grown, map->keys[i], &found);
     if (slot < 0) {
-      free(grown->keys);
-      free(grown->values);
-      free(grown->states);
-      free(grown);
+      tracked_free(ctx, grown->keys);
+      tracked_free(ctx, grown->values);
+      tracked_free(ctx, grown->states);
+      tracked_free(ctx, grown);
       return 0;
     }
     grown->states[slot] = MAP_USED;
@@ -1084,16 +1243,16 @@ static int map_resize(fe_Context *ctx, fe_Map *map, int capacity) {
     grown->used++;
   }
 
-  free(map->keys);
-  free(map->values);
-  free(map->states);
+  tracked_free(ctx, map->keys);
+  tracked_free(ctx, map->values);
+  tracked_free(ctx, map->states);
   map->keys = grown->keys;
   map->values = grown->values;
   map->states = grown->states;
   map->count = grown->count;
   map->used = grown->used;
   map->capacity = grown->capacity;
-  free(grown);
+  tracked_free(ctx, grown);
   return 1;
 }
 
@@ -1148,9 +1307,9 @@ static int map_find_slot(fe_Context *ctx, fe_Map *map, fe_Object *key, int *foun
 
 fe_Object* fe_map(fe_Context *ctx) {
   fe_Object *obj = object(ctx);
-  fe_Map *map = map_alloc(8);
+  fe_Map *map = map_alloc(ctx, 8);
   if (!map) {
-    fe_error(ctx, "out of memory (map)");
+    memory_error(ctx, "out of memory (map)");
   }
   settype(obj, FE_TMAP);
   car(obj) = &nil;
@@ -1171,12 +1330,12 @@ int fe_map_set(fe_Context *ctx, fe_Object *map_obj, fe_Object *key, fe_Object *v
 
   map = mapdata(map_obj);
   if (!map_ensure_capacity(ctx, map)) {
-    fe_error(ctx, "out of memory (map)");
+    memory_error(ctx, "out of memory (map)");
   }
 
   slot = map_find_slot(ctx, map, key, &found);
   if (slot < 0) {
-    fe_error(ctx, "out of memory (map)");
+    memory_error(ctx, "out of memory (map)");
   }
   if (!found) {
     if (map->states[slot] == MAP_EMPTY) {
@@ -1387,8 +1546,8 @@ static fe_Object* make_data_obj(fe_Context *ctx,
 #ifdef FE_OPT_NO_MALLOC_STRINGS
     o->cdr.u32 = str_alloc(ctx, src, len, fill_char);
 #else
-    char *buf = malloc(len+1);
-    if (!buf) fe_error(ctx, "out of memory (string)");
+    char *buf = tracked_alloc(ctx, len + 1);
+    if (!buf) memory_error(ctx, "out of memory (string)");
     ctx->bytes_since_gc += len + 1;
     if (src)
     {
@@ -1874,24 +2033,33 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
         return make_data_obj(ctx, FE_TSTRING, s_buf, len, 0);
 #else
         size_t cap = GROW_STEP, len = 0;
-        char *s_buf = malloc(cap);
-        if (!s_buf) fe_error(ctx, "out of memory (string)");
+        char *s_buf = tracked_alloc(ctx, cap);
+        if (!s_buf) memory_error(ctx, "out of memory (string)");
 
         chr = fn(ctx, udata);
         while (chr!='"') {
-          if (chr=='\0') { free(s_buf); fe_error(ctx, "unclosed string"); }
+          if (chr=='\0') { tracked_free(ctx, s_buf); fe_error(ctx, "unclosed string"); }
           if (chr=='\\') {
               chr = fn(ctx, udata);
               if (chr=='n') chr='\n';
               else if (chr=='r') chr='\r';
               else if (chr=='t') chr='\t';
           }
-          if (len+1>=cap) { cap+=GROW_STEP; s_buf=realloc(s_buf,cap); }
+          if (len+1>=cap) {
+            char *grown;
+            cap += GROW_STEP;
+            grown = tracked_realloc(ctx, s_buf, cap);
+            if (!grown) {
+              tracked_free(ctx, s_buf);
+              memory_error(ctx, "out of memory (string)");
+            }
+            s_buf = grown;
+          }
           s_buf[len++]=chr;
           chr = fn(ctx, udata);
         }
         fe_Object* str_obj = make_data_obj(ctx, FE_TSTRING, s_buf, len, 0);
-        free(s_buf);
+        tracked_free(ctx, s_buf);
         return str_obj;
 #endif
       }
@@ -2013,29 +2181,32 @@ static fe_Object* import_module(fe_Context *ctx, fe_Object *sym) {
 
   module_path = resolve_module_file(ctx, module_name);
   if (!module_path) {
+    if (ctx->alloc_failure_active) {
+      memory_error(ctx, "out of memory (module path)");
+    }
     sprintf(error_buf, "could not resolve module '%s'", module_name);
     fe_error(ctx, error_buf);
   }
 
-  if (!string_array_push_copy(&ctx->loading_modules, &ctx->loading_module_count,
+  if (!string_array_push_copy(ctx, &ctx->loading_modules, &ctx->loading_module_count,
                               &ctx->loading_module_capacity, module_name)) {
-    free(module_path);
-    fe_error(ctx, "out of memory (import state)");
+    tracked_free(ctx, module_path);
+    memory_error(ctx, "out of memory (import state)");
   }
 
   result = fex_do_file(ctx, module_path);
-  free(module_path);
+  tracked_free(ctx, module_path);
 
   if (result == NULL) {
-    string_array_pop(ctx->loading_modules, &ctx->loading_module_count);
+    string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
     fe_error(ctx, "failed to import module");
   }
 
-  string_array_pop(ctx->loading_modules, &ctx->loading_module_count);
+  string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
   if (!string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, module_name)) {
-    if (!string_array_push_copy(&ctx->loaded_modules, &ctx->loaded_module_count,
+    if (!string_array_push_copy(ctx, &ctx->loaded_modules, &ctx->loaded_module_count,
                                 &ctx->loaded_module_capacity, module_name)) {
-      fe_error(ctx, "out of memory (module cache)");
+      memory_error(ctx, "out of memory (module cache)");
     }
   }
 
@@ -2052,6 +2223,8 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
   if (type(obj) == FE_TSYMBOL) { return cdr(getbound(obj, env)); }
   if (type(obj) != FE_TPAIR) { return obj; }
 
+  /* Call stack frames are synthetic pair cells that live on the C stack. */
+  tag(&cl) = 0;
   car(&cl) = obj, cdr(&cl) = ctx->calllist;
   ctx->calllist = &cl;
 
@@ -2086,9 +2259,9 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           fe_tostring(ctx, name_obj, name_buf, sizeof(name_buf));
           fe_set(ctx, fe_symbol(ctx, name_buf), exports);
           if (!string_array_contains(ctx->loaded_modules, ctx->loaded_module_count, name_buf)) {
-            if (!string_array_push_copy(&ctx->loaded_modules, &ctx->loaded_module_count,
+            if (!string_array_push_copy(ctx, &ctx->loaded_modules, &ctx->loaded_module_count,
                                         &ctx->loaded_module_capacity, name_buf)) {
-              fe_error(ctx, "out of memory (module cache)");
+              memory_error(ctx, "out of memory (module cache)");
             }
           }
           res = exports;
@@ -2457,6 +2630,12 @@ fe_Context* fe_open(void *ptr, size_t size) {
   if (total_mem < sizeof(fe_Context)) return NULL;
   ctx = ptr;
   memset(ctx, 0, sizeof(fe_Context));
+  ctx->base_memory_bytes = total_mem;
+  ctx->memory_limit = 0;
+  ctx->memory_used = total_mem;
+  ctx->peak_memory_used = total_mem;
+  ctx->alloc_failure_active = 0;
+  ctx->alloc_failure_is_limit = 0;
 
   void* arenas_ptr = (char*) ptr + sizeof(fe_Context);
   size_t arenas_sz = total_mem - sizeof(fe_Context);
@@ -2548,11 +2727,11 @@ void fe_close(fe_Context *ctx) {
   ctx->gcstack_idx = 0;
   ctx->symlist = &nil;
   collectgarbage(ctx);
-  string_array_clear(&ctx->import_paths, &ctx->import_path_count, &ctx->import_path_capacity);
-  string_array_clear(&ctx->source_dirs, &ctx->source_dir_count, &ctx->source_dir_capacity);
-  string_array_clear(&ctx->source_buffers, &ctx->source_buffer_count, &ctx->source_buffer_capacity);
-  string_array_clear(&ctx->loading_modules, &ctx->loading_module_count, &ctx->loading_module_capacity);
-  string_array_clear(&ctx->loaded_modules, &ctx->loaded_module_count, &ctx->loaded_module_capacity);
+  string_array_clear(ctx, &ctx->import_paths, &ctx->import_path_count, &ctx->import_path_capacity);
+  string_array_clear(ctx, &ctx->source_dirs, &ctx->source_dir_count, &ctx->source_dir_capacity);
+  string_array_clear(ctx, &ctx->source_buffers, &ctx->source_buffer_count, &ctx->source_buffer_capacity);
+  string_array_clear(ctx, &ctx->loading_modules, &ctx->loading_module_count, &ctx->loading_module_capacity);
+  string_array_clear(ctx, &ctx->loaded_modules, &ctx->loaded_module_count, &ctx->loaded_module_capacity);
 }
 
 
