@@ -52,6 +52,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -3030,6 +3031,15 @@ static DWORD WINAPI process_input_writer_thread(void *param) {
     writer->error_code = 0;
     return 0;
 }
+
+static void terminate_windows_process(HANDLE *process_handle) {
+    if (*process_handle != NULL && *process_handle != INVALID_HANDLE_VALUE) {
+        TerminateProcess(*process_handle, 1);
+        WaitForSingleObject(*process_handle, INFINITE);
+        CloseHandle(*process_handle);
+        *process_handle = NULL;
+    }
+}
 #endif
 
 #ifdef _WIN32
@@ -3102,6 +3112,25 @@ static int drain_windows_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
     return 1;
 }
 #else
+static void terminate_posix_process(pid_t *pid) {
+    int wait_status = 0;
+
+    if (*pid <= 0) {
+        return;
+    }
+
+    kill(*pid, SIGKILL);
+    for (;;) {
+        if (waitpid(*pid, &wait_status, 0) >= 0) {
+            break;
+        }
+        if (errno != EINTR) {
+            break;
+        }
+    }
+    *pid = -1;
+}
+
 static int write_posix_input_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
                                   const unsigned char *data, size_t len,
                                   size_t *offset, const char *func_name,
@@ -3337,10 +3366,13 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     int stdout_overflow = 0;
     int stderr_overflow = 0;
     int ok = 0;
+    const char *abort_error = NULL;
 #ifdef _WIN32
     HANDLE stdin_thread = NULL;
+    HANDLE child_process = NULL;
     ProcessInputWriter stdin_writer;
 #else
+    pid_t child_pid = -1;
     size_t stdin_offset = 0;
 #endif
 
@@ -3454,6 +3486,7 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
         free(command_line);
         free(environment);
         CloseHandle(process_info.hThread);
+        child_process = process_info.hProcess;
         close_process_capture_pipe_read(&stdin_pipe);
         close_temp_redirect_file(&stdout_redirect);
         close_temp_redirect_file(&stderr_redirect);
@@ -3468,7 +3501,6 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
                                         &stdin_writer, 0, NULL);
             if (stdin_thread == NULL) {
                 fe_error(ctx, "runprocess: could not start stdin writer");
-                CloseHandle(process_info.hProcess);
                 goto cleanup;
             }
             stdin_pipe.write_handle = INVALID_HANDLE_VALUE;
@@ -3478,14 +3510,26 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
 
         if (options->stdout_mode != PROCESS_STREAM_CAPTURE &&
             options->stderr_mode != PROCESS_STREAM_CAPTURE) {
-            wait_result = WaitForSingleObject(process_info.hProcess, INFINITE);
-            if (wait_result != WAIT_OBJECT_0 ||
-                !GetExitCodeProcess(process_info.hProcess, &raw_exit_code)) {
-                CloseHandle(process_info.hProcess);
+            for (;;) {
+                abort_error = fe_poll_abort(ctx);
+                if (abort_error != NULL) {
+                    goto cleanup;
+                }
+                wait_result = WaitForSingleObject(child_process, 10);
+                if (wait_result == WAIT_OBJECT_0) {
+                    break;
+                }
+                if (wait_result != WAIT_TIMEOUT) {
+                    fe_error(ctx, "runprocess: could not wait for process");
+                    goto cleanup;
+                }
+            }
+            if (!GetExitCodeProcess(child_process, &raw_exit_code)) {
                 fe_error(ctx, "runprocess: could not wait for process");
                 goto cleanup;
             }
-            CloseHandle(process_info.hProcess);
+            CloseHandle(child_process);
+            child_process = NULL;
             output->exit_code = (int)raw_exit_code;
         } else {
             int process_finished = 0;
@@ -3495,12 +3539,15 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
             while (!process_finished || stdout_open || stderr_open) {
                 int made_progress = 0;
 
+                abort_error = fe_poll_abort(ctx);
+                if (abort_error != NULL) {
+                    goto cleanup;
+                }
                 if (stdout_open &&
                     !drain_windows_capture_pipe(ctx, &stdout_pipe, &stdout_buf,
                                                 options->max_stdout, &stdout_overflow,
                                                 func_name, process_finished,
                                                 &stdout_open, &made_progress)) {
-                    CloseHandle(process_info.hProcess);
                     goto cleanup;
                 }
                 if (stderr_open &&
@@ -3508,37 +3555,47 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
                                                 options->max_stderr, &stderr_overflow,
                                                 func_name, process_finished,
                                                 &stderr_open, &made_progress)) {
-                    CloseHandle(process_info.hProcess);
                     goto cleanup;
                 }
 
                 if (!process_finished) {
-                    wait_result = WaitForSingleObject(process_info.hProcess,
+                    wait_result = WaitForSingleObject(child_process,
                                                      made_progress ? 0 : 10);
                     if (wait_result == WAIT_OBJECT_0) {
-                        if (!GetExitCodeProcess(process_info.hProcess, &raw_exit_code)) {
-                            CloseHandle(process_info.hProcess);
+                        if (!GetExitCodeProcess(child_process, &raw_exit_code)) {
                             fe_error(ctx, "runprocess: could not wait for process");
                             goto cleanup;
                         }
                         output->exit_code = (int)raw_exit_code;
+                        CloseHandle(child_process);
+                        child_process = NULL;
                         process_finished = 1;
                     } else if (wait_result != WAIT_TIMEOUT) {
-                        CloseHandle(process_info.hProcess);
                         fe_error(ctx, "runprocess: could not wait for process");
                         goto cleanup;
                     }
                 }
             }
-
-            CloseHandle(process_info.hProcess);
         }
 
         if (stdin_thread != NULL) {
-            wait_result = WaitForSingleObject(stdin_thread, INFINITE);
+            for (;;) {
+                abort_error = fe_poll_abort(ctx);
+                if (abort_error != NULL) {
+                    goto cleanup;
+                }
+                wait_result = WaitForSingleObject(stdin_thread, 10);
+                if (wait_result == WAIT_OBJECT_0) {
+                    break;
+                }
+                if (wait_result != WAIT_TIMEOUT) {
+                    fe_error(ctx, "runprocess: could not write stdin");
+                    goto cleanup;
+                }
+            }
             CloseHandle(stdin_thread);
             stdin_thread = NULL;
-            if (wait_result != WAIT_OBJECT_0 || stdin_writer.failed) {
+            if (stdin_writer.failed) {
                 fe_error(ctx, "runprocess: could not write stdin");
                 goto cleanup;
             }
@@ -3548,6 +3605,7 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     {
         pid_t pid;
         int status = 0;
+        pid_t waited;
 
         pid = fork();
         if (pid < 0) {
@@ -3597,6 +3655,7 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
             _exit(127);
         }
 
+        child_pid = pid;
         close_process_capture_pipe_read(&stdin_pipe);
         close_temp_redirect_file(&stdout_redirect);
         close_temp_redirect_file(&stderr_redirect);
@@ -3606,12 +3665,28 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
         if (options->stdout_mode != PROCESS_STREAM_CAPTURE &&
             options->stderr_mode != PROCESS_STREAM_CAPTURE &&
             options->stdin_len == 0) {
+            struct timeval sleep_timeout;
+
             close_process_capture_pipe_write(&stdin_pipe);
-            if (waitpid(pid, &status, 0) < 0) {
-                fe_error(ctx, "runprocess: could not wait for process");
-                goto cleanup;
+            for (;;) {
+                abort_error = fe_poll_abort(ctx);
+                if (abort_error != NULL) {
+                    goto cleanup;
+                }
+                waited = waitpid(child_pid, &status, WNOHANG);
+                if (waited == child_pid) {
+                    output->exit_code = decode_process_exit_code(status);
+                    child_pid = -1;
+                    break;
+                }
+                if (waited < 0) {
+                    fe_error(ctx, "runprocess: could not wait for process");
+                    goto cleanup;
+                }
+                sleep_timeout.tv_sec = 0;
+                sleep_timeout.tv_usec = 10000;
+                select(0, NULL, NULL, NULL, &sleep_timeout);
             }
-            output->exit_code = decode_process_exit_code(status);
         } else {
             int process_finished = 0;
             int stdin_open = 1;
@@ -3626,10 +3701,15 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
             while (!process_finished || stdin_open || stdout_open || stderr_open) {
                 int made_progress = 0;
 
+                abort_error = fe_poll_abort(ctx);
+                if (abort_error != NULL) {
+                    goto cleanup;
+                }
                 if (!process_finished) {
-                    pid_t waited = waitpid(pid, &status, WNOHANG);
-                    if (waited == pid) {
+                    waited = waitpid(child_pid, &status, WNOHANG);
+                    if (waited == child_pid) {
                         output->exit_code = decode_process_exit_code(status);
+                        child_pid = -1;
                         process_finished = 1;
                     } else if (waited < 0) {
                         fe_error(ctx, "runprocess: could not wait for process");
@@ -3700,6 +3780,12 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
                                                   &made_progress)) {
                         goto cleanup;
                     }
+                } else if (!process_finished) {
+                    struct timeval sleep_timeout;
+
+                    sleep_timeout.tv_sec = 0;
+                    sleep_timeout.tv_usec = 10000;
+                    select(0, NULL, NULL, NULL, &sleep_timeout);
                 }
             }
         }
@@ -3729,6 +3815,20 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     ok = 1;
 
 cleanup:
+#ifdef _WIN32
+    if (child_process != NULL) {
+        terminate_windows_process(&child_process);
+    }
+    if (stdin_thread != NULL) {
+        WaitForSingleObject(stdin_thread, INFINITE);
+        CloseHandle(stdin_thread);
+        stdin_thread = NULL;
+    }
+#else
+    if (child_pid > 0) {
+        terminate_posix_process(&child_pid);
+    }
+#endif
     destroy_process_capture_pipe(&stdin_pipe);
     destroy_temp_redirect_file(&stdout_redirect);
     destroy_temp_redirect_file(&stderr_redirect);
@@ -3738,6 +3838,9 @@ cleanup:
     buf_free(&stderr_buf);
     if (!ok) {
         free_process_output(output);
+        if (abort_error != NULL) {
+            fe_error(ctx, abort_error);
+        }
     }
     return ok;
 }

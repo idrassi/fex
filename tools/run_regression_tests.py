@@ -93,6 +93,16 @@ def runprocess_limit_case_source() -> str:
     )
 
 
+def runprocess_timeout_case_source() -> str:
+    python_exe = str(Path(sys.executable).resolve())
+    script = "import time; time.sleep(5)"
+    return (
+        f"runprocess({fex_string_literal(python_exe)}, "
+        f"[\"-c\", {fex_string_literal(script)}], "
+        'makemap("stdout", "discard", "stderr", "discard"));\n'
+    )
+
+
 def fs_helpers_case_source() -> str:
     return (
         'println("--- FS Helpers Regression ---");\n'
@@ -331,6 +341,15 @@ CASES = [
         "exit_code": 70,
         "stderr_contains": [
             "runtime error: runprocess stdout: file too large",
+        ],
+    },
+    {
+        "name": "runprocess timeout budget",
+        "source": runprocess_timeout_case_source(),
+        "args": ["--builtin", "system,data", "--timeout-ms", "50", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: execution timeout exceeded",
         ],
     },
     {

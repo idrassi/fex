@@ -119,6 +119,7 @@ void fe_set_timeout_ms(fe_Context *ctx, uint64_t timeout_ms);
 uint64_t fe_get_timeout_ms(fe_Context *ctx);
 void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
                               void *udata, size_t check_interval_steps);
+const char* fe_poll_abort(fe_Context *ctx);
 ```
 
 These low-level `fe` APIs let a host bound script execution without killing the process.
@@ -130,8 +131,9 @@ These low-level `fe` APIs let a host bound script execution without killing the 
 - `fe_get_memory_used()` and `fe_get_peak_memory_used()` report current and peak tracked memory usage, including the base arena memory passed to `fe_open()`.
 - `fe_get_stats()` fills a `fe_Stats` snapshot with the current limits, memory usage, object-capacity figures, total object allocations, and GC run count.
 - `fe_set_interrupt_handler()` installs a callback that runs every `check_interval_steps` evaluations. If it returns non-zero, evaluation stops with the runtime error `"execution interrupted"`.
+- `fe_poll_abort()` checks the timeout and interrupt handler without consuming an evaluator step. Hosts can call it from long-running native callbacks or blocking helper code and surface the returned message with `fe_error()` after their own cleanup.
 
-Use `fe_set_timeout_ms()` when a simple wall-clock deadline is enough. Use `fe_set_interrupt_handler()` when the host needs custom timeout policy or external cancellation. Combine `fe_set_memory_limit()` with the step and timeout controls when embedding untrusted or potentially large workloads.
+Use `fe_set_timeout_ms()` when a simple wall-clock deadline is enough. Use `fe_set_interrupt_handler()` when the host needs custom timeout policy or external cancellation. Use `fe_poll_abort()` inside blocking native work that should honor those limits. Combine `fe_set_memory_limit()` with the step and timeout controls when embedding untrusted or potentially large workloads.
 
 `fe_Stats` is a plain snapshot struct:
 

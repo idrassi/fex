@@ -95,6 +95,7 @@ void fe_set_timeout_ms(fe_Context *ctx, uint64_t timeout_ms);
 uint64_t fe_get_timeout_ms(fe_Context *ctx);
 void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
                               void *udata, size_t check_interval_steps);
+const char* fe_poll_abort(fe_Context *ctx);
 void fe_error(fe_Context *ctx, const char *msg);
 fe_Object* fe_nextarg(fe_Context *ctx, fe_Object **arg);
 int fe_type(fe_Context *ctx, fe_Object *obj);

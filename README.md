@@ -326,7 +326,7 @@ int main(void) {
 
 If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `pathjoin`, `exists`, `listdir`, `mkdirp`, `cwd`, `getenv`, `runcommand`, or `runprocess`, you can still use `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` for the full set. For production embedding, prefer `fex_init_with_builtins(ctx, flags, mask)` so you can expose only the categories you actually want, for example `FEX_BUILTINS_SAFE`, `FEX_BUILTINS_IO`, or `FEX_BUILTINS_SYSTEM`.
 
-For runtime sandboxing, the core `fe` API now also exposes `fe_set_step_limit(ctx, max_steps)`, `fe_set_memory_limit(ctx, max_bytes)`, `fe_set_timeout_ms(ctx, timeout_ms)`, and `fe_set_interrupt_handler(...)`. Hosts can inspect `fe_get_memory_used(ctx)`, `fe_get_peak_memory_used(ctx)`, or take a full `fe_get_stats(ctx, &stats)` snapshot to observe current runtime state. Use the fixed step and memory limits for simple sandboxing, the timeout convenience layer for wall-clock deadlines, or an interrupt callback for custom cancellation policy.
+For runtime sandboxing, the core `fe` API now also exposes `fe_set_step_limit(ctx, max_steps)`, `fe_set_memory_limit(ctx, max_bytes)`, `fe_set_timeout_ms(ctx, timeout_ms)`, `fe_set_interrupt_handler(...)`, and `fe_poll_abort(ctx)`. Hosts can inspect `fe_get_memory_used(ctx)`, `fe_get_peak_memory_used(ctx)`, or take a full `fe_get_stats(ctx, &stats)` snapshot to observe current runtime state. Use the fixed step and memory limits for simple sandboxing, the timeout convenience layer for wall-clock deadlines, an interrupt callback for custom cancellation policy, and `fe_poll_abort(ctx)` inside long-running native helpers that need to honor those limits after their own cleanup.
 
 ## Architecture
 

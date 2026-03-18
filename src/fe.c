@@ -545,16 +545,12 @@ static void end_eval_run(fe_Context *ctx) {
 }
 
 
-static void check_eval_budget(fe_Context *ctx) {
-  ctx->steps_executed++;
-  if (ctx->step_limit > 0 && ctx->steps_executed > ctx->step_limit) {
-    fe_error(ctx, "execution step limit exceeded");
-  }
+static const char* poll_eval_abort(fe_Context *ctx) {
   if (ctx->timeout_ms > 0) {
     if (ctx->timeout_countdown <= 1) {
       ctx->timeout_countdown = TIMEOUT_CHECK_INTERVAL;
       if (current_time_ms() >= ctx->timeout_deadline_ms) {
-        fe_error(ctx, "execution timeout exceeded");
+        return "execution timeout exceeded";
       }
     } else {
       ctx->timeout_countdown--;
@@ -564,11 +560,31 @@ static void check_eval_budget(fe_Context *ctx) {
     if (ctx->interrupt_countdown <= 1) {
       ctx->interrupt_countdown = ctx->interrupt_interval;
       if (ctx->interrupt_handler(ctx, ctx->interrupt_udata)) {
-        fe_error(ctx, "execution interrupted");
+        return "execution interrupted";
       }
     } else {
       ctx->interrupt_countdown--;
     }
+  }
+  return NULL;
+}
+
+
+const char* fe_poll_abort(fe_Context *ctx) {
+  return poll_eval_abort(ctx);
+}
+
+
+static void check_eval_budget(fe_Context *ctx) {
+  const char *abort_msg;
+
+  ctx->steps_executed++;
+  if (ctx->step_limit > 0 && ctx->steps_executed > ctx->step_limit) {
+    fe_error(ctx, "execution step limit exceeded");
+  }
+  abort_msg = poll_eval_abort(ctx);
+  if (abort_msg != NULL) {
+    fe_error(ctx, abort_msg);
   }
 }
 
