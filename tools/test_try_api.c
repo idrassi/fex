@@ -190,20 +190,21 @@ int main(void) {
 
     {
         int interrupt_calls = 0;
-        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 8);
+        fe_set_timeout_ms(ctx, 100);
+        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 1);
         status = fex_try_do_string(
             ctx,
-            "let n = 0;\n"
-            "while (n < 1000) { n = n + 1; }\n",
+            budget_loop_source,
             &result,
             &error
         );
+        fe_set_timeout_ms(ctx, 0);
         fe_set_interrupt_handler(ctx, NULL, NULL, 0);
         if (status != FEX_STATUS_RUNTIME_ERROR ||
             strstr(error.message, "execution interrupted") == NULL) {
             fe_close(ctx);
             free(memory);
-            return fail("expected interrupt handler to stop evaluation");
+            return fail_status("expected interrupt handler to stop evaluation", status, &error);
         }
         if (interrupt_calls < 1) {
             fe_close(ctx);
