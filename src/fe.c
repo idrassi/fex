@@ -1260,6 +1260,7 @@ void fex_reset_import_state(fe_Context *ctx) {
   while (ctx->loading_module_count > 0) {
     string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
   }
+  ctx->modulestack = &nil;
 }
 
 static fe_Object* do_file_common(fe_Context *ctx, const char *path,

@@ -1312,6 +1312,7 @@ FexStatus fex_try_run_internal(fe_Context *ctx, fe_Object **out_result,
                                const void *arg_a, const void *arg_b) {
     FexTryScope scope;
     fe_ErrorFn previous_error = fe_handlers(ctx)->error;
+    int gc_save = fe_savegc(ctx);
     int jump_result;
 
     if (out_result) {
@@ -1337,6 +1338,7 @@ FexStatus fex_try_run_internal(fe_Context *ctx, fe_Object **out_result,
 
     g_try_scope = scope.previous;
     fe_handlers(ctx)->error = previous_error;
+    fe_restoregc(ctx, gc_save);
     fex_reset_import_state(ctx);
     if (out_error && out_error->status == FEX_STATUS_OK) {
         out_error->status = FEX_STATUS_RUNTIME_ERROR;
