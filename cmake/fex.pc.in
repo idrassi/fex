@@ -1,0 +1,11 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@/fex
+datadir=${prefix}/@CMAKE_INSTALL_DATADIR@/fex
+
+Name: fex
+Description: FeX embeddable scripting language
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lfex
+Cflags: -I${includedir}

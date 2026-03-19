@@ -30,6 +30,23 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      - name: Install
+        run: cmake --install build --prefix install-root
+
+      - name: Verify install layout
+        run: python tools/check_install_layout.py --prefix install-root
+
+      - name: CMake package smoke test
+        run: |
+          cmake -S tools/install_smoke -B install-smoke -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-root"
+          cmake --build install-smoke
+
+      - name: Package
+        run: cpack --config build/CPackConfig.cmake -G ZIP -B dist
+
+      - name: Verify package output
+        run: python tools/check_install_layout.py --prefix install-root --dist dist
+
   sanitizers:
     runs-on: ubuntu-latest
 

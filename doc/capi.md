@@ -253,6 +253,28 @@ fe_Object *fe_eval(fe_Context *ctx, fe_Object *obj);
 
 Use `fex_compile()` and `fe_eval()` directly when you want the low-level split between parsing and evaluation and are willing to manage errors through either the installed handler or the `fex_try_*` wrappers.
 
+### Installed Package Consumption
+
+An installed FeX package provides:
+
+- the interpreter executable in `bin/`
+- the embeddable library in `lib/`
+- public headers in `include/fex/`
+- a source bundle in `share/fex/src/`
+
+For CMake consumers:
+
+```cmake
+find_package(fex CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE fex::fex)
+```
+
+For `pkg-config` consumers:
+
+```sh
+pkg-config --cflags --libs fex
+```
+
 ### Import Search Paths
 
 For file-based `import`, configure additional search roots with:

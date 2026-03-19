@@ -49,6 +49,31 @@ ctest --test-dir build -C Debug --output-on-failure
 
 On single-config generators such as Ninja or Unix Makefiles, omit `--config Debug`. The executable is typically `build/fex` on single-config generators and `build/Debug/fex.exe` on Visual Studio generators.
 
+### Installing
+
+The build now installs both the CLI interpreter and an embedding package:
+
+```bash
+cmake --install build --prefix <install-prefix>
+```
+
+Installed layout:
+
+- `bin/fex`: interpreter CLI
+- `lib/libfex.a` or `lib/fex.lib`: embeddable library
+- `include/fex`: public headers (`fe.h`, `fex.h`, `fex_builtins.h`)
+- `share/fex/src`: source bundle for vendoring/integration
+- `share/fex/doc`: bundled documentation
+- `share/fex/examples`: sample FeX scripts
+
+To produce a release archive instead of only an install tree:
+
+```bash
+cpack --config build/CPackConfig.cmake -G ZIP
+```
+
+On Unix-like systems, `-G TGZ` is also supported.
+
 ## Usage
 
 The `fex` executable can run a script file, evaluate inline source, read source from stdin, or start an interactive Read-Eval-Print Loop (REPL). The examples below use `<path-to-fex>` to stand in for your generator-specific executable path.
@@ -349,6 +374,17 @@ int main(void) {
 If you want optional helpers such as `sqrt`, `map`, `filter`, `parsejson`, `pathjoin`, `exists`, `listdir`, `mkdirp`, `cwd`, `getenv`, `runcommand`, or `runprocess`, you can still use `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS)` for the full set. For production embedding, prefer `fex_init_with_builtins(ctx, flags, mask)` so you can expose only the categories you actually want, for example `FEX_BUILTINS_SAFE`, `FEX_BUILTINS_IO`, or `FEX_BUILTINS_SYSTEM`.
 
 For runtime sandboxing, the core `fe` API now also exposes `fe_set_step_limit(ctx, max_steps)`, `fe_set_memory_limit(ctx, max_bytes)`, `fe_set_timeout_ms(ctx, timeout_ms)`, `fe_set_interrupt_handler(...)`, and `fe_poll_abort(ctx)`. Hosts can inspect `fe_get_memory_used(ctx)`, `fe_get_peak_memory_used(ctx)`, or take a full `fe_get_stats(ctx, &stats)` snapshot to observe current runtime state. Use the fixed step and memory limits for simple sandboxing, the timeout convenience layer for wall-clock deadlines, an interrupt callback for custom cancellation policy, and `fe_poll_abort(ctx)` inside long-running native helpers that need to honor those limits after their own cleanup.
+
+When installed, the package also exports a CMake package and a `pkg-config` file:
+
+```cmake
+find_package(fex CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE fex::fex)
+```
+
+```bash
+pkg-config --cflags --libs fex
+```
 
 ## Architecture
 
