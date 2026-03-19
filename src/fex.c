@@ -1306,10 +1306,10 @@ fe_Object* fex_do_string(fe_Context *ctx, const char *source) {
     return fex_do_string_named(ctx, source, "<string>");
 }
 
-static FexStatus run_try(fe_Context *ctx, fe_Object **out_result,
-                         FexError *out_error,
-                         fe_Object *(*fn)(fe_Context *ctx, const void *a, const void *b),
-                         const void *arg_a, const void *arg_b) {
+FexStatus fex_try_run_internal(fe_Context *ctx, fe_Object **out_result,
+                               FexError *out_error,
+                               fe_Object *(*fn)(fe_Context *ctx, const void *a, const void *b),
+                               const void *arg_a, const void *arg_b) {
     FexTryScope scope;
     fe_ErrorFn previous_error = fe_handlers(ctx)->error;
     int jump_result;
@@ -1368,21 +1368,21 @@ static fe_Object *try_do_file_runner(fe_Context *ctx, const void *path, const vo
 FexStatus fex_try_compile(fe_Context *ctx, const char *source,
                           const char *source_name, fe_Object **out_code,
                           FexError *out_error) {
-    return run_try(ctx, out_code, out_error, try_compile_runner, source,
-                   source_name ? source_name : "<string>");
+    return fex_try_run_internal(ctx, out_code, out_error, try_compile_runner, source,
+                                source_name ? source_name : "<string>");
 }
 
 FexStatus fex_try_eval(fe_Context *ctx, fe_Object *obj, fe_Object **out_result,
                        FexError *out_error) {
-    return run_try(ctx, out_result, out_error, try_eval_runner, obj, NULL);
+    return fex_try_run_internal(ctx, out_result, out_error, try_eval_runner, obj, NULL);
 }
 
 FexStatus fex_try_do_string(fe_Context *ctx, const char *source,
                             fe_Object **out_result, FexError *out_error) {
-    return run_try(ctx, out_result, out_error, try_do_string_runner, source, "<string>");
+    return fex_try_run_internal(ctx, out_result, out_error, try_do_string_runner, source, "<string>");
 }
 
 FexStatus fex_try_do_file(fe_Context *ctx, const char *path,
                           fe_Object **out_result, FexError *out_error) {
-    return run_try(ctx, out_result, out_error, try_do_file_runner, path, NULL);
+    return fex_try_run_internal(ctx, out_result, out_error, try_do_file_runner, path, NULL);
 }

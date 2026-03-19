@@ -1309,6 +1309,11 @@ static fe_Object* fex_do_import_file(fe_Context *ctx, const char *path,
   return do_file_common(ctx, path, implicit_exports);
 }
 
+static fe_Object* try_import_file_runner(fe_Context *ctx, const void *path,
+                                         const void *implicit_exports) {
+  return fex_do_import_file(ctx, (const char*)path, (fe_Object*)implicit_exports);
+}
+
 fe_Object* fex_do_file(fe_Context *ctx, const char *path) {
   return do_file_common(ctx, path, NULL);
 }
@@ -2840,6 +2845,8 @@ static fe_Object* import_module_spec(fe_Context *ctx, char *module_spec,
   fe_Object *result = NULL;
   fe_Object *module_obj = NULL;
   fe_Object *implicit_exports = NULL;
+  FexError import_error;
+  FexStatus import_status;
   int gc_save = fe_savegc(ctx);
   int i;
 
@@ -2941,9 +2948,25 @@ static fe_Object* import_module_spec(fe_Context *ctx, char *module_spec,
 
   implicit_exports = fe_map(ctx);
   fe_pushgc(ctx, implicit_exports);
-  result = fex_do_import_file(ctx, module_path, implicit_exports);
-  if (result != NULL) {
+  import_status = fex_try_run_internal(ctx, &result, &import_error,
+                                       try_import_file_runner,
+                                       module_path, implicit_exports);
+  if (import_status == FEX_STATUS_OK && result != NULL) {
     fe_pushgc(ctx, result);
+  }
+
+  if (import_status != FEX_STATUS_OK) {
+    string_array_pop(ctx, ctx->loading_modules, &ctx->loading_module_count);
+    tracked_free(ctx, module_path);
+    string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    fe_restoregc(ctx, gc_save);
+    tracked_free(ctx, module_spec);
+    if (fex_try_is_active()) {
+      fex_try_raise(import_error.status, import_error.source_name,
+                    import_error.line, import_error.column,
+                    import_error.message);
+    }
+    fe_error(ctx, import_error.message);
   }
 
   if (result == NULL) {

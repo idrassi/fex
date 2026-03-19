@@ -3775,7 +3775,8 @@ extern char **environ;
 
 static int run_process_native(fe_Context *ctx, CStringArray *argv,
                               ProcessOptions *options, ProcessOutput *output,
-                              const char *func_name) {
+                              const char *func_name,
+                              const char **out_error) {
     ProcessCapturePipe stdin_pipe;
     TempRedirectFile stdout_redirect;
     TempRedirectFile stderr_redirect;
@@ -3809,6 +3810,9 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     stderr_buf.len = 0;
     stderr_buf.cap = 0;
     memset(output, 0, sizeof(*output));
+    if (out_error != NULL) {
+        *out_error = NULL;
+    }
     output->stdout_captured = (options->stdout_mode == PROCESS_STREAM_CAPTURE);
     output->stderr_captured = (options->stderr_mode == PROCESS_STREAM_CAPTURE);
 #ifdef _WIN32
@@ -4259,6 +4263,10 @@ cleanup:
     buf_free(&stderr_buf);
     if (!ok) {
         free_process_output(output);
+        if (out_error != NULL) {
+            *out_error = (deferred_error != NULL) ? deferred_error : abort_error;
+            return 0;
+        }
         if (deferred_error != NULL) {
             fe_error(ctx, deferred_error);
         }
@@ -4396,6 +4404,7 @@ static fe_Object* builtin_system(fe_Context *ctx, fe_Object *args) {
     ProcessOptions options;
     ProcessOutput output;
     fe_Object *result;
+    const char *process_error = NULL;
 
     memset(&argv, 0, sizeof(argv));
     memset(&options, 0, sizeof(options));
@@ -4417,9 +4426,13 @@ static fe_Object* builtin_system(fe_Context *ctx, fe_Object *args) {
     free(command);
     options.stdout_mode = PROCESS_STREAM_INHERIT;
     options.stderr_mode = PROCESS_STREAM_INHERIT;
-    if (!run_process_native(ctx, &argv, &options, &output, "system")) {
+    if (!run_process_native(ctx, &argv, &options, &output, "system",
+                            &process_error)) {
         free_cstring_array(&argv);
         free_process_output(&output);
+        if (process_error != NULL) {
+            fe_error(ctx, process_error);
+        }
         return fe_nil(ctx);
     }
 
@@ -4437,6 +4450,7 @@ static fe_Object* builtin_run_command(fe_Context *ctx, fe_Object *args) {
     ProcessOptions options;
     ProcessOutput output;
     fe_Object *result;
+    const char *process_error = NULL;
 
     memset(&argv, 0, sizeof(argv));
     memset(&options, 0, sizeof(options));
@@ -4464,9 +4478,13 @@ static fe_Object* builtin_run_command(fe_Context *ctx, fe_Object *args) {
     options.stdout_mode = PROCESS_STREAM_CAPTURE;
     options.stderr_mode = PROCESS_STREAM_DISCARD;
     options.max_stdout = FEX_COMMAND_OUTPUT_MAX_BYTES;
-    if (!run_process_native(ctx, &argv, &options, &output, "runcommand")) {
+    if (!run_process_native(ctx, &argv, &options, &output, "runcommand",
+                            &process_error)) {
         free_cstring_array(&argv);
         free_process_output(&output);
+        if (process_error != NULL) {
+            fe_error(ctx, process_error);
+        }
         return fe_nil(ctx);
     }
 
@@ -4491,6 +4509,7 @@ static fe_Object* builtin_run_process(fe_Context *ctx, fe_Object *args) {
     ProcessOptions options;
     ProcessOutput output;
     fe_Object *result;
+    const char *process_error = NULL;
 
     memset(&argv, 0, sizeof(argv));
     memset(&options, 0, sizeof(options));
@@ -4511,10 +4530,14 @@ static fe_Object* builtin_run_process(fe_Context *ctx, fe_Object *args) {
 
     if (!collect_process_argv(ctx, exe_obj, argv_obj, "runprocess", &argv) ||
         !parse_process_options(ctx, opts_obj, "runprocess", &options) ||
-        !run_process_native(ctx, &argv, &options, &output, "runprocess")) {
+        !run_process_native(ctx, &argv, &options, &output, "runprocess",
+                            &process_error)) {
         free_cstring_array(&argv);
         free_process_options(&options);
         free_process_output(&output);
+        if (process_error != NULL) {
+            fe_error(ctx, process_error);
+        }
         return fe_nil(ctx);
     }
 
