@@ -74,11 +74,11 @@ cpack --config build/CPackConfig.cmake -G ZIP
 
 Supported package formats by platform:
 
-- Windows: `ZIP`
+- Windows: `ZIP` (`msvc` and `mingw` variants)
 - macOS: `TGZ`
 - Linux: `TGZ`
 
-The GitHub `CI` workflow now validates install and package output on Windows, macOS, and Linux. Pushing a `v*` tag also runs the `Release Packages` workflow, which builds Release archives for all three platforms and uploads them to the GitHub release for that tag.
+The GitHub `CI` workflow now validates install and package output on Windows, macOS, and Linux. Windows packaging is built twice so releases contain both `msvc` and `mingw` archives. Pushing a `v*` tag also runs the `Release Packages` workflow, which builds Release archives for all platforms and uploads them to the GitHub release for that tag.
 
 ## Usage
 

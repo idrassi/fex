@@ -13,10 +13,22 @@ jobs:
         include:
           - os: ubuntu-latest
             package_generator: TGZ
+            artifact_suffix: ubuntu
+            configure_args: ""
           - os: windows-latest
+            toolchain: msvc
             package_generator: ZIP
+            artifact_suffix: windows-msvc
+            configure_args: ""
           - os: macos-latest
             package_generator: TGZ
+            artifact_suffix: macos
+            configure_args: ""
+          - os: windows-latest
+            toolchain: mingw
+            package_generator: ZIP
+            artifact_suffix: windows-mingw
+            configure_args: "-DCMAKE_C_COMPILER=C:/mingw64/bin/gcc.exe"
 
     steps:
       - uses: actions/checkout@v4
@@ -25,8 +37,12 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Set up MSVC toolchain
+        if: matrix.toolchain == 'msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DFEX_WARNINGS_AS_ERRORS=ON
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DFEX_WARNINGS_AS_ERRORS=ON ${{ matrix.configure_args }}
 
       - name: Build
         run: cmake --build build
@@ -42,7 +58,7 @@ jobs:
 
       - name: CMake package smoke test
         run: |
-          cmake -S tools/install_smoke -B install-smoke -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-root"
+          cmake -S tools/install_smoke -B install-smoke -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-root"
           cmake --build install-smoke
 
       - name: Package
@@ -51,11 +67,17 @@ jobs:
       - name: Verify package output
         run: python tools/check_install_layout.py --prefix install-root --dist dist
 
+      - name: Remove CPack staging directory
+        run: python -c "import shutil; shutil.rmtree('dist/_CPack_Packages', ignore_errors=True)"
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fex-package-${{ matrix.os }}
-          path: dist/*
+          name: fex-package-${{ matrix.artifact_suffix }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.tgz
           if-no-files-found: error
 
   sanitizers:
