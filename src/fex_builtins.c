@@ -3236,7 +3236,7 @@ static int open_null_redirect_file(fe_Context *ctx, TempRedirectFile *file,
     return 1;
 }
 
-static int create_process_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
+static int create_process_capture_pipe(fe_Context *ctx, ProcessCapturePipe *capture_pipe,
                                        const char *func_name) {
     char msg[160];
 
@@ -3246,12 +3246,12 @@ static int create_process_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe
     sa.nLength = sizeof(sa);
     sa.lpSecurityDescriptor = NULL;
     sa.bInheritHandle = TRUE;
-    if (!CreatePipe(&pipe->read_handle, &pipe->write_handle, &sa, 0)) {
+    if (!CreatePipe(&capture_pipe->read_handle, &capture_pipe->write_handle, &sa, 0)) {
         sprintf(msg, "%s: could not create capture pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
-    if (!SetHandleInformation(pipe->read_handle, HANDLE_FLAG_INHERIT, 0)) {
+    if (!SetHandleInformation(capture_pipe->read_handle, HANDLE_FLAG_INHERIT, 0)) {
         sprintf(msg, "%s: could not configure capture pipe", func_name);
         fe_error(ctx, msg);
         return 0;
@@ -3274,10 +3274,10 @@ static int create_process_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe
         fcntl(fds[1], F_SETFD, flags | FD_CLOEXEC);
     }
 
-    pipe->read_fd = fds[0];
-    pipe->write_fd = fds[1];
-    flags = fcntl(pipe->read_fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(pipe->read_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+    capture_pipe->read_fd = fds[0];
+    capture_pipe->write_fd = fds[1];
+    flags = fcntl(capture_pipe->read_fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(capture_pipe->read_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
         sprintf(msg, "%s: could not configure capture pipe", func_name);
         fe_error(ctx, msg);
         return 0;
@@ -3287,7 +3287,7 @@ static int create_process_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe
     return 1;
 }
 
-static int create_process_input_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
+static int create_process_input_pipe(fe_Context *ctx, ProcessCapturePipe *capture_pipe,
                                      const char *func_name) {
     char msg[160];
 
@@ -3297,12 +3297,12 @@ static int create_process_input_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
     sa.nLength = sizeof(sa);
     sa.lpSecurityDescriptor = NULL;
     sa.bInheritHandle = TRUE;
-    if (!CreatePipe(&pipe->read_handle, &pipe->write_handle, &sa, 0)) {
+    if (!CreatePipe(&capture_pipe->read_handle, &capture_pipe->write_handle, &sa, 0)) {
         sprintf(msg, "%s: could not create stdin pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
-    if (!SetHandleInformation(pipe->write_handle, HANDLE_FLAG_INHERIT, 0)) {
+    if (!SetHandleInformation(capture_pipe->write_handle, HANDLE_FLAG_INHERIT, 0)) {
         sprintf(msg, "%s: could not configure stdin pipe", func_name);
         fe_error(ctx, msg);
         return 0;
@@ -3325,10 +3325,10 @@ static int create_process_input_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
         fcntl(fds[1], F_SETFD, flags | FD_CLOEXEC);
     }
 
-    pipe->read_fd = fds[0];
-    pipe->write_fd = fds[1];
-    flags = fcntl(pipe->write_fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(pipe->write_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+    capture_pipe->read_fd = fds[0];
+    capture_pipe->write_fd = fds[1];
+    flags = fcntl(capture_pipe->write_fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(capture_pipe->write_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
         sprintf(msg, "%s: could not configure stdin pipe", func_name);
         fe_error(ctx, msg);
         return 0;

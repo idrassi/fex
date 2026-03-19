@@ -2221,7 +2221,7 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
 
     case FE_TNUMBER:
       if (FE_IS_FIXNUM(obj)) {
-          sprintf(buf, "%lld", (intmax_t)FE_UNBOX_FIXNUM(obj));
+          sprintf(buf, "%" PRIdMAX, (intmax_t)FE_UNBOX_FIXNUM(obj));
       } else {
           sprintf(buf, "%.7g", number(obj));
       }
