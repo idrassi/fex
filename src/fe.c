@@ -2827,7 +2827,7 @@ static fe_Object* resolve_imported_module_value(fe_Context *ctx, const char *mod
   return &nil;
 }
 
-static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
+static fe_Object* import_module_spec(fe_Context *ctx, char *module_spec,
                                      int optional) {
   char error_buf[2048];
   char *lookup_name = NULL;
@@ -2845,11 +2845,13 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
 
   lookup_name = module_spec_to_lookup_name(ctx, module_spec);
   if (!lookup_name) {
+    tracked_free(ctx, module_spec);
     memory_error(ctx, "out of memory (module lookup)");
   }
   if (!split_module_spec_segments(ctx, module_spec, &segments, &segment_count,
                                   &segment_capacity)) {
     tracked_free(ctx, lookup_name);
+    tracked_free(ctx, module_spec);
     memory_error(ctx, "out of memory (module segments)");
   }
   is_relative = module_spec_is_relative(module_spec);
@@ -2860,10 +2862,10 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
       if (!prefix_spec) {
         tracked_free(ctx, lookup_name);
         string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+        tracked_free(ctx, module_spec);
         memory_error(ctx, "out of memory (module prefix)");
       }
       (void)import_module_spec(ctx, prefix_spec, 1);
-      tracked_free(ctx, prefix_spec);
     }
   }
 
@@ -2878,6 +2880,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
       tracked_free(ctx, searched_paths);
       string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
       fe_restoregc(ctx, gc_save);
+      tracked_free(ctx, module_spec);
       return module_obj;
     }
 
@@ -2886,6 +2889,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
       tracked_free(ctx, searched_paths);
       string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
       fe_restoregc(ctx, gc_save);
+      tracked_free(ctx, module_spec);
       return NULL;
     }
 
@@ -2894,12 +2898,14 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
     }
     if (ctx->alloc_failure_active) {
       string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+      tracked_free(ctx, module_spec);
       memory_error(ctx, "out of memory (module path)");
     }
     append_module_search_error(error_buf, sizeof(error_buf), module_spec,
                                searched_paths);
     tracked_free(ctx, searched_paths);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
+    tracked_free(ctx, module_spec);
     fe_error(ctx, error_buf);
   }
   tracked_free(ctx, lookup_name);
@@ -2911,6 +2917,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
                          is_relative, module_obj);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     fe_restoregc(ctx, gc_save);
+    tracked_free(ctx, module_spec);
     return module_obj;
   }
 
@@ -2919,6 +2926,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     fe_restoregc(ctx, gc_save);
     sprintf(error_buf, "cyclic import detected for module '%s'", module_spec);
+    tracked_free(ctx, module_spec);
     fe_error(ctx, error_buf);
   }
 
@@ -2927,6 +2935,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
     tracked_free(ctx, module_path);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     fe_restoregc(ctx, gc_save);
+    tracked_free(ctx, module_spec);
     memory_error(ctx, "out of memory (import state)");
   }
 
@@ -2942,6 +2951,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
     tracked_free(ctx, module_path);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     fe_restoregc(ctx, gc_save);
+    tracked_free(ctx, module_spec);
     fe_error(ctx, "failed to import module");
   }
 
@@ -2962,6 +2972,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     fe_restoregc(ctx, gc_save);
     sprintf(error_buf, "module '%s' did not produce a module value", module_spec);
+    tracked_free(ctx, module_spec);
     fe_error(ctx, error_buf);
   }
 
@@ -2972,21 +2983,21 @@ static fe_Object* import_module_spec(fe_Context *ctx, const char *module_spec,
     tracked_free(ctx, module_path);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     fe_restoregc(ctx, gc_save);
+    tracked_free(ctx, module_spec);
     memory_error(ctx, "out of memory (module cache)");
   }
   module_path = NULL;
   tracked_free(ctx, module_path);
   string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
   fe_restoregc(ctx, gc_save);
+  tracked_free(ctx, module_spec);
 
   return module_obj;
 }
 
 static fe_Object* import_module(fe_Context *ctx, fe_Object *spec_obj) {
   char *module_spec = import_spec_to_cstring(ctx, spec_obj);
-  fe_Object *result = import_module_spec(ctx, module_spec, 0);
-  tracked_free(ctx, module_spec);
-  return result;
+  return import_module_spec(ctx, module_spec, 0);
 }
 
 
@@ -3495,15 +3506,15 @@ fe_Context* fe_open(void *ptr, size_t size) {
 
 
 void fe_close(fe_Context *ctx) {
-  /* clear gcstack and symlist; makes all objects unreachable */
-  ctx->gcstack_idx = 0;
-  ctx->symlist = &nil;
-  collectgarbage(ctx);
   string_array_clear(ctx, &ctx->import_paths, &ctx->import_path_count, &ctx->import_path_capacity);
   string_array_clear(ctx, &ctx->source_dirs, &ctx->source_dir_count, &ctx->source_dir_capacity);
   string_array_clear(ctx, &ctx->source_buffers, &ctx->source_buffer_count, &ctx->source_buffer_capacity);
   string_array_clear(ctx, &ctx->loading_modules, &ctx->loading_module_count, &ctx->loading_module_capacity);
   module_cache_clear(ctx);
+  /* clear gcstack and symlist; makes all objects unreachable */
+  ctx->gcstack_idx = 0;
+  ctx->symlist = &nil;
+  collectgarbage(ctx);
 }
 
 

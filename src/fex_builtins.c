@@ -532,7 +532,7 @@ static int cstring_array_push_copy(CStringArray *array, const char *value) {
         return 0;
     }
 
-    new_items = realloc(array->items, sizeof(*array->items) * (size_t)(array->count + 1));
+    new_items = realloc(array->items, sizeof(*array->items) * (size_t)(array->count + 2));
     if (!new_items) {
         free(copy);
         return 0;
@@ -540,6 +540,7 @@ static int cstring_array_push_copy(CStringArray *array, const char *value) {
 
     array->items = new_items;
     array->items[array->count++] = copy;
+    array->items[array->count] = NULL;
     return 1;
 }
 
@@ -3786,6 +3787,7 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     int stderr_overflow = 0;
     int ok = 0;
     const char *abort_error = NULL;
+    const char *deferred_error = NULL;
 #ifdef _WIN32
     HANDLE stdin_thread = NULL;
     HANDLE child_process = NULL;
@@ -4212,11 +4214,11 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
 #endif
 
     if (stdout_overflow) {
-        fe_error(ctx, "runprocess stdout: file too large");
+        deferred_error = "runprocess stdout: file too large";
         goto cleanup;
     }
     if (stderr_overflow) {
-        fe_error(ctx, "runprocess stderr: file too large");
+        deferred_error = "runprocess stderr: file too large";
         goto cleanup;
     }
 
@@ -4257,6 +4259,9 @@ cleanup:
     buf_free(&stderr_buf);
     if (!ok) {
         free_process_output(output);
+        if (deferred_error != NULL) {
+            fe_error(ctx, deferred_error);
+        }
         if (abort_error != NULL) {
             fe_error(ctx, abort_error);
         }
