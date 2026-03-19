@@ -10,9 +10,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
+        include:
+          - os: ubuntu-latest
+            package_generator: TGZ
+          - os: windows-latest
+            package_generator: ZIP
+          - os: macos-latest
+            package_generator: TGZ
 
     steps:
       - uses: actions/checkout@v4
@@ -42,10 +46,17 @@ jobs:
           cmake --build install-smoke
 
       - name: Package
-        run: cpack --config build/CPackConfig.cmake -G ZIP -B dist
+        run: cpack --config build/CPackConfig.cmake -G ${{ matrix.package_generator }} -B dist
 
       - name: Verify package output
         run: python tools/check_install_layout.py --prefix install-root --dist dist
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fex-package-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
 
   sanitizers:
     runs-on: ubuntu-latest

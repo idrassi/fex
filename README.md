@@ -72,7 +72,13 @@ To produce a release archive instead of only an install tree:
 cpack --config build/CPackConfig.cmake -G ZIP
 ```
 
-On Unix-like systems, `-G TGZ` is also supported.
+Supported package formats by platform:
+
+- Windows: `ZIP`
+- macOS: `TGZ`
+- Linux: `TGZ`
+
+The GitHub `CI` workflow now validates install and package output on Windows, macOS, and Linux. Pushing a `v*` tag also runs the `Release Packages` workflow, which builds Release archives for all three platforms and uploads them to the GitHub release for that tag.
 
 ## Usage
 

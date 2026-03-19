@@ -1,0 +1,92 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-release-packages:
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            package_generator: TGZ
+            artifact_name: fex-linux
+          - os: windows-latest
+            package_generator: ZIP
+            artifact_name: fex-windows
+          - os: macos-latest
+            package_generator: TGZ
+            artifact_name: fex-macos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Configure
+        run: cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DFEX_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build-release
+
+      - name: Test
+        run: ctest --test-dir build-release --output-on-failure
+
+      - name: Install
+        run: cmake --install build-release --prefix install-root
+
+      - name: Verify install layout
+        run: python tools/check_install_layout.py --prefix install-root
+
+      - name: CMake package smoke test
+        run: |
+          cmake -S tools/install_smoke -B install-smoke -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-root"
+          cmake --build install-smoke
+
+      - name: Package
+        run: cpack --config build-release/CPackConfig.cmake -G ${{ matrix.package_generator }} -B dist
+
+      - name: Verify package output
+        run: python tools/check_install_layout.py --prefix install-root --dist dist
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish-release:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: build-release-packages
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --generate-notes
+          fi
