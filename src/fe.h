@@ -132,6 +132,7 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
 void fe_writefp(fe_Context *ctx, fe_Object *obj, FILE *fp);
 int fe_tostring(fe_Context *ctx, fe_Object *obj, char *dst, int size);
 size_t fe_strlen(fe_Context *ctx, fe_Object *obj);/* caller must ensure obj is a string */
+int fe_string_contains_nul(fe_Context *ctx, fe_Object *obj);/* caller must ensure obj is a string */
 size_t fe_byteslen(fe_Context *ctx, fe_Object *obj);/* caller must ensure obj is bytes */
 size_t fe_bytescopy(fe_Context *ctx, fe_Object *obj, size_t offset, void *dst, size_t size);
 fe_Number fe_tonumber(fe_Context *ctx, fe_Object *obj);

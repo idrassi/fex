@@ -214,6 +214,9 @@ FexStatus fex_try_eval(fe_Context *ctx, fe_Object *obj, fe_Object **out_result,
                        FexError *out_error);
 FexStatus fex_try_do_string(fe_Context *ctx, const char *source,
                             fe_Object **out_result, FexError *out_error);
+FexStatus fex_try_do_string_named(fe_Context *ctx, const char *source,
+                                  const char *source_name,
+                                  fe_Object **out_result, FexError *out_error);
 FexStatus fex_try_do_file(fe_Context *ctx, const char *path,
                           fe_Object **out_result, FexError *out_error);
 void fex_error_clear(FexError *error);
@@ -225,6 +228,7 @@ Use these APIs when the host must recover from failures instead of exiting.
 - `fex_try_compile()` returns a compiled AST or a structured compile error. `source_name` is copied into diagnostics; pass `NULL` for `"<string>"`.
 - `fex_try_eval()` evaluates a precompiled AST and captures runtime failures.
 - `fex_try_do_string()` and `fex_try_do_file()` cover the full compile/eval path.
+- `fex_try_do_string_named()` is the recoverable equivalent of `fex_do_string_named()`, useful when inline or generated source should report a custom diagnostic name.
 - `FexStatus` is one of `FEX_STATUS_OK`, `FEX_STATUS_COMPILE_ERROR`, `FEX_STATUS_RUNTIME_ERROR`, or `FEX_STATUS_IO_ERROR`.
 - `FexError` carries the copied error message, source name, line/column, and up to `FEX_ERROR_TRACE_MAX` traceback frames.
 
@@ -515,10 +519,10 @@ The `cl` argument is the FeX call stack represented as a list of AST nodes. Cust
 ### fex_lookup_span()
 
 ```c
-const FexSpan *fex_lookup_span(const fe_Object *node);
+const FexSpan *fex_lookup_span(fe_Context *ctx, const fe_Object *node);
 ```
 
-If span tracking is enabled, this returns source information for an AST node. `FexSpan` records start/end line and column information plus a stable source-name label for diagnostics.
+If span tracking is enabled, this returns source information for an AST node in that context. `FexSpan` records start/end line and column information plus a stable source-name label for diagnostics. When source text is available, `source` holds an owned excerpt buffer and `start`/`end` point into that stable copy rather than into the original input buffer.
 
 ## Threading and Re-entrancy
 
@@ -528,7 +532,7 @@ You may create multiple contexts and use one per thread.
 
 Compiled ASTs are ordinary `fe_Object *` values owned by the context that created them. Reuse them within that same context. Do not pass them to a different context or thread.
 
-The interpreter is re-entrant on a single context: a host `fe_CFunc` may call back into `fe_eval()` on that same context.
+The interpreter and compiler are re-entrant on a single thread: a host `fe_CFunc` may call back into `fe_eval()` on that same context, and nested `fex_try_*` / compile calls are supported as long as they stay on that thread.
 
 ## Common Pitfalls
 

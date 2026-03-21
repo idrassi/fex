@@ -118,6 +118,14 @@ FexStatus fex_try_do_string(fe_Context *ctx, const char *source,
                             fe_Object **out_result, FexError *out_error);
 
 /*
+ * Like `fex_try_do_string`, but preserves a caller-supplied source name in
+ * diagnostics.
+ */
+FexStatus fex_try_do_string_named(fe_Context *ctx, const char *source,
+                                  const char *source_name,
+                                  fe_Object **out_result, FexError *out_error);
+
+/*
  * Reads, compiles, and evaluates a source file. Relative imports from that
  * file resolve against the file's directory.
  */

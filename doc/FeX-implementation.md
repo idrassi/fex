@@ -84,18 +84,19 @@ Notice that `export` is parsed as a *unary operator* whose right-hand side is wh
 
 ## 4 · Span table: precise source mapping inside a moving GC
 
-`fex_span.c` implements a **pointer-keyed open-addressing hash table** with 8192 buckets:
+`fex_span.c` implements a **pointer-keyed per-context span table**:
 
 ```c
-void fex_record_span(const fe_Object* node,
+void fex_record_span(fe_Context *ctx, const fe_Object* node,
                      const char* src,
-                     int sline, scol, eline, ecol);
+                     int sline, scol, eline, ecol,
+                     const char *start, const char *end);
 ```
 
 * **Key** The *exact* address of the cons cell—the object never moves because *fe* uses a *non-compacting* mark-and-sweep GC.
-* **Value** Start/end line · column plus the original buffer pointer (useful for REPL slices).
+* **Value** Start/end line · column plus an owned source excerpt when the original text is available.
 
-Each consing helper `CONS1` wraps `fe_cons` and *immediately* records a span, guaranteeing a 1:1 mapping. The overhead is one `malloc` per AST node, which is acceptable for scripts; if your host is memory-starved you can plug in a bump allocator replacement.
+Each consing helper `CONS1` wraps `fe_cons` and *immediately* records a span, guaranteeing a 1:1 mapping. Span state is created lazily when enabled, and span allocations go through the runtime's tracked allocator so memory limits and stats remain accurate.
 
 ### 4.1 Error printing
 

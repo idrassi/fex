@@ -413,7 +413,7 @@ static int append_process_capture(TextBuffer *buf, const unsigned char *data,
 static char* string_to_cstr(fe_Context *ctx, fe_Object *str_obj, const char *func_name) {
     size_t len;
     char *buffer;
-    char msg[128];
+    char msg[160];
 
     if (fe_type(ctx, str_obj) != FE_TSTRING) {
         sprintf(msg, "%s: type mismatch", func_name);
@@ -421,6 +421,11 @@ static char* string_to_cstr(fe_Context *ctx, fe_Object *str_obj, const char *fun
         return NULL;
     }
     len = fe_strlen(ctx, str_obj);
+    if (len + 1 > (size_t)INT_MAX) {
+        sprintf(msg, "%s: string too large", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
     buffer = malloc(len + 1);
     if (!buffer) {
         sprintf(msg, "%s: out of memory", func_name);
@@ -428,6 +433,41 @@ static char* string_to_cstr(fe_Context *ctx, fe_Object *str_obj, const char *fun
         return NULL;
     }
     fe_tostring(ctx, str_obj, buffer, (int)(len + 1));
+    if (len > 0 && memchr(buffer, '\0', len) != NULL) {
+        free(buffer);
+        sprintf(msg, "%s: strings containing NUL bytes are not allowed", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    return buffer;
+}
+
+static char* string_to_buffer(fe_Context *ctx, fe_Object *str_obj, const char *func_name, size_t *out_len) {
+    size_t len;
+    char *buffer;
+    char msg[160];
+
+    if (fe_type(ctx, str_obj) != FE_TSTRING) {
+        sprintf(msg, "%s: type mismatch", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    len = fe_strlen(ctx, str_obj);
+    if (len + 1 > (size_t)INT_MAX) {
+        sprintf(msg, "%s: string too large", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    buffer = malloc(len + 1);
+    if (!buffer) {
+        sprintf(msg, "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    fe_tostring(ctx, str_obj, buffer, (int)(len + 1));
+    if (out_len) {
+        *out_len = len;
+    }
     return buffer;
 }
 
@@ -482,6 +522,62 @@ static fe_Object* string_to_bytes(fe_Context *ctx, fe_Object *str_obj, const cha
     result = fe_bytes(ctx, buffer, len);
     free(buffer);
     return result;
+}
+
+static int copy_string_to_fixed_buffer(fe_Context *ctx, fe_Object *str_obj,
+                                       const char *func_name,
+                                       char *buffer, size_t capacity,
+                                       size_t *out_len) {
+    size_t len;
+    char msg[160];
+
+    if (fe_type(ctx, str_obj) != FE_TSTRING) {
+        sprintf(msg, "%s: type mismatch", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    len = fe_strlen(ctx, str_obj);
+    if (len + 1 > capacity) {
+        sprintf(msg, "%s: string too long", func_name);
+        fe_error(ctx, msg);
+        return 0;
+    }
+
+    fe_tostring(ctx, str_obj, buffer, (int)capacity);
+    if (out_len) {
+        *out_len = len;
+    }
+    return 1;
+}
+
+static int bytes_contains_byte(const char *set, size_t set_len, unsigned char value) {
+    size_t i;
+    for (i = 0; i < set_len; i++) {
+        if ((unsigned char)set[i] == value) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int bytes_contains_sequence(const char *haystack, size_t haystack_len,
+                                   const char *needle, size_t needle_len) {
+    size_t i;
+
+    if (needle_len == 0) {
+        return 1;
+    }
+    if (needle_len > haystack_len) {
+        return 0;
+    }
+
+    for (i = 0; i + needle_len <= haystack_len; i++) {
+        if (memcmp(haystack + i, needle, needle_len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int is_path_separator_char(char chr) {
@@ -846,10 +942,10 @@ static fe_Object* builtin_round(fe_Context *ctx, fe_Object *args) {
 
 static fe_Object* builtin_min(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "min");
-    
+
     fe_Object *first = fe_nextarg(ctx, &args);
     fe_Number result = fe_tonumber(ctx, first);
-    
+
     while (!fe_isnil(ctx, args)) {
         fe_Object *arg = fe_nextarg(ctx, &args);
         fe_Number n = fe_tonumber(ctx, arg);
@@ -860,10 +956,10 @@ static fe_Object* builtin_min(fe_Context *ctx, fe_Object *args) {
 
 static fe_Object* builtin_max(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "max");
-    
+
     fe_Object *first = fe_nextarg(ctx, &args);
     fe_Number result = fe_tonumber(ctx, first);
-    
+
     while (!fe_isnil(ctx, args)) {
         fe_Object *arg = fe_nextarg(ctx, &args);
         fe_Number n = fe_tonumber(ctx, arg);
@@ -909,11 +1005,11 @@ static fe_Object* builtin_seed_random(fe_Context *ctx, fe_Object *args) {
     fe_Object *seed_obj = fe_nextarg(ctx, &args);
     FEX_CHECK_TYPE(ctx, seed_obj, FE_TNUMBER, "seedrand");
     fe_Number seed_num = fe_tonumber(ctx, seed_obj);
-    
+
     uint32_t seed = (uint32_t)seed_num;
     sfc32_seed(&rng_state, seed);
     seeded = 1;
-    
+
     return fe_nil(ctx);
 }
 
@@ -922,26 +1018,26 @@ static fe_Object* builtin_random_int(fe_Context *ctx, fe_Object *args) {
         sfc32_seed(&rng_state, (uint32_t)time(NULL));
         seeded = 1;
     }
-    
+
     /* If no arguments, return full uint32_t value */
     if (fe_isnil(ctx, args)) {
         uint32_t random_val = sfc32_next(&rng_state);
         return fe_make_number(ctx, (fe_Number)random_val);
     }
-    
+
     /* If argument provided, use it as maximum */
     FEX_CHECK_ARGS(ctx, args, 1, "randint");
     fe_Object *max_obj = fe_nextarg(ctx, &args);
     fe_Number max_num = fe_tonumber(ctx, max_obj);
-    
+
     if (max_num <= 0) {
         fe_error(ctx, "randint: maximum must be positive");
         return fe_nil(ctx);
     }
-    
+
     uint32_t max_val = (uint32_t)max_num;
     uint32_t random_val = sfc32_next(&rng_state) % max_val;
-    
+
     return fe_make_number(ctx, (fe_Number)random_val);
 }
 
@@ -951,21 +1047,21 @@ static fe_Object* builtin_random_bytes(fe_Context *ctx, fe_Object *args) {
     fe_Number count_num = fe_tonumber(ctx, count_obj);
     size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     const char *abort_error = NULL;
-    
+
     if (count_num <= 0 || count_num > 1024) {
         fe_error(ctx, "randbytes: count must be between 1 and 1024");
         return fe_nil(ctx);
     }
-    
+
     if (!seeded) {
         sfc32_seed(&rng_state, (uint32_t)time(NULL));
         seeded = 1;
     }
-    
+
     int count = (int)count_num, i;
     fe_Object *result = fe_nil(ctx);
     fe_Object **tail = &result;
-    
+
     for (i = 0; i < count; i++) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
@@ -974,11 +1070,11 @@ static fe_Object* builtin_random_bytes(fe_Context *ctx, fe_Object *args) {
         }
         uint32_t random_val = sfc32_next(&rng_state);
         uint8_t byte_val = (uint8_t)(random_val & 0xFF);
-        
+
         *tail = fe_cons(ctx, fe_make_number(ctx, (fe_Number)byte_val), fe_nil(ctx));
         tail = fe_cdr_ptr(ctx, *tail);
     }
-    
+
     return result;
 }
 
@@ -1007,15 +1103,12 @@ static fe_Object* builtin_string_upper(fe_Context *ctx, fe_Object *args) {
     if (len == 0) {
         return fe_string(ctx, "", 0);
     }
-    
-    if (len >= 1024) {
-        fe_error(ctx, "upper: string too long");
+
+    char buffer[1024];
+    if (!copy_string_to_fixed_buffer(ctx, str, "upper", buffer, sizeof(buffer), &len)) {
         return fe_nil(ctx);
     }
 
-    char buffer[1024];
-    fe_tostring(ctx, str, buffer, sizeof(buffer));
-    
     size_t i;
     for (i = 0; i < len; i++) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
@@ -1023,7 +1116,7 @@ static fe_Object* builtin_string_upper(fe_Context *ctx, fe_Object *args) {
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
-        buffer[i] = toupper(buffer[i]);
+        buffer[i] = (char)toupper((unsigned char)buffer[i]);
     }
 
     return fe_string(ctx, buffer, len);
@@ -1040,15 +1133,12 @@ static fe_Object* builtin_string_lower(fe_Context *ctx, fe_Object *args) {
     if (len == 0) {
         return fe_string(ctx, "", 0);
     }
-    
-    if (len >= 1024) {
-        fe_error(ctx, "lower: string too long");
+
+    char buffer[1024];
+    if (!copy_string_to_fixed_buffer(ctx, str, "lower", buffer, sizeof(buffer), &len)) {
         return fe_nil(ctx);
     }
 
-    char buffer[1024];
-    fe_tostring(ctx, str, buffer, sizeof(buffer));
-    
     size_t i;
     for (i = 0; i < len; i++) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
@@ -1056,7 +1146,7 @@ static fe_Object* builtin_string_lower(fe_Context *ctx, fe_Object *args) {
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
-        buffer[i] = tolower(buffer[i]);
+        buffer[i] = (char)tolower((unsigned char)buffer[i]);
     }
 
     return fe_string(ctx, buffer, len);
@@ -1070,21 +1160,45 @@ static fe_Object* builtin_string_concat(fe_Context *ctx, fe_Object *args) {
     result.data = NULL;
     result.len = 0;
     result.cap = 0;
-    
+
     while (!fe_isnil(ctx, args)) {
         fe_Object *arg = fe_nextarg(ctx, &args);
-        char buffer[1024];
-        fe_tostring(ctx, arg, buffer, sizeof(buffer));
+        char stack_buffer[1024];
+        char *buffer = stack_buffer;
+        size_t len = 0;
+        int dynamic_buffer = 0;
+
+        if (fe_type(ctx, arg) == FE_TSTRING) {
+            len = fe_strlen(ctx, arg);
+            if (len + 1 > sizeof(stack_buffer)) {
+                buffer = (char*)malloc(len + 1);
+                if (!buffer) {
+                    buf_free(&result);
+                    fe_error(ctx, "concat: out of memory");
+                    return fe_nil(ctx);
+                }
+                dynamic_buffer = 1;
+            }
+            fe_tostring(ctx, arg, buffer, (int)(len + 1));
+        } else {
+            len = (size_t)fe_tostring(ctx, arg, stack_buffer, sizeof(stack_buffer));
+        }
 
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
+            if (dynamic_buffer) {
+                free(buffer);
+            }
             buf_free(&result);
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
 
-        if (!buf_append_mem_polling(ctx, &result, buffer, strlen(buffer),
+        if (!buf_append_mem_polling(ctx, &result, buffer, len,
                                     &poll_countdown, &abort_error)) {
+            if (dynamic_buffer) {
+                free(buffer);
+            }
             buf_free(&result);
             if (abort_error != NULL) {
                 fe_error(ctx, abort_error);
@@ -1092,6 +1206,10 @@ static fe_Object* builtin_string_concat(fe_Context *ctx, fe_Object *args) {
                 fe_error(ctx, "concat: out of memory");
             }
             return fe_nil(ctx);
+        }
+
+        if (dynamic_buffer) {
+            free(buffer);
         }
     }
 
@@ -1105,25 +1223,22 @@ static fe_Object* builtin_string_substring(fe_Context *ctx, fe_Object *args) {
     fe_Object *str = fe_nextarg(ctx, &args);
     fe_Object *start_obj = fe_nextarg(ctx, &args);
     fe_Object *end_obj = fe_nextarg(ctx, &args);
-    
+
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "substring");
-    
+
     size_t str_len = fe_strlen(ctx, str);
     int start = (int)fe_tonumber(ctx, start_obj);
     int end = fe_isnil(ctx, end_obj) ? (int)str_len : (int)fe_tonumber(ctx, end_obj);
-    
+
     if (start < 0) start = 0;
     if (end > (int)str_len) end = (int)str_len;
     if (start >= end) return fe_string(ctx, "", 0);
-    
-    if (str_len >= 1024) {
-        fe_error(ctx, "substring: string too long");
+
+    char buffer[1024];
+    if (!copy_string_to_fixed_buffer(ctx, str, "substring", buffer, sizeof(buffer), &str_len)) {
         return fe_nil(ctx);
     }
-    
-    char buffer[1024];
-    fe_tostring(ctx, str, buffer, sizeof(buffer));
-    
+
     int result_len = end - start;
     char result[1024];
     memcpy(result, buffer + start, result_len);
@@ -1138,37 +1253,67 @@ static fe_Object* builtin_string_split(fe_Context *ctx, fe_Object *args) {
     fe_Object *delim = fe_nextarg(ctx, &args);
     size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     const char *abort_error = NULL;
-    
+
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "split");
     FEX_CHECK_TYPE(ctx, delim, FE_TSTRING, "split");
-    
+
     size_t str_len = fe_strlen(ctx, str);
     size_t delim_len = fe_strlen(ctx, delim);
-    
-    if (str_len >= 1024 || delim_len >= 64) {
-        fe_error(ctx, "split: string too long");
+
+    char buffer[1024], delimiter[64];
+    size_t start = 0;
+    size_t i;
+    if (!copy_string_to_fixed_buffer(ctx, str, "split", buffer, sizeof(buffer), &str_len)) {
         return fe_nil(ctx);
     }
-    
-    char buffer[1024], delimiter[64];
-    fe_tostring(ctx, str, buffer, sizeof(buffer));
-    fe_tostring(ctx, delim, delimiter, sizeof(delimiter));
-    
+    if (!copy_string_to_fixed_buffer(ctx, delim, "split", delimiter, sizeof(delimiter), &delim_len)) {
+        return fe_nil(ctx);
+    }
+
     fe_Object *result = fe_nil(ctx);
     fe_Object **tail = &result;
-    
-    char *token = strtok(buffer, delimiter);
-    while (token != NULL) {
+
+    if (delim_len == 0) {
+        *tail = fe_cons(ctx, fe_string(ctx, buffer, str_len), fe_nil(ctx));
+        return result;
+    }
+
+    while (start < str_len && bytes_contains_byte(delimiter, delim_len, (unsigned char)buffer[start])) {
+        start++;
+    }
+
+    for (i = start; i <= str_len; i++) {
+        int at_end = (i == str_len);
+        int is_delim = !at_end && bytes_contains_byte(delimiter, delim_len, (unsigned char)buffer[i]);
+
+        if (!at_end && !is_delim) {
+            continue;
+        }
+
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
-        *tail = fe_cons(ctx, fe_string(ctx, token, strlen(token)), fe_nil(ctx));
-        tail = fe_cdr_ptr(ctx, *tail);
-        token = strtok(NULL, delimiter);
+
+        if (i > start) {
+            *tail = fe_cons(ctx, fe_string(ctx, buffer + start, i - start), fe_nil(ctx));
+            tail = fe_cdr_ptr(ctx, *tail);
+        }
+
+        while (i + 1 < str_len &&
+               bytes_contains_byte(delimiter, delim_len, (unsigned char)buffer[i + 1])) {
+            i++;
+        }
+        start = i + 1;
     }
-    
+
+    if (str_len > 0 && start < str_len &&
+        !bytes_contains_byte(delimiter, delim_len, (unsigned char)buffer[str_len - 1])) {
+        *tail = fe_cons(ctx, fe_string(ctx, buffer + start, str_len - start), fe_nil(ctx));
+        tail = fe_cdr_ptr(ctx, *tail);
+    }
+
     return result;
 }
 
@@ -1178,19 +1323,21 @@ static fe_Object* builtin_string_trim(fe_Context *ctx, fe_Object *args) {
     size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     const char *abort_error = NULL;
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "trim");
-    
+
     size_t str_len = fe_strlen(ctx, str);
-    if (str_len >= 1024) {
-        fe_error(ctx, "trim: string too long");
+    char buffer[1024];
+    size_t start = 0;
+    size_t end;
+    if (!copy_string_to_fixed_buffer(ctx, str, "trim", buffer, sizeof(buffer), &str_len)) {
         return fe_nil(ctx);
     }
-    
-    char buffer[1024];
-    fe_tostring(ctx, str, buffer, sizeof(buffer));
-    
+
+    if (str_len == 0) {
+        return fe_string(ctx, "", 0);
+    }
+
     /* Trim leading whitespace */
-    char *start = buffer;
-    while (isspace(*start)) {
+    while (start < str_len && isspace((unsigned char)buffer[start])) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
             fe_error(ctx, abort_error);
@@ -1198,10 +1345,14 @@ static fe_Object* builtin_string_trim(fe_Context *ctx, fe_Object *args) {
         }
         start++;
     }
-    
+
+    if (start == str_len) {
+        return fe_string(ctx, "", 0);
+    }
+
     /* Trim trailing whitespace */
-    char *end = start + strlen(start) - 1;
-    while (end > start && isspace(*end)) {
+    end = str_len;
+    while (end > start && isspace((unsigned char)buffer[end - 1])) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
             fe_error(ctx, abort_error);
@@ -1209,33 +1360,30 @@ static fe_Object* builtin_string_trim(fe_Context *ctx, fe_Object *args) {
         }
         end--;
     }
-    
-    *(end + 1) = '\0';
-    size_t trimmed_len = (size_t)(end - start + 1);
-    return fe_string(ctx, start, trimmed_len);
+
+    return fe_string(ctx, buffer + start, end - start);
 }
 
 static fe_Object* builtin_string_contains(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 2, "contains");
     fe_Object *str = fe_nextarg(ctx, &args);
     fe_Object *substr = fe_nextarg(ctx, &args);
-    
+
     FEX_CHECK_TYPE(ctx, str, FE_TSTRING, "contains");
     FEX_CHECK_TYPE(ctx, substr, FE_TSTRING, "contains");
-    
+
     size_t str_len = fe_strlen(ctx, str);
     size_t substr_len = fe_strlen(ctx, substr);
-    
-    if (str_len >= 1024 || substr_len >= 256) {
-        fe_error(ctx, "contains: string too long");
+
+    char buffer[1024], search[256];
+    if (!copy_string_to_fixed_buffer(ctx, str, "contains", buffer, sizeof(buffer), &str_len)) {
         return fe_nil(ctx);
     }
-    
-    char buffer[1024], search[256];
-    fe_tostring(ctx, str, buffer, sizeof(buffer));
-    fe_tostring(ctx, substr, search, sizeof(search));
-    
-    return fe_bool(ctx, strstr(buffer, search) != NULL);
+    if (!copy_string_to_fixed_buffer(ctx, substr, "contains", search, sizeof(search), &substr_len)) {
+        return fe_nil(ctx);
+    }
+
+    return fe_bool(ctx, bytes_contains_sequence(buffer, str_len, search, substr_len));
 }
 
 static fe_Object* builtin_make_string(fe_Context *ctx, fe_Object *args) {
@@ -1245,25 +1393,28 @@ static fe_Object* builtin_make_string(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_TYPE(ctx, length_obj, FE_TNUMBER, "makestring");
     FEX_CHECK_TYPE(ctx, fill_obj, FE_TSTRING, "makestring");
     fe_Number length_num = fe_tonumber(ctx, length_obj);
-    
+
     int length = (int)length_num;
-    
+
     if (length == 0) {
         return fe_string(ctx, "", 0);
     }
-    
+
     char fill_buffer[64];
-    fe_tostring(ctx, fill_obj, fill_buffer, sizeof(fill_buffer));
-    
-    if (strlen(fill_buffer) == 0) {
+    size_t fill_len = 0;
+    if (!copy_string_to_fixed_buffer(ctx, fill_obj, "makestring", fill_buffer, sizeof(fill_buffer), &fill_len)) {
+        return fe_nil(ctx);
+    }
+
+    if (fill_len == 0) {
         fe_error(ctx, "makestring: fill character cannot be empty");
         return fe_nil(ctx);
     }
-    
+
     char fill_char = fill_buffer[0];  /* Use first character only */
-    
+
     fe_Object *obj = fe_string_raw(ctx, length, fill_char);
-    
+
     return obj;
 }
 
@@ -1395,7 +1546,7 @@ static fe_Object* builtin_list_length(fe_Context *ctx, fe_Object *args) {
     size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     const char *abort_error;
     FEX_CHECK_TYPE(ctx, list, FE_TPAIR, "contains");
-    
+
     while (!fe_isnil(ctx, list)) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
@@ -1405,7 +1556,7 @@ static fe_Object* builtin_list_length(fe_Context *ctx, fe_Object *args) {
         count++;
         list = fe_cdr(ctx, list);
     }
-    
+
     return fe_make_number(ctx, (fe_Number)count);
 }
 
@@ -1428,27 +1579,27 @@ static fe_Object* builtin_list_nth(fe_Context *ctx, fe_Object *args) {
         }
         list = fe_cdr(ctx, list);
     }
-    
+
     if (fe_isnil(ctx, list)) {
         return fe_nil(ctx);
     }
-    
+
     return fe_car(ctx, list);
 }
 
 static fe_Object* builtin_list_append(fe_Context *ctx, fe_Object *args) {
     if (fe_isnil(ctx, args)) return fe_nil(ctx);
-    
+
     fe_Object *first = fe_nextarg(ctx, &args);
     size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     const char *abort_error;
     FEX_CHECK_TYPE(ctx, first, FE_TPAIR, "nth");
     if (fe_isnil(ctx, args)) return first;
-    
+
     /* Build result list by copying first list and appending rest */
     fe_Object *result = fe_nil(ctx);
     fe_Object **tail = &result;
-    
+
     /* Copy first list */
     fe_Object *current = first;
     while (!fe_isnil(ctx, current)) {
@@ -1461,7 +1612,7 @@ static fe_Object* builtin_list_append(fe_Context *ctx, fe_Object *args) {
         tail = fe_cdr_ptr(ctx, *tail);
         current = fe_cdr(ctx, current);
     }
-    
+
     /* Append remaining lists */
     while (!fe_isnil(ctx, args)) {
         fe_Object *list = fe_nextarg(ctx, &args);
@@ -1478,7 +1629,7 @@ static fe_Object* builtin_list_append(fe_Context *ctx, fe_Object *args) {
             current = fe_cdr(ctx, current);
         }
     }
-    
+
     return result;
 }
 
@@ -1498,7 +1649,7 @@ static fe_Object* builtin_list_reverse(fe_Context *ctx, fe_Object *args) {
         result = fe_cons(ctx, fe_car(ctx, list), result);
         list = fe_cdr(ctx, list);
     }
-    
+
     return result;
 }
 
@@ -1506,21 +1657,21 @@ static fe_Object* builtin_map(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 2, "map");
     fe_Object *func = fe_nextarg(ctx, &args);
     fe_Object *list = fe_nextarg(ctx, &args);
-    
+
     fe_Object *result = fe_nil(ctx);
     fe_Object **tail = &result;
-    
+
     while (!fe_isnil(ctx, list)) {
         fe_Object *item = fe_car(ctx, list);
         fe_Object *call_args = fe_cons(ctx, item, fe_nil(ctx));
         fe_Object *call_expr = fe_cons(ctx, func, call_args);
         fe_Object *mapped = fe_eval(ctx, call_expr);
-        
+
         *tail = fe_cons(ctx, mapped, fe_nil(ctx));
         tail = fe_cdr_ptr(ctx, *tail);
         list = fe_cdr(ctx, list);
     }
-    
+
     return result;
 }
 
@@ -1528,23 +1679,23 @@ static fe_Object* builtin_filter(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 2, "filter");
     fe_Object *predicate = fe_nextarg(ctx, &args);
     fe_Object *list = fe_nextarg(ctx, &args);
-    
+
     fe_Object *result = fe_nil(ctx);
     fe_Object **tail = &result;
-    
+
     while (!fe_isnil(ctx, list)) {
         fe_Object *item = fe_car(ctx, list);
         fe_Object *call_args = fe_cons(ctx, item, fe_nil(ctx));
         fe_Object *call_expr = fe_cons(ctx, predicate, call_args);
         fe_Object *test_result = fe_eval(ctx, call_expr);
-        
+
         if (!fe_isnil(ctx, test_result) && test_result != fe_bool(ctx, 0)) {
             *tail = fe_cons(ctx, item, fe_nil(ctx));
             tail = fe_cdr_ptr(ctx, *tail);
         }
         list = fe_cdr(ctx, list);
     }
-    
+
     return result;
 }
 
@@ -1553,9 +1704,9 @@ static fe_Object* builtin_fold(fe_Context *ctx, fe_Object *args) {
     fe_Object *func = fe_nextarg(ctx, &args);
     fe_Object *init = fe_nextarg(ctx, &args);
     fe_Object *list = fe_nextarg(ctx, &args);
-    
+
     fe_Object *acc = init;
-    
+
     while (!fe_isnil(ctx, list)) {
         fe_Object *item = fe_car(ctx, list);
         fe_Object *call_args = fe_cons(ctx, item, fe_cons(ctx, acc, fe_nil(ctx)));
@@ -1563,7 +1714,7 @@ static fe_Object* builtin_fold(fe_Context *ctx, fe_Object *args) {
         acc = fe_eval(ctx, call_expr);
         list = fe_cdr(ctx, list);
     }
-    
+
     return acc;
 }
 
@@ -1943,10 +2094,11 @@ static int json_is_proper_list(fe_Context *ctx, fe_Object *obj) {
 
 static int json_write_string(JsonWriter *writer, fe_Object *obj, TextBuffer *buf) {
     char *text;
+    size_t text_len;
     size_t i;
     const char *abort_error;
 
-    text = string_to_cstr(writer->ctx, obj, "tojson");
+    text = string_to_buffer(writer->ctx, obj, "tojson", &text_len);
     if (!text) {
         return 0;
     }
@@ -1954,7 +2106,7 @@ static int json_write_string(JsonWriter *writer, fe_Object *obj, TextBuffer *buf
         free(text);
         return 0;
     }
-    for (i = 0; text[i] != '\0'; i++) {
+    for (i = 0; i < text_len; i++) {
         unsigned char chr = (unsigned char)text[i];
         abort_error = builtin_poll_abort(writer->ctx, &writer->poll_countdown);
         if (abort_error != NULL) {
@@ -4558,7 +4710,7 @@ static fe_Object* builtin_type_of(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "typeof");
     fe_Object *obj = fe_nextarg(ctx, &args);
     int type = fe_type(ctx, obj);
-    
+
     const char *type_name;
     switch (type) {
         case FE_TNIL: type_name = "nil"; break;
@@ -4575,43 +4727,55 @@ static fe_Object* builtin_type_of(fe_Context *ctx, fe_Object *args) {
         case FE_TBOOLEAN: type_name = "boolean"; break;
         default: type_name = "unknown"; break;
     }
-    
+
     return fe_string(ctx, type_name, strlen(type_name));
 }
 
 static fe_Object* builtin_to_string(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "tostring");
     fe_Object *obj = fe_nextarg(ctx, &args);
-    
+
     char buffer[1024];
     int len = fe_tostring(ctx, obj, buffer, sizeof(buffer));
-    
+
     return fe_string(ctx, buffer, len);
 }
 
 static fe_Object* builtin_to_number(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "tonumber");
     fe_Object *obj = fe_nextarg(ctx, &args);
-    
+
     if (fe_type(ctx, obj) == FE_TNUMBER) {
         return obj;
     }
-    
+
     if (fe_type(ctx, obj) == FE_TSTRING) {
-        char buffer[1024];
-        fe_tostring(ctx, obj, buffer, sizeof(buffer));
-        
+        size_t len;
+        char *buffer = string_to_buffer(ctx, obj, "tonumber", &len);
         char *endptr;
-        double value = strtod(buffer, &endptr);
-        
-        if (*endptr != '\0') {
+        double value;
+
+        if (!buffer) {
+            return fe_nil(ctx);
+        }
+        if (len > 0 && memchr(buffer, '\0', len) != NULL) {
+            free(buffer);
             fe_error(ctx, "tonumber: invalid number format");
             return fe_nil(ctx);
         }
-        
+
+        value = strtod(buffer, &endptr);
+
+        if (endptr != buffer + len) {
+            free(buffer);
+            fe_error(ctx, "tonumber: invalid number format");
+            return fe_nil(ctx);
+        }
+
+        free(buffer);
         return fe_make_number(ctx, value);
     }
-    
+
     fe_error(ctx, "tonumber: cannot convert to number");
     return fe_nil(ctx);
 }
@@ -4675,13 +4839,13 @@ static void register_math_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "randint"), fe_cfunc(ctx, builtin_random_int));
     fe_set(ctx, fe_symbol(ctx, "randbytes"), fe_cfunc(ctx, builtin_random_bytes));
 
-    
+
     fe_restoregc(ctx, gc_save);
 }
 
 static void register_string_functions(fe_Context *ctx) {
     int gc_save = fe_savegc(ctx);
-    
+
     fe_set(ctx, fe_symbol(ctx, "strlen"), fe_cfunc(ctx, builtin_string_length));
     fe_set(ctx, fe_symbol(ctx, "upper"), fe_cfunc(ctx, builtin_string_upper));
     fe_set(ctx, fe_symbol(ctx, "lower"), fe_cfunc(ctx, builtin_string_lower));
@@ -4691,13 +4855,13 @@ static void register_string_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "trim"), fe_cfunc(ctx, builtin_string_trim));
     fe_set(ctx, fe_symbol(ctx, "contains"), fe_cfunc(ctx, builtin_string_contains));
     fe_set(ctx, fe_symbol(ctx, "makestring"), fe_cfunc(ctx, builtin_make_string));
-    
+
     fe_restoregc(ctx, gc_save);
 }
 
 static void register_list_functions(fe_Context *ctx) {
     int gc_save = fe_savegc(ctx);
-    
+
     fe_set(ctx, fe_symbol(ctx, "length"), fe_cfunc(ctx, builtin_list_length));
     fe_set(ctx, fe_symbol(ctx, "nth"), fe_cfunc(ctx, builtin_list_nth));
     fe_set(ctx, fe_symbol(ctx, "append"), fe_cfunc(ctx, builtin_list_append));
@@ -4705,13 +4869,13 @@ static void register_list_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "map"), fe_cfunc(ctx, builtin_map));
     fe_set(ctx, fe_symbol(ctx, "filter"), fe_cfunc(ctx, builtin_filter));
     fe_set(ctx, fe_symbol(ctx, "fold"), fe_cfunc(ctx, builtin_fold));
-    
+
     fe_restoregc(ctx, gc_save);
 }
 
 static void register_io_functions(fe_Context *ctx) {
     int gc_save = fe_savegc(ctx);
-    
+
     fe_set(ctx, fe_symbol(ctx, "pathjoin"), fe_cfunc(ctx, builtin_path_join));
     fe_set(ctx, fe_symbol(ctx, "dirname"), fe_cfunc(ctx, builtin_dirname));
     fe_set(ctx, fe_symbol(ctx, "basename"), fe_cfunc(ctx, builtin_basename));
@@ -4725,7 +4889,7 @@ static void register_io_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "writebytes"), fe_cfunc(ctx, builtin_write_bytes));
     fe_set(ctx, fe_symbol(ctx, "readjson"), fe_cfunc(ctx, builtin_read_json));
     fe_set(ctx, fe_symbol(ctx, "writejson"), fe_cfunc(ctx, builtin_write_json));
-    
+
     fe_restoregc(ctx, gc_save);
 }
 
@@ -4752,7 +4916,7 @@ static void register_data_functions(fe_Context *ctx) {
 
 static void register_system_functions(fe_Context *ctx) {
     int gc_save = fe_savegc(ctx);
-    
+
     fe_set(ctx, fe_symbol(ctx, "cwd"), fe_cfunc(ctx, builtin_cwd));
     fe_set(ctx, fe_symbol(ctx, "chdir"), fe_cfunc(ctx, builtin_chdir));
     fe_set(ctx, fe_symbol(ctx, "getenv"), fe_cfunc(ctx, builtin_get_env));
@@ -4761,13 +4925,13 @@ static void register_system_functions(fe_Context *ctx) {
     fe_set(ctx, fe_symbol(ctx, "system"), fe_cfunc(ctx, builtin_system));
     fe_set(ctx, fe_symbol(ctx, "runcommand"), fe_cfunc(ctx, builtin_run_command));
     fe_set(ctx, fe_symbol(ctx, "runprocess"), fe_cfunc(ctx, builtin_run_process));
-    
+
     fe_restoregc(ctx, gc_save);
 }
 
 static void register_type_functions(fe_Context *ctx) {
     int gc_save = fe_savegc(ctx);
-    
+
     fe_set(ctx, fe_symbol(ctx, "typeof"), fe_cfunc(ctx, builtin_type_of));
     fe_set(ctx, fe_symbol(ctx, "tostring"), fe_cfunc(ctx, builtin_to_string));
     fe_set(ctx, fe_symbol(ctx, "tonumber"), fe_cfunc(ctx, builtin_to_number));

@@ -82,7 +82,7 @@ enum {
  P_RETURN, P_MODULE, P_EXPORT, P_IMPORT, P_GET, P_PUT,
  P_QUOTE, P_AND, P_OR, P_DO, P_CONS,
  P_CAR, P_CDR, P_SETCAR, P_SETCDR, P_LIST, P_NOT, P_IS, P_ATOM, P_PRINT, P_LT,
- P_LTE, P_ADD, P_SUB, P_MUL, P_DIV, P_MAX
+ P_LTE, P_GT, P_GTE, P_ADD, P_SUB, P_MUL, P_DIV, P_MAX
 };
 
 static const char *primnames[] = {
@@ -90,7 +90,7 @@ static const char *primnames[] = {
   "module", "export", "import", "get", "put",
   "quote", "and", "or", "do", "cons",
   "car", "cdr", "setcar", "setcdr", "list", "not", "is", "atom", "print", "<",
-  "<=", "+", "-", "*", "/"
+  "<=", ">", ">=", "+", "-", "*", "/"
 };
 
 static const char *typenames[] = {
@@ -174,6 +174,18 @@ struct fe_Context {
   size_t peak_memory_used;
   int alloc_failure_active;
   int alloc_failure_is_limit;
+  /* Per-context special symbols */
+  fe_Object *return_sym;
+  fe_Object *frame_sym;
+  fe_Object *do_sym;
+  fe_Object *let_sym;
+  fe_Object *quote_sym;
+  fe_Object *fn_sym;
+  fe_Object *mac_sym;
+  /* Per-context span state (opaque pointer to FexSpanState) */
+  void *span_state;
+  /* Per-context scratch temp allocations owned by fex.c */
+  void *temp_allocs;
 #ifdef FE_OPT_NO_MALLOC_STRINGS
   uint8_t *str_base;
   uint8_t *str_end;
@@ -183,14 +195,7 @@ struct fe_Context {
 
 static fe_Object nil = {{ NULL }, { NULL }, (FE_TNIL << 2 | 1)};
 
-static fe_Object *return_sym = NULL;
-static fe_Object *frame_sym = NULL; /* Tag for new environment frames */
-/* Symbols for static analysis */
-static fe_Object *do_sym = NULL;
-static fe_Object *let_sym = NULL;
-static fe_Object *quote_sym = NULL;
-static fe_Object *fn_sym = NULL;
-static fe_Object *mac_sym = NULL;
+/* Special symbols are now stored per-context in fe_Context. */
 
 #define MAP_EMPTY 0
 #define MAP_USED 1
@@ -352,11 +357,11 @@ static void analyze(fe_Context *ctx, fe_Object *node, fe_Object *bound, fe_Objec
   fe_Object *p;
 
   /* Special form handling */
-  if (op == quote_sym) {
+  if (op == ctx->quote_sym) {
     return; /* Don't analyze contents of a quote */
   }
 
-  if (op == do_sym) {
+  if (op == ctx->do_sym) {
     fe_Object *local_bound = bound;
     int gc = fe_savegc(ctx);
     fe_pushgc(ctx, local_bound);
@@ -364,7 +369,7 @@ static void analyze(fe_Context *ctx, fe_Object *node, fe_Object *bound, fe_Objec
     for (p = args; !isnil(p); p = cdr(p)) {
       fe_Object *stmt = car(p);
       /* Check for (let var expr) */
-      if (type(stmt) == FE_TPAIR && car(stmt) == let_sym) {
+      if (type(stmt) == FE_TPAIR && car(stmt) == ctx->let_sym) {
         fe_Object *let_args = cdr(stmt);
         fe_Object *var = car(let_args);
         fe_Object *expr = car(cdr(let_args));
@@ -384,7 +389,7 @@ static void analyze(fe_Context *ctx, fe_Object *node, fe_Object *bound, fe_Objec
     return;
   }
 
-  if (op == fn_sym || op == mac_sym) {
+  if (op == ctx->fn_sym || op == ctx->mac_sym) {
     fe_Object *params = car(args);
     fe_Object *body = car(cdr(args));
     fe_Object *inner_free;
@@ -426,6 +431,48 @@ static void analyze(fe_Context *ctx, fe_Object *node, fe_Object *bound, fe_Objec
 
 fe_Handlers* fe_handlers(fe_Context *ctx) {
   return &ctx->handlers;
+}
+
+void *fe_ctx_span_state(fe_Context *ctx) {
+  return ctx->span_state;
+}
+
+void fe_ctx_set_span_state(fe_Context *ctx, void *state) {
+  ctx->span_state = state;
+}
+
+void *fe_ctx_temp_allocs(fe_Context *ctx) {
+  return ctx->temp_allocs;
+}
+
+void fe_ctx_set_temp_allocs(fe_Context *ctx, void *state) {
+  ctx->temp_allocs = state;
+}
+
+void *fe_ctx_tracked_alloc(fe_Context *ctx, size_t size) {
+  return tracked_alloc(ctx, size);
+}
+
+void *fe_ctx_tracked_realloc(fe_Context *ctx, void *ptr, size_t size) {
+  return tracked_realloc(ctx, ptr, size);
+}
+
+void fe_ctx_tracked_free(fe_Context *ctx, void *ptr) {
+  tracked_free(ctx, ptr);
+}
+
+void fe_ctx_memory_error(fe_Context *ctx, const char *fallback_msg) {
+  memory_error(ctx, fallback_msg);
+}
+
+int fe_ctx_object_is_live(fe_Context *ctx, const fe_Object *obj) {
+  if (!obj || FE_IS_FIXNUM(obj) || FE_IS_BOOLEAN(obj) || obj == &nil) {
+    return 0;
+  }
+  if (obj < ctx->objects || obj >= ctx->objects + ctx->object_count) {
+    return 0;
+  }
+  return type((fe_Object*)obj) != FE_TFREE;
 }
 
 
@@ -740,7 +787,7 @@ static int is_path_separator(char chr) {
   return chr == '/' || chr == '\\';
 }
 
-static fe_Object* getbound(fe_Object *sym, fe_Object *env);
+static fe_Object* getbound(fe_Context *ctx, fe_Object *sym, fe_Object *env);
 
 static void normalize_path_chars(fe_Context *ctx, char *path) {
   char *p;
@@ -964,7 +1011,7 @@ static char* join_module_segments(fe_Context *ctx, char **segments, int count,
 static fe_Object* lookup_global_module(fe_Context *ctx, const char *name) {
   fe_Object *value;
   if (!name || !*name) return &nil;
-  value = cdr(getbound(fe_symbol(ctx, name), &nil));
+  value = cdr(getbound(ctx, fe_symbol(ctx, name), &nil));
   return type(value) == FE_TMAP ? value : &nil;
 }
 
@@ -1329,6 +1376,7 @@ void fe_error(fe_Context *ctx, const char *msg) {
     ctx->timeout_countdown = TIMEOUT_CHECK_INTERVAL;
   }
   ctx->interrupt_countdown = ctx->interrupt_interval;
+  fex_temp_cleanup_all(ctx);
   /* do error handler */
   if (ctx->handlers.error) { ctx->handlers.error(ctx, msg, cl); }
   /* error handler returned -- print error and traceback, exit */
@@ -1353,18 +1401,18 @@ fe_Object* fe_nextarg(fe_Context *ctx, fe_Object **arg) {
 }
 
 
-static fe_Object* checktype(fe_Context *ctx, fe_Object *obj, int type) {
+static fe_Object* checktype(fe_Context *ctx, fe_Object *obj, int expected) {
   char buf[64];
   int actual_type = type(obj);
 
   /* Special case: allow fixnums when expecting numbers */
-  if (type == FE_TNUMBER && FE_IS_FIXNUM(obj)) {
+  if (expected == FE_TNUMBER && FE_IS_FIXNUM(obj)) {
     return obj;
   }
 
-  if (actual_type != type) {
+  if (actual_type != expected) {
     sprintf(buf, "expected %s, got %s",
-            typenames[type],
+            typenames[expected],
             FE_IS_FIXNUM(obj) ? "number" : typenames[actual_type]);
     fe_error(ctx, buf);
   }
@@ -1437,27 +1485,42 @@ int fe_savegc(fe_Context *ctx) {
 
 
 void fe_mark(fe_Context *ctx, fe_Object *obj) {
-    /*  Tail-recursive mark without goto, and with a fresh check
-        every time we follow cdr(obj).  That way, if the cdr turned
-        out to be an immediate fixnum we bail before dereferencing it. */
+    /*  Iterative mark.  Uses an explicit stack for car branches so that
+        deeply nested pair trees don't overflow the C call stack.  The
+        cdr direction is followed iteratively in a loop. */
 
+#define MARK_STACK_SIZE 256
+    fe_Object *stack[MARK_STACK_SIZE];
+    int sp = 0;
+
+    goto enter;
+
+pop:
+    if (sp == 0) return;
+    obj = stack[--sp];
+
+enter:
     for (;;) {
         /* 0. Fast exits for objects we never allocate. */
-        if (FE_IS_FIXNUM(obj) || FE_IS_BOOLEAN(obj) || isnil(obj)) return;
+        if (FE_IS_FIXNUM(obj) || FE_IS_BOOLEAN(obj) || isnil(obj)) goto pop;
 
         /* 1. Do not mark rogue pointers that don't belong to us. */
         if (obj < ctx->objects || obj >= ctx->objects + ctx->object_count)
-            return;
+            goto pop;
 
         /* 2. Already marked?  Done. */
-        if (tag(obj) & GCMARKBIT) return;
+        if (tag(obj) & GCMARKBIT) goto pop;
         tag(obj) |= GCMARKBIT;
 
         switch (type(obj)) {
         case FE_TPAIR:
-            /* mark car, then continue with cdr in the next loop
-               iteration (this removes deep recursion) */
-            fe_mark(ctx, car(obj));
+            /* Push car onto explicit stack, iterate cdr */
+            if (sp < MARK_STACK_SIZE) {
+                stack[sp++] = car(obj);
+            } else {
+                /* Stack full: fall back to recursion for car */
+                fe_mark(ctx, car(obj));
+            }
             obj = cdr(obj);
             continue;               /* re-check fixnum / nil next round */
 
@@ -1467,15 +1530,9 @@ void fe_mark(fe_Context *ctx, fe_Object *obj) {
             obj = cdr(obj);
             continue;
 
-#ifdef FE_OPT_NO_MALLOC_STRINGS
-        case FE_TSTRING: /* String object holds offset; no further marking from here */
+        case FE_TSTRING:
         case FE_TBYTES:
-            return;
-#else
-        case FE_TSTRING: /* String object cdr holds a pointer we don't trace */
-        case FE_TBYTES:
-            return;
-#endif
+            goto pop;
 
         case FE_TPTR:
             if (ctx->handlers.mark) ctx->handlers.mark(ctx, obj);
@@ -1483,19 +1540,28 @@ void fe_mark(fe_Context *ctx, fe_Object *obj) {
         case FE_TMAP: {
             fe_Map *map = mapdata(obj);
             int i;
-            if (!map) return;
+            if (!map) goto pop;
             for (i = 0; i < map->capacity; i++) {
               if (map->states[i] == MAP_USED) {
-                fe_mark(ctx, map->keys[i]);
-                fe_mark(ctx, map->values[i]);
+                if (sp < MARK_STACK_SIZE) {
+                    stack[sp++] = map->keys[i];
+                } else {
+                    fe_mark(ctx, map->keys[i]);
+                }
+                if (sp < MARK_STACK_SIZE) {
+                    stack[sp++] = map->values[i];
+                } else {
+                    fe_mark(ctx, map->values[i]);
+                }
               }
             }
-            return;
+            goto pop;
         }
         default:
-            return;                 /* nothing more to traverse */
+            goto pop;
         }
     }
+#undef MARK_STACK_SIZE
 }
 
 
@@ -1565,6 +1631,8 @@ static void collectgarbage(fe_Context *ctx) {
     }
   }
 
+  fex_span_prune(ctx);
+
   /* --- Update GC state and threshold --- */
   ctx->live_count = live;
   ctx->allocs_since_gc = 0;
@@ -1579,8 +1647,8 @@ static void collectgarbage(fe_Context *ctx) {
 /* -------------------------------------------------------------------------
  * Early-return helper
  * ---------------------------------------------------------------------- */
-static int is_return_obj(fe_Object *obj) {
-  return type(obj) == FE_TPAIR && car(obj) == return_sym;
+static int is_return_obj(fe_Context *ctx, fe_Object *obj) {
+  return type(obj) == FE_TPAIR && car(obj) == ctx->return_sym;
 }
 
 /* --------------------------------------------------------------------- */
@@ -1678,7 +1746,13 @@ static fe_Object* normalize_map_key(fe_Context *ctx, fe_Object *key) {
 }
 
 static unsigned long hash_string_obj(fe_Context *ctx, fe_Object *obj) {
+#if ULONG_MAX > 0xFFFFFFFFu
+  unsigned long hash = 14695981039346656037UL;
+  #define FNV_PRIME 1099511628211UL
+#else
   unsigned long hash = 2166136261u;
+  #define FNV_PRIME 16777619u
+#endif
   size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
 #ifdef FE_OPT_NO_MALLOC_STRINGS
   size_t remaining = FE_STR_LEN(obj);
@@ -1693,7 +1767,7 @@ static unsigned long hash_string_obj(fe_Context *ctx, fe_Object *obj) {
         fe_error(ctx, abort_msg);
       }
       hash ^= (unsigned char)slab->data[i];
-      hash *= 16777619u;
+      hash *= FNV_PRIME;
     }
     remaining -= to_hash;
     offset = slab->next;
@@ -1708,9 +1782,10 @@ static unsigned long hash_string_obj(fe_Context *ctx, fe_Object *obj) {
       fe_error(ctx, abort_msg);
     }
     hash ^= p[i];
-    hash *= 16777619u;
+    hash *= FNV_PRIME;
   }
 #endif
+#undef FNV_PRIME
   return hash;
 }
 
@@ -2235,7 +2310,7 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
       break;
 
     case FE_TPAIR:
-      if (car(obj) == frame_sym) {
+      if (car(obj) == ctx->frame_sym) {
         writestr(ctx, fn, udata, "[env frame]", &poll_countdown);
         break;
       }
@@ -2287,9 +2362,11 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
 #else
       {
           const char *p = FE_STR_DATA(ctx, obj);
-          while (*p) {
-              if (qt && *p == '"') write_checked(ctx, fn, udata, '\\', &poll_countdown);
-              write_checked(ctx, fn, udata, *p++, &poll_countdown);
+          size_t len = FE_STR_LEN(obj);
+          size_t i;
+          for (i = 0; i < len; i++) {
+              if (qt && p[i] == '"') write_checked(ctx, fn, udata, '\\', &poll_countdown);
+              write_checked(ctx, fn, udata, p[i], &poll_countdown);
           }
       }
 #endif
@@ -2397,12 +2474,30 @@ int fe_tostring(fe_Context *ctx, fe_Object *obj, char *dst, int size) {
 
 size_t fe_strlen(fe_Context *ctx, fe_Object *obj)
 {
-  /* caller must ensure obj is a string */
-#ifdef FE_OPT_NO_MALLOC_STRINGS
   unused(ctx);
   return FE_STR_LEN(obj);
+}
+
+int fe_string_contains_nul(fe_Context *ctx, fe_Object *obj)
+{
+#ifdef FE_OPT_NO_MALLOC_STRINGS
+  size_t remaining = FE_STR_LEN(obj);
+  uint32_t offset = obj->cdr.u32;
+
+  while (offset != FE_SLAB_NULL && remaining > 0) {
+    fe_Slab *slab = (fe_Slab*)(ctx->str_base + offset);
+    size_t to_scan = (remaining > FE_SLAB_DATA_SIZE) ? FE_SLAB_DATA_SIZE : remaining;
+    if (memchr(slab->data, '\0', to_scan) != NULL) {
+      return 1;
+    }
+    remaining -= to_scan;
+    offset = slab->next;
+  }
+  return 0;
 #else
-  return strlen(FE_STR_DATA(ctx, obj));
+  unused(ctx);
+  return FE_STR_LEN(obj) > 0 &&
+         memchr(FE_STR_DATA(ctx, obj), '\0', FE_STR_LEN(obj)) != NULL;
 #endif
 }
 
@@ -2490,10 +2585,10 @@ static int find_assoc_binding(fe_Object *sym, fe_Object *env, fe_Object **bindin
   return 1;
 }
 
-static fe_Object* getbound(fe_Object *sym, fe_Object *env) {
+static fe_Object* getbound(fe_Context *ctx, fe_Object *sym, fe_Object *env) {
   fe_Object *p;
   /* Check for new closure environment frame */
-  if (type(env) == FE_TPAIR && car(env) == frame_sym) {
+  if (type(env) == FE_TPAIR && car(env) == ctx->frame_sym) {
     fe_Object *locals = car(cdr(env));
     fe_Object *upvals = cdr(cdr(env));
     /* search locals */
@@ -2520,8 +2615,7 @@ static fe_Object* getbound(fe_Object *sym, fe_Object *env) {
 
 
 void fe_set(fe_Context *ctx, fe_Object *sym, fe_Object *v) {
-  unused(ctx);
-  cdr(getbound(sym, &nil)) = v;
+  cdr(getbound(ctx, sym, &nil)) = v;
 }
 
 
@@ -2723,7 +2817,7 @@ static fe_Object* dolist(fe_Context *ctx, fe_Object *lst, fe_Object *env) {
     fe_pushgc(ctx, lst);
     fe_pushgc(ctx, env);
     res = eval(ctx, fe_nextarg(ctx, &lst), env, &env);
-    if (is_return_obj(res)) { break; }
+    if (is_return_obj(ctx, res)) { break; }
   }
   return res;
 }
@@ -2773,7 +2867,15 @@ static char* import_spec_to_cstring(fe_Context *ctx, fe_Object *spec_obj) {
   if (!module_spec) {
     memory_error(ctx, "out of memory (module spec)");
   }
+  if (type(spec_obj) == FE_TSTRING && fe_string_contains_nul(ctx, spec_obj)) {
+    tracked_free(ctx, module_spec);
+    fe_error(ctx, "import: strings containing NUL bytes are not allowed");
+  }
   fe_tostring(ctx, spec_obj, module_spec, (int)len + 1);
+  if (len > 0 && memchr(module_spec, '\0', len) != NULL) {
+    tracked_free(ctx, module_spec);
+    fe_error(ctx, "import: strings containing NUL bytes are not allowed");
+  }
   return module_spec;
 }
 
@@ -3031,7 +3133,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
   int n, gc;
 
   check_eval_budget(ctx);
-  if (type(obj) == FE_TSYMBOL) { return cdr(getbound(obj, env)); }
+  if (type(obj) == FE_TSYMBOL) { return cdr(getbound(ctx, obj, env)); }
   if (type(obj) != FE_TPAIR) { return obj; }
 
   /* Call stack frames are synthetic pair cells that live on the C stack. */
@@ -3125,7 +3227,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
               break;
             }
           }
-          res = cdr(getbound(vb, va)); /* fallback: Re-use getbound for assoc list lookup */
+          res = cdr(getbound(ctx, vb, va)); /* fallback: Re-use getbound for assoc list lookup */
           break;
         }
         case P_PUT:
@@ -3139,7 +3241,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
             /* evaluate argument, defaulting to nil */
             va  = isnil(arg) ? &nil : evalarg();
             /* (__return__ . value) - single pair keeps GC simple */
-            res = fe_cons(ctx, return_sym, va);
+            res = fe_cons(ctx, ctx->return_sym, va);
             break;
         }
         case P_LET: {
@@ -3154,12 +3256,12 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
             fe_Object *binding = fe_cons(ctx, sym, &nil);
 
             fe_Object *new_frame_env;
-            if (type(*newenv) == FE_TPAIR && car(*newenv) == frame_sym) {
+            if (type(*newenv) == FE_TPAIR && car(*newenv) == ctx->frame_sym) {
                 fe_Object *locals = car(cdr(*newenv));
                 fe_Object *upvals = cdr(cdr(*newenv));
                 fe_Object *new_locals = fe_cons(ctx, binding, locals);
                 new_frame_env = fe_cons(ctx, new_locals, upvals);
-                new_frame_env = fe_cons(ctx, frame_sym, new_frame_env);
+                new_frame_env = fe_cons(ctx, ctx->frame_sym, new_frame_env);
             } else {
                 new_frame_env = fe_cons(ctx, binding, *newenv);
             }
@@ -3181,7 +3283,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
 
         case P_SET:
           va = checktype(ctx, fe_nextarg(ctx, &arg), FE_TSYMBOL);
-          cdr(getbound(va, env)) = evalarg();
+          cdr(getbound(ctx, va, env)) = evalarg();
           break;
 
         case P_IF:
@@ -3305,6 +3407,8 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
 
         case P_LT: numcmpop(<); break;
         case P_LTE: numcmpop(<=); break;
+        case P_GT: numcmpop(>); break;
+        case P_GTE: numcmpop(>=); break;
         case P_ADD: arithop(+); break;
         case P_SUB:
           /* --------  subtraction / unary minus -------- */
@@ -3325,7 +3429,16 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           }
           break;
         case P_MUL: arithop(*); break;
-        case P_DIV: arithop(/); break;
+        case P_DIV: {
+          fe_Number x = nval(checknum(ctx, evalarg()));
+          while (!isnil(arg)) {
+            fe_Number d = nval(checknum(ctx, evalarg()));
+            if (d == 0) { fe_error(ctx, "division by zero"); }
+            x = x / d;
+          }
+          res = fe_make_number(ctx, x);
+          break;
+        }
       }
       break;
 
@@ -3352,7 +3465,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
       fe_pushgc(ctx, def_env);
       for (p = free_vars; !isnil(p); p = cdr(p)) {
         fe_Object *sym = car(p);
-        fe_Object *binding = getbound(sym, def_env); /* Use the captured definition env */
+        fe_Object *binding = getbound(ctx, sym, def_env);
         upvals = fe_cons(ctx, binding, upvals);
       }
       fe_restoregc(ctx, s);
@@ -3363,12 +3476,12 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
       /* Create local environment */
       fe_Object *locals = argstoenv(ctx, params, arg, &nil);
 
-      /* Create new frame: (frame_sym . (locals . upvals)) */
+      /* Create new frame: (frame . (locals . upvals)) */
       fe_Object *frame = fe_cons(ctx, locals, upvals);
-      frame = fe_cons(ctx, frame_sym, frame);
+      frame = fe_cons(ctx, ctx->frame_sym, frame);
 
       res = dolist(ctx, body, frame);
-      if (is_return_obj(res)) {
+      if (is_return_obj(ctx, res)) {
           res = cdr(res);
       }
       break;
@@ -3390,14 +3503,14 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
       fe_pushgc(ctx, def_env);
       for (p = free_vars; !isnil(p); p = cdr(p)) {
         fe_Object *sym = car(p);
-        fe_Object *binding = getbound(sym, def_env);
+        fe_Object *binding = getbound(ctx, sym, def_env);
         upvals = fe_cons(ctx, binding, upvals);
       }
       fe_restoregc(ctx, s);
 
       fe_Object *locals = argstoenv(ctx, params, arg, &nil);
       fe_Object *frame = fe_cons(ctx, locals, upvals);
-      frame = fe_cons(ctx, frame_sym, frame);
+      frame = fe_cons(ctx, ctx->frame_sym, frame);
 
       *obj = *dolist(ctx, body, frame);
       fe_restoregc(ctx, gc);
@@ -3516,20 +3629,22 @@ fe_Context* fe_open(void *ptr, size_t size) {
     fe_restoregc(ctx, save);
   }
 
-  /* --- Initialize symbols for closures and analysis --- */
-  return_sym = fe_symbol(ctx, "return");
-  frame_sym = fe_symbol(ctx, "[frame]");
-  do_sym = fe_symbol(ctx, "do");
-  let_sym = fe_symbol(ctx, "let");
-  quote_sym = fe_symbol(ctx, "quote");
-  fn_sym = fe_symbol(ctx, "fn");
-  mac_sym = fe_symbol(ctx, "mac");
+  /* --- Initialize per-context symbols for closures and analysis --- */
+  ctx->return_sym = fe_symbol(ctx, "return");
+  ctx->frame_sym = fe_symbol(ctx, "[frame]");
+  ctx->do_sym = fe_symbol(ctx, "do");
+  ctx->let_sym = fe_symbol(ctx, "let");
+  ctx->quote_sym = fe_symbol(ctx, "quote");
+  ctx->fn_sym = fe_symbol(ctx, "fn");
+  ctx->mac_sym = fe_symbol(ctx, "mac");
 
   return ctx;
 }
 
 
 void fe_close(fe_Context *ctx) {
+  fex_temp_cleanup_all(ctx);
+  fex_span_cleanup(ctx);
   string_array_clear(ctx, &ctx->import_paths, &ctx->import_path_count, &ctx->import_path_capacity);
   string_array_clear(ctx, &ctx->source_dirs, &ctx->source_dir_count, &ctx->source_dir_capacity);
   string_array_clear(ctx, &ctx->source_buffers, &ctx->source_buffer_count, &ctx->source_buffer_capacity);

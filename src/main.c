@@ -252,7 +252,6 @@ static int run_file(fe_Context *ctx, const char *path) {
 
 static int run_source(fe_Context *ctx, const char *source, const char *source_name) {
   FexError error;
-  fe_Object *code = NULL;
   fe_Object *result = NULL;
   FexStatus status;
 
@@ -260,13 +259,7 @@ static int run_source(fe_Context *ctx, const char *source, const char *source_na
     return 0;
   }
 
-  status = fex_try_compile(ctx, source, source_name, &code, &error);
-  if (status != FEX_STATUS_OK) {
-    fex_print_error(stderr, &error);
-    return exit_code_for_status(status);
-  }
-
-  status = fex_try_eval(ctx, code, &result, &error);
+  status = fex_try_do_string_named(ctx, source, source_name, &result, &error);
   (void)result;
   if (status != FEX_STATUS_OK) {
     fex_print_error(stderr, &error);

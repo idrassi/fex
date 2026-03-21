@@ -34,10 +34,144 @@
 typedef struct FexTryScope {
     jmp_buf env;
     FexError *error;
+    struct FexTempAlloc *temps;
     struct FexTryScope *previous;
 } FexTryScope;
 
-static FexTryScope *g_try_scope = NULL;
+static FEX_THREAD_LOCAL FexTryScope *g_try_scope = NULL;
+
+typedef struct FexTempAlloc {
+    struct FexTempAlloc *previous;
+    struct FexTempAlloc *next;
+    FexTryScope *owner;
+} FexTempAlloc;
+
+static FexTempAlloc *fex_temp_head(fe_Context *ctx) {
+    return (FexTempAlloc*)fe_ctx_temp_allocs(ctx);
+}
+
+static void fex_temp_set_head(fe_Context *ctx, FexTempAlloc *node) {
+    fe_ctx_set_temp_allocs(ctx, node);
+}
+
+static void fex_temp_link(fe_Context *ctx, FexTempAlloc *node) {
+    node->previous = NULL;
+    node->next = fex_temp_head(ctx);
+    if (node->next) {
+        node->next->previous = node;
+    }
+    fex_temp_set_head(ctx, node);
+}
+
+static void fex_temp_unlink(fe_Context *ctx, FexTempAlloc *node) {
+    if (!node) {
+        return;
+    }
+    if (node->previous) {
+        node->previous->next = node->next;
+    } else {
+        fex_temp_set_head(ctx, node->next);
+    }
+    if (node->next) {
+        node->next->previous = node->previous;
+    }
+    node->previous = NULL;
+    node->next = NULL;
+    node->owner = NULL;
+}
+
+static void fex_try_scope_free_temps(fe_Context *ctx, FexTryScope *scope) {
+    FexTempAlloc *node;
+    FexTempAlloc *next;
+
+    if (!scope) {
+        return;
+    }
+
+    node = fex_temp_head(ctx);
+    while (node) {
+        next = node->next;
+        if (node->owner == scope) {
+            fex_temp_unlink(ctx, node);
+            fe_ctx_tracked_free(ctx, node);
+        }
+        node = next;
+    }
+    scope->temps = NULL;
+}
+
+void fex_temp_cleanup_all(fe_Context *ctx) {
+    FexTempAlloc *node = fex_temp_head(ctx);
+    while (node) {
+        FexTempAlloc *next = node->next;
+        fe_ctx_tracked_free(ctx, node);
+        node = next;
+    }
+    fex_temp_set_head(ctx, NULL);
+}
+
+static void *fex_temp_alloc(fe_Context *ctx, size_t size) {
+    FexTempAlloc *node;
+    size_t total = sizeof(*node) + (size > 0 ? size : 1);
+
+    node = (FexTempAlloc*)fe_ctx_tracked_alloc(ctx, total);
+    if (!node) {
+        fe_ctx_memory_error(ctx, "out of memory");
+        return NULL;
+    }
+
+    node->owner = g_try_scope;
+    fex_temp_link(ctx, node);
+    if (g_try_scope) {
+        g_try_scope->temps = node;
+    }
+    return node + 1;
+}
+
+static void *fex_temp_realloc(fe_Context *ctx, void *ptr, size_t size) {
+    FexTempAlloc *node;
+    FexTempAlloc *grown;
+    FexTryScope *owner;
+
+    if (!ptr) {
+        return fex_temp_alloc(ctx, size);
+    }
+
+    node = ((FexTempAlloc*)ptr) - 1;
+    owner = node->owner;
+    grown = (FexTempAlloc*)fe_ctx_tracked_realloc(ctx, node, sizeof(*node) + (size > 0 ? size : 1));
+    if (!grown) {
+        fe_ctx_memory_error(ctx, "out of memory");
+        return NULL;
+    }
+
+    if (grown->previous) {
+        grown->previous->next = grown;
+    } else {
+        fex_temp_set_head(ctx, grown);
+    }
+    if (grown->next) {
+        grown->next->previous = grown;
+    }
+    grown->owner = owner;
+    if (owner && owner->temps == node) {
+        owner->temps = grown;
+    }
+
+    return grown + 1;
+}
+
+static void fex_temp_free(fe_Context *ctx, void *ptr) {
+    FexTempAlloc *node;
+
+    if (!ptr) {
+        return;
+    }
+
+    node = ((FexTempAlloc*)ptr) - 1;
+    fex_temp_unlink(ctx, node);
+    fe_ctx_tracked_free(ctx, node);
+}
 
 static void copy_string(char *dst, size_t dst_size, const char *src) {
     size_t len;
@@ -54,6 +188,229 @@ static void copy_string(char *dst, size_t dst_size, const char *src) {
     }
     memcpy(dst, src, len);
     dst[len] = '\0';
+}
+
+typedef struct {
+    char *dst;
+    size_t len;
+    size_t cap;
+} FexEscapedWriter;
+
+static void escaped_writer_append(FexEscapedWriter *writer, const char *text, size_t text_len) {
+    size_t copy_len;
+
+    if (!writer || !writer->dst || writer->cap == 0 || writer->len >= writer->cap - 1) {
+        return;
+    }
+
+    copy_len = text_len;
+    if (copy_len > writer->cap - 1 - writer->len) {
+        copy_len = writer->cap - 1 - writer->len;
+    }
+
+    memcpy(writer->dst + writer->len, text, copy_len);
+    writer->len += copy_len;
+    writer->dst[writer->len] = '\0';
+}
+
+static void escaped_writer_put_byte(FexEscapedWriter *writer, unsigned char uchr) {
+    static const char hexdigits[] = "0123456789ABCDEF";
+
+    switch (uchr) {
+        case '\0':
+            escaped_writer_append(writer, "\\0", 2);
+            return;
+        case '\n':
+            escaped_writer_append(writer, "\\n", 2);
+            return;
+        case '\r':
+            escaped_writer_append(writer, "\\r", 2);
+            return;
+        case '\t':
+            escaped_writer_append(writer, "\\t", 2);
+            return;
+        case '\\':
+            escaped_writer_append(writer, "\\\\", 2);
+            return;
+        default:
+            if (uchr < 0x20 || uchr == 0x7F) {
+                char escape_buf[4];
+                escape_buf[0] = '\\';
+                escape_buf[1] = 'x';
+                escape_buf[2] = hexdigits[(uchr >> 4) & 0x0F];
+                escape_buf[3] = hexdigits[uchr & 0x0F];
+                escaped_writer_append(writer, escape_buf, 4);
+                return;
+            }
+            break;
+    }
+
+    {
+        char chr = (char)uchr;
+        escaped_writer_append(writer, &chr, 1);
+    }
+}
+
+static void source_excerpt_put_byte(FexEscapedWriter *writer, unsigned char uchr) {
+    static const char hexdigits[] = "0123456789ABCDEF";
+
+    switch (uchr) {
+        case '\0':
+            escaped_writer_append(writer, "\\0", 2);
+            return;
+        case '\n':
+            escaped_writer_append(writer, "\\n", 2);
+            return;
+        case '\r':
+            escaped_writer_append(writer, "\\r", 2);
+            return;
+        case '\t':
+            escaped_writer_append(writer, "\\t", 2);
+            return;
+        default:
+            if (uchr < 0x20 || uchr == 0x7F) {
+                char escape_buf[4];
+                escape_buf[0] = '\\';
+                escape_buf[1] = 'x';
+                escape_buf[2] = hexdigits[(uchr >> 4) & 0x0F];
+                escape_buf[3] = hexdigits[uchr & 0x0F];
+                escaped_writer_append(writer, escape_buf, 4);
+                return;
+            }
+            break;
+    }
+
+    {
+        char chr = (char)uchr;
+        escaped_writer_append(writer, &chr, 1);
+    }
+}
+
+static void append_string_for_error(fe_Context *ctx, fe_Object *obj, FexEscapedWriter *writer) {
+    const FexSpan *sp = fex_lookup_span(ctx, obj);
+    char stack_buf[256];
+    char *buffer = stack_buf;
+    char *heap_buf = NULL;
+    size_t len;
+    size_t i;
+
+    if (sp && sp->start && sp->end && sp->end >= sp->start) {
+        escaped_writer_append(writer, sp->start, (size_t)(sp->end - sp->start));
+        return;
+    }
+
+    len = fe_strlen(ctx, obj);
+    if (len + 1 > sizeof(stack_buf)) {
+        heap_buf = (char*)malloc(len + 1);
+        if (!heap_buf) {
+            escaped_writer_append(writer, "\"<oom>\"", 7);
+            return;
+        }
+        buffer = heap_buf;
+    }
+
+    fe_tostring(ctx, obj, buffer, (int)(len + 1));
+    escaped_writer_append(writer, "\"", 1);
+    for (i = 0; i < len; ++i) {
+        unsigned char uchr = (unsigned char)buffer[i];
+        switch (uchr) {
+            case '\\':
+                escaped_writer_append(writer, "\\\\", 2);
+                break;
+            case '"':
+                escaped_writer_append(writer, "\\\"", 2);
+                break;
+            default:
+                escaped_writer_put_byte(writer, uchr);
+                break;
+        }
+    }
+    escaped_writer_append(writer, "\"", 1);
+    free(heap_buf);
+}
+
+static void append_scalar_for_error(fe_Context *ctx, fe_Object *obj, FexEscapedWriter *writer) {
+    char buffer[256];
+    int len;
+    int i;
+    int in_string = 0;
+
+    len = fe_tostring(ctx, obj, buffer, sizeof(buffer));
+    for (i = 0; i < len; ++i) {
+        unsigned char uchr = (unsigned char)buffer[i];
+
+        if (in_string) {
+            if (uchr == '\\') {
+                if (i + 1 < len && buffer[i + 1] == '"') {
+                    escaped_writer_append(writer, "\\\"", 2);
+                    ++i;
+                } else {
+                    escaped_writer_append(writer, "\\\\", 2);
+                }
+                continue;
+            }
+            if (uchr == '"') {
+                escaped_writer_append(writer, "\"", 1);
+                in_string = 0;
+                continue;
+            }
+            escaped_writer_put_byte(writer, uchr);
+            continue;
+        }
+
+        if (uchr == '"') {
+            escaped_writer_append(writer, "\"", 1);
+            in_string = 1;
+            continue;
+        }
+
+        source_excerpt_put_byte(writer, uchr);
+    }
+}
+
+static void append_object_for_error(fe_Context *ctx, fe_Object *obj, FexEscapedWriter *writer) {
+    if (FE_IS_FIXNUM(obj)) {
+        append_scalar_for_error(ctx, obj, writer);
+        return;
+    }
+
+    switch (fe_type(ctx, obj)) {
+        case FE_TPAIR:
+            escaped_writer_append(writer, "(", 1);
+            while (!fe_isnil(ctx, obj) && fe_type(ctx, obj) == FE_TPAIR) {
+                append_object_for_error(ctx, fe_car(ctx, obj), writer);
+                obj = fe_cdr(ctx, obj);
+                if (!fe_isnil(ctx, obj) && fe_type(ctx, obj) == FE_TPAIR) {
+                    escaped_writer_append(writer, " ", 1);
+                }
+            }
+            if (!fe_isnil(ctx, obj)) {
+                escaped_writer_append(writer, " . ", 3);
+                append_object_for_error(ctx, obj, writer);
+            }
+            escaped_writer_append(writer, ")", 1);
+            return;
+        case FE_TSTRING:
+            append_string_for_error(ctx, obj, writer);
+            return;
+        default:
+            append_scalar_for_error(ctx, obj, writer);
+            return;
+    }
+}
+
+static void format_object_for_error(fe_Context *ctx, fe_Object *obj, char *dst, size_t dst_size) {
+    FexEscapedWriter writer;
+
+    if (!dst || dst_size == 0) {
+        return;
+    }
+
+    dst[0] = '\0';
+    writer.dst = dst;
+    writer.len = 0;
+    writer.cap = dst_size;
+    append_object_for_error(ctx, obj, &writer);
 }
 
 void fex_error_clear(FexError *error) {
@@ -103,7 +460,7 @@ static void fill_runtime_trace(fe_Context *ctx, FexError *error, fe_Object *cl) 
     for (depth = 0; depth < FEX_ERROR_TRACE_MAX && !fe_isnil(ctx, cl);
          ++depth, cl = fe_cdr(ctx, cl)) {
         FexErrorFrame *frame = &error->frames[depth];
-        const FexSpan *sp = fex_lookup_span(fe_car(ctx, cl));
+        const FexSpan *sp = fex_lookup_span(ctx, fe_car(ctx, cl));
 
         if (sp) {
             copy_string(frame->source_name, sizeof(frame->source_name),
@@ -117,8 +474,8 @@ static void fill_runtime_trace(fe_Context *ctx, FexError *error, fe_Object *cl) 
                             frame->source_name);
             }
         }
-
-        fe_tostring(ctx, fe_car(ctx, cl), frame->expression, sizeof(frame->expression));
+        format_object_for_error(ctx, fe_car(ctx, cl),
+                                frame->expression, sizeof(frame->expression));
         error->frame_count = depth + 1;
     }
 }
@@ -139,9 +496,9 @@ static void fex_on_error(fe_Context *ctx,const char *msg,fe_Object *cl)
     int depth;
     fprintf(stderr,"error: %s\n",msg);
     for (depth=0; !fe_isnil(ctx,cl); ++depth, cl=fe_cdr(ctx,cl)) {
-        const FexSpan *sp = fex_lookup_span(fe_car(ctx,cl));
+        const FexSpan *sp = fex_lookup_span(ctx, fe_car(ctx,cl));
         char buf[128];
-        fe_tostring(ctx, fe_car(ctx,cl), buf, sizeof buf);
+        format_object_for_error(ctx, fe_car(ctx,cl), buf, sizeof(buf));
         if (sp) {
             fprintf(stderr,"[%d] %s:%d:%d  =>  %s\n",
                     depth,
@@ -237,13 +594,45 @@ static fe_Object* builtin_println(fe_Context *ctx, fe_Object *args) {
 /* Read a line from stdin (no trailing newline), return a FeX string or nil on EOF */
 static fe_Object* builtin_read_line(fe_Context *ctx, fe_Object *args) {
     (void)args;
-    char buffer[1024];
-    if (!fgets(buffer, sizeof(buffer), stdin)) {
+    char stack_buf[1024];
+    char *buf = stack_buf;
+    size_t cap = sizeof(stack_buf);
+    size_t len = 0;
+    int c;
+    fe_Object *result;
+
+    while ((c = fgetc(stdin)) != EOF) {
+        if (len + 1 >= cap) {
+            size_t new_cap = cap * 2;
+            char *new_buf;
+            if (buf == stack_buf) {
+                new_buf = (char *)fex_temp_alloc(ctx, new_cap);
+                if (!new_buf) {
+                    return fe_nil(ctx);
+                }
+                memcpy(new_buf, buf, len);
+            } else {
+                new_buf = (char *)fex_temp_realloc(ctx, buf, new_cap);
+                if (!new_buf) {
+                    return fe_nil(ctx);
+                }
+            }
+            buf = new_buf;
+            cap = new_cap;
+        }
+        if (c == '\n') break;
+        buf[len++] = (char)c;
+    }
+
+    if (len == 0 && c == EOF) {
+        if (buf != stack_buf) fex_temp_free(ctx, buf);
         return fe_nil(ctx);
     }
-    size_t len = strlen(buffer);
-    if (len > 0 && buffer[len-1] == '\n') {buffer[len-1] = '\0'; len--;}
-    return fe_string(ctx, buffer, len);
+
+    buf[len] = '\0';
+    result = fe_string(ctx, buf, len);
+    if (buf != stack_buf) fex_temp_free(ctx, buf);
+    return result;
 }
 
 /* Read a line from stdin and parse it as a number, or nil on EOF */
@@ -277,7 +666,7 @@ void fex_init_with_builtins(fe_Context *ctx, FexConfig config,
     }
 
     /* Configure spans */
-    fex_span_set_enabled(config & FEX_CONFIG_ENABLE_SPANS);
+    fex_span_set_enabled(ctx, config & FEX_CONFIG_ENABLE_SPANS);
 
     /* Save/restore GC stack to avoid leaking the symbol object. */
     int gc_save = fe_savegc(ctx);
@@ -347,7 +736,7 @@ typedef struct {
   int column;
 } Token;
 
-typedef struct {
+typedef struct Lexer {
   fe_Context *ctx;
   const char *source;
   const char *source_name;
@@ -358,7 +747,11 @@ typedef struct {
   int had_error;
 } Lexer;
 
-static Lexer L;
+typedef struct Parser Parser;
+typedef struct FexCompileState FexCompileState;
+static FEX_THREAD_LOCAL FexCompileState *g_compile_state = NULL;
+static Lexer *current_lexer(void);
+#define L (*current_lexer())
 
 /* Build a pair and attach the current token span ------------------------ */
 static fe_Object *fex_cons_tok(fe_Context *c,
@@ -366,10 +759,11 @@ static fe_Object *fex_cons_tok(fe_Context *c,
                                Token start, Token end)
 {
     fe_Object *cell = fe_cons(c, car, cdr);
-    fex_record_span(cell, L.source,
+    fex_record_span(c, cell, L.source,
                     L.source_name,
                     start.line, start.column,
-                    end.line,   end.column);
+                    end.line,   end.column,
+                    NULL, NULL);
     return cell;
 }
 
@@ -499,13 +893,17 @@ static Token lex_number() {
 }
 
 static Token lex_string() {
-  while (*L.current != '"' && !is_at_end()) {
-    if (*L.current == '\n') L.line++;
-    advance();
+  while (!is_at_end()) {
+    char c = advance();
+    if (c == '\\' && !is_at_end()) {
+      advance();
+      continue;
+    }
+    if (c == '"') {
+      return make_token(TOKEN_STRING);
+    }
   }
-  if (is_at_end()) return error_token("Unterminated string.");
-  advance(); /* The closing quote. */
-  return make_token(TOKEN_STRING);
+  return error_token("Unterminated string.");
 }
 
 static Token scan_token() {
@@ -550,14 +948,20 @@ static Token scan_token() {
 ================================================================================
 */
 
-typedef struct {
+struct Parser {
     fe_Context *ctx;
     const char *source_name;
     Token current;
     Token previous;
     int had_error;
     int panic_mode;
-} Parser;
+};
+
+typedef struct FexCompileState {
+    Lexer lexer;
+    Parser parser;
+    struct FexCompileState *previous;
+} FexCompileState;
 
 /* Pratt parser precedence levels */
 typedef enum {
@@ -574,7 +978,45 @@ typedef enum {
   PREC_PRIMARY
 } Precedence;
 
-static Parser P;
+static Lexer *current_lexer(void) {
+    return &g_compile_state->lexer;
+}
+
+static Parser *current_parser(void) {
+    return &g_compile_state->parser;
+}
+
+#define P (*current_parser())
+
+static FexCompileState *enter_compile_scope(fe_Context *ctx, const char *source,
+                                            const char *source_name) {
+    FexCompileState *scope = (FexCompileState*)malloc(sizeof(*scope));
+    if (!scope) {
+        fe_error(ctx, "out of memory (compiler state)");
+        return NULL;
+    }
+
+    scope->previous = g_compile_state;
+    g_compile_state = scope;
+
+    init_lexer(ctx, source);
+
+    P.ctx = ctx;
+    P.source_name = source_name ? source_name : "<string>";
+    L.source_name = P.source_name;
+    P.had_error = 0;
+    P.panic_mode = 0;
+
+    return scope;
+}
+
+static void leave_compile_scope(FexCompileState *scope) {
+    if (!scope) {
+        return;
+    }
+    g_compile_state = scope->previous;
+    free(scope);
+}
 
 /* Forward declarations for the parser */
 static fe_Object* expression();
@@ -841,16 +1283,57 @@ static fe_Object* parse_import_specifier() {
 }
 
 static fe_Object* parse_string() {
-    char buffer[1024];
-    int len = P.previous.length - 2;
-    if (len < 0) len = 0;
-    if ((size_t)len >= sizeof(buffer)) {
-        error("String too long.");
-        return fe_nil(P.ctx);
+    const char *src = P.previous.start + 1;
+    int raw_len = P.previous.length - 2;
+    char stack_buf[1024];
+    char *buf = stack_buf;
+    char *heap_buf = NULL;
+    int i, out;
+    fe_Object *result;
+
+    if (raw_len < 0) raw_len = 0;
+
+    /* Allocate dynamically for strings that won't fit the stack buffer */
+    if ((size_t)raw_len >= sizeof(stack_buf)) {
+        heap_buf = (char *)fex_temp_alloc(P.ctx, (size_t)raw_len + 1);
+        if (!heap_buf) {
+            return fe_nil(P.ctx);
+        }
+        buf = heap_buf;
     }
-    memcpy(buffer, P.previous.start + 1, len);
-    buffer[len] = '\0';
-    return fe_string(P.ctx, buffer, len);
+
+    /* Process escape sequences */
+    for (i = 0, out = 0; i < raw_len; i++) {
+        if (src[i] == '\\' && i + 1 < raw_len) {
+            i++;
+            switch (src[i]) {
+                case 'n':  buf[out++] = '\n'; break;
+                case 't':  buf[out++] = '\t'; break;
+                case 'r':  buf[out++] = '\r'; break;
+                case '\\': buf[out++] = '\\'; break;
+                case '"':  buf[out++] = '"';  break;
+                case '0':  buf[out++] = '\0'; break;
+                default:
+                    /* Unknown escape: keep both backslash and character */
+                    buf[out++] = '\\';
+                    buf[out++] = src[i];
+                    break;
+            }
+        } else {
+            buf[out++] = src[i];
+        }
+    }
+    buf[out] = '\0';
+
+    result = fe_string(P.ctx, buf, out);
+    fex_record_span(P.ctx, result, L.source, L.source_name,
+                    P.previous.line, P.previous.column,
+                    P.previous.line, P.previous.column + P.previous.length - 1,
+                    P.previous.start, P.previous.start + P.previous.length);
+    if (heap_buf) {
+        fex_temp_free(P.ctx, heap_buf);
+    }
+    return result;
 }
 
 static fe_Object* parse_literal() {
@@ -982,9 +1465,6 @@ static fe_Object* parse_precedence_new(Precedence precedence) {
             if (op_type == TOKEN_BANG_EQUAL) {
                 left = make_binary("is", left, right);
                 left = make_unary("not", left);
-            } else if (op_type == TOKEN_GREATER || op_type == TOKEN_GREATER_EQUAL) {
-                const char* new_op = (op_type == TOKEN_GREATER) ? "<" : "<=";
-                left = make_binary(new_op, right, left);
             } else {
                 left = make_binary(op_str, left, right);
             }
@@ -1241,21 +1721,25 @@ static fe_Object* declaration() {
 
 fe_Object* fex_compile_named(fe_Context *ctx, const char *source,
                              const char *source_name) {
-    init_lexer(ctx, source);
+    FexCompileState *scope;
+    fe_Object* nil_obj = fex_nil(ctx);
+    fe_Object *program;
+    int count = 0;
+    int gc_base;
+    fe_Object *head;
+    fe_Object **tail;
 
-    P.ctx = ctx;
-    P.source_name = source_name ? source_name : "<string>";
-    L.source_name = P.source_name;
-    P.had_error = 0;
-    P.panic_mode = 0;
-    fe_Object* nil_obj = fex_nil(P.ctx);
+    scope = enter_compile_scope(ctx, source, source_name);
+    if (!scope) {
+        return NULL;
+    }
+    nil_obj = fex_nil(P.ctx);
 
     parser_advance();
 
-    fe_Object *head = nil_obj;
-    fe_Object **tail = &head;
-    int count = 0;
-    int gc_base = fe_savegc(ctx);
+    head = nil_obj;
+    tail = &head;
+    gc_base = fe_savegc(ctx);
 
     while (!parser_match(TOKEN_EOF)) {
         /* keep the part we already built alive */
@@ -1271,9 +1755,11 @@ fe_Object* fex_compile_named(fe_Context *ctx, const char *source,
         if (P.had_error) break;
     }
 
-    if (P.had_error || L.had_error) return NULL;
+    if (P.had_error || L.had_error) {
+        leave_compile_scope(scope);
+        return NULL;
+    }
 
-    fe_Object *program;
     if (count == 0)       program = nil_obj;
     else if (count == 1)  program = fe_car(ctx, head);
     else                  program = CONS1(fe_symbol(ctx, "do"), head);
@@ -1281,6 +1767,7 @@ fe_Object* fex_compile_named(fe_Context *ctx, const char *source,
     /* hand the finished AST back still rooted - caller pushes it again
        immediately, and later pops the whole frame, so no leak occurs.   */
     fe_pushgc(ctx, program);
+    leave_compile_scope(scope);
     return program;
 }
 
@@ -1311,6 +1798,7 @@ FexStatus fex_try_run_internal(fe_Context *ctx, fe_Object **out_result,
                                fe_Object *(*fn)(fe_Context *ctx, const void *a, const void *b),
                                const void *arg_a, const void *arg_b) {
     FexTryScope scope;
+    FexCompileState *saved_compile_state = g_compile_state;
     fe_ErrorFn previous_error = fe_handlers(ctx)->error;
     int gc_save = fe_savegc(ctx);
     int jump_result;
@@ -1321,6 +1809,7 @@ FexStatus fex_try_run_internal(fe_Context *ctx, fe_Object **out_result,
     fex_error_clear(out_error);
 
     scope.error = out_error;
+    scope.temps = NULL;
     scope.previous = g_try_scope;
     g_try_scope = &scope;
     fe_handlers(ctx)->error = fex_try_on_error;
@@ -1328,14 +1817,23 @@ FexStatus fex_try_run_internal(fe_Context *ctx, fe_Object **out_result,
     jump_result = setjmp(scope.env);
     if (jump_result == 0) {
         fe_Object *result = fn(ctx, arg_a, arg_b);
+        while (g_compile_state != saved_compile_state) {
+            leave_compile_scope(g_compile_state);
+        }
+        fex_try_scope_free_temps(ctx, &scope);
         g_try_scope = scope.previous;
         fe_handlers(ctx)->error = previous_error;
+        fe_restoregc(ctx, gc_save);
         if (out_result) {
             *out_result = result;
         }
         return FEX_STATUS_OK;
     }
 
+    while (g_compile_state != saved_compile_state) {
+        leave_compile_scope(g_compile_state);
+    }
+    fex_try_scope_free_temps(ctx, &scope);
     g_try_scope = scope.previous;
     fe_handlers(ctx)->error = previous_error;
     fe_restoregc(ctx, gc_save);
@@ -1382,6 +1880,13 @@ FexStatus fex_try_eval(fe_Context *ctx, fe_Object *obj, fe_Object **out_result,
 FexStatus fex_try_do_string(fe_Context *ctx, const char *source,
                             fe_Object **out_result, FexError *out_error) {
     return fex_try_run_internal(ctx, out_result, out_error, try_do_string_runner, source, "<string>");
+}
+
+FexStatus fex_try_do_string_named(fe_Context *ctx, const char *source,
+                                  const char *source_name,
+                                  fe_Object **out_result, FexError *out_error) {
+    return fex_try_run_internal(ctx, out_result, out_error, try_do_string_runner, source,
+                                source_name ? source_name : "<string>");
 }
 
 FexStatus fex_try_do_file(fe_Context *ctx, const char *path,

@@ -27,21 +27,26 @@
 
 typedef struct FexSpan {
     const fe_Object *node;
+    /* Owned excerpt buffer when source text is available; NULL otherwise. */
     const char *source;
     const char *source_name;
+    /* Slice into `source` when an excerpt is available; NULL otherwise. */
+    const char *start;
+    const char *end;
     int start_line, start_col;
     int end_line, end_col;
     struct FexSpan *next;
 } FexSpan;
 
-void fex_record_span(const fe_Object *node,
+void fex_record_span(fe_Context *ctx, const fe_Object *node,
                      const char *src,
                      const char *source_name,
-                     int sline, int scol, int eline, int ecol);
+                     int sline, int scol, int eline, int ecol,
+                     const char *start, const char *end);
 
-const FexSpan *fex_lookup_span(const fe_Object *node);
+const FexSpan *fex_lookup_span(fe_Context *ctx, const fe_Object *node);
 
-void fex_span_set_enabled(int enabled);
-int fex_span_is_enabled(void);
+void fex_span_set_enabled(fe_Context *ctx, int enabled);
+int fex_span_is_enabled(fe_Context *ctx);
 
 #endif

@@ -235,6 +235,56 @@ static char* make_large_split_string(size_t item_count) {
     return text;
 }
 
+static char* make_large_string_literal_source(size_t literal_len) {
+    const char *prefix = "\"";
+    const char *suffix = "\";\n";
+    size_t prefix_len = strlen(prefix);
+    size_t suffix_len = strlen(suffix);
+    char *source = (char*)malloc(prefix_len + literal_len + suffix_len + 1);
+    size_t i;
+
+    if (!source) {
+        return NULL;
+    }
+
+    memcpy(source, prefix, prefix_len);
+    for (i = 0; i < literal_len; i++) {
+        source[prefix_len + i] = 'a';
+    }
+    memcpy(source + prefix_len + literal_len, suffix, suffix_len);
+    source[prefix_len + literal_len + suffix_len] = '\0';
+    return source;
+}
+
+static fe_Object* nested_compile_ok_cfunc(fe_Context *ctx, fe_Object *args) {
+    fe_Object *result = NULL;
+    FexError error;
+    FexStatus status;
+    (void)args;
+
+    status = fex_try_do_string(ctx, "41 + 1;", &result, &error);
+    if (status != FEX_STATUS_OK) {
+        fe_error(ctx, error.message[0] ? error.message : "nested compile failed");
+        return fe_nil(ctx);
+    }
+    return result;
+}
+
+static fe_Object* nested_compile_error_cfunc(fe_Context *ctx, fe_Object *args) {
+    fe_Object *result = NULL;
+    FexError error;
+    FexStatus status;
+    (void)args;
+
+    status = fex_try_do_string(ctx, "let inner = ;", &result, &error);
+    if (status != FEX_STATUS_COMPILE_ERROR ||
+        strcmp(error.message, "Expect expression.") != 0) {
+        fe_error(ctx, "nested compile error handling failed");
+        return fe_nil(ctx);
+    }
+    return fe_make_number(ctx, 7);
+}
+
 static int write_large_test_file(const char *path, size_t size, unsigned char fill_byte) {
     FILE *file;
     unsigned char chunk[4096];
@@ -313,7 +363,10 @@ static void cleanup_test_directory_files(const char *dir_path, int count) {
 
 int main(void) {
     void *memory;
+    void *plain_memory;
     fe_Context *ctx;
+    fe_Context *plain_ctx;
+    fe_Context *span_ctx;
     fe_Object *map;
     fe_Object *name_key;
     fe_Object *name_value;
@@ -324,6 +377,7 @@ int main(void) {
     FexStatus status;
     char buffer[64];
     const char *budget_loop_source = "while (true) { }\n";
+    void *span_memory;
 
     memory = malloc(TEST_MEM_SIZE);
     if (!memory) {
@@ -337,17 +391,66 @@ int main(void) {
     }
 
     fex_init_with_config(ctx, FEX_CONFIG_ENABLE_SPANS);
+    fe_set(ctx, fe_symbol(ctx, "nested_compile_ok"), fe_cfunc(ctx, nested_compile_ok_cfunc));
+    fe_set(ctx, fe_symbol(ctx, "nested_compile_error"), fe_cfunc(ctx, nested_compile_error_cfunc));
 
-    status = fex_try_do_string(ctx, "40 + 2;", &result, &error);
-    if (status != FEX_STATUS_OK) {
+    plain_memory = malloc(TEST_MEM_SIZE);
+    if (!plain_memory) {
         fe_close(ctx);
         free(memory);
-        return fail("expected successful evaluation");
+        return fail("failed to allocate lazy span test memory");
     }
-    if (fe_tonumber(ctx, result) != 42) {
+    plain_ctx = fe_open(plain_memory, TEST_MEM_SIZE);
+    if (!plain_ctx) {
         fe_close(ctx);
         free(memory);
-        return fail("expected 40 + 2 to equal 42");
+        free(plain_memory);
+        return fail("failed to open lazy span test context");
+    }
+    if (fe_get_memory_used(plain_ctx) != TEST_MEM_SIZE) {
+        fe_close(plain_ctx);
+        fe_close(ctx);
+        free(memory);
+        free(plain_memory);
+        return fail("expected spans to stay disabled without extra tracked allocations");
+    }
+    fex_init(plain_ctx);
+    if (fe_get_memory_used(plain_ctx) != TEST_MEM_SIZE) {
+        fe_close(plain_ctx);
+        fe_close(ctx);
+        free(memory);
+        free(plain_memory);
+        return fail("expected default initialization to keep spans lazily disabled");
+    }
+    fex_init_with_config(plain_ctx, FEX_CONFIG_ENABLE_SPANS);
+    if (fe_get_memory_used(plain_ctx) <= TEST_MEM_SIZE) {
+        fe_close(plain_ctx);
+        fe_close(ctx);
+        free(memory);
+        free(plain_memory);
+        return fail("expected enabling spans to allocate span state lazily");
+    }
+    fe_close(plain_ctx);
+    free(plain_memory);
+
+    {
+        int gc_before = fe_savegc(ctx);
+        status = fex_try_do_string(ctx, "40 + 2;", &result, &error);
+        if (status != FEX_STATUS_OK) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected successful evaluation");
+        }
+        if (fe_tonumber(ctx, result) != 42) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected 40 + 2 to equal 42");
+        }
+        if (fe_savegc(ctx) != gc_before) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected successful fex_try_do_string to restore the GC stack");
+        }
     }
 
     map = fe_map(ctx);
@@ -380,6 +483,20 @@ int main(void) {
         fe_close(ctx);
         free(memory);
         return fail("compile error details were not captured");
+    }
+
+    status = fex_try_do_string(ctx, "nested_compile_ok();", &result, &error);
+    if (status != FEX_STATUS_OK || fe_tonumber(ctx, result) != 42) {
+        fe_close(ctx);
+        free(memory);
+        return fail_status("expected nested same-thread compile to succeed", status, &error);
+    }
+
+    status = fex_try_do_string(ctx, "nested_compile_error();", &result, &error);
+    if (status != FEX_STATUS_OK || fe_tonumber(ctx, result) != 7) {
+        fe_close(ctx);
+        free(memory);
+        return fail_status("expected nested same-thread compile errors to unwind cleanly", status, &error);
     }
 
     status = fex_try_do_string(ctx, "let p = 1 :: 2 :: nil;\np.foo;\n", &result, &error);
@@ -557,6 +674,86 @@ int main(void) {
             return fail("expected tracked memory usage to stay within the configured limit");
         }
     }
+
+    span_memory = malloc(TEST_MEM_SIZE);
+    if (!span_memory) {
+        fe_close(ctx);
+        free(memory);
+        return fail("failed to allocate span accounting test memory");
+    }
+    span_ctx = fe_open(span_memory, TEST_MEM_SIZE);
+    if (!span_ctx) {
+        fe_close(ctx);
+        free(memory);
+        free(span_memory);
+        return fail("failed to open span accounting test context");
+    }
+    fex_init_with_config(span_ctx, FEX_CONFIG_ENABLE_SPANS);
+    {
+        size_t baseline_used = fe_get_memory_used(span_ctx);
+        fe_Object *compiled = NULL;
+        FexError span_error;
+        FexStatus span_status = fex_try_compile(span_ctx, "1 + 2;\n", "span-usage", &compiled, &span_error);
+
+        if (span_status != FEX_STATUS_OK) {
+            fe_close(span_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(span_memory);
+            return fail_status("expected span-enabled compile to succeed", span_status, &span_error);
+        }
+        if (fe_get_memory_used(span_ctx) <= baseline_used) {
+            fe_close(span_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(span_memory);
+            return fail("expected span tracking allocations to contribute to tracked memory usage");
+        }
+    }
+    fe_close(span_ctx);
+    free(span_memory);
+
+    span_memory = malloc(TEST_MEM_SIZE);
+    if (!span_memory) {
+        fe_close(ctx);
+        free(memory);
+        return fail("failed to allocate span memory limit test memory");
+    }
+    span_ctx = fe_open(span_memory, TEST_MEM_SIZE);
+    if (!span_ctx) {
+        fe_close(ctx);
+        free(memory);
+        free(span_memory);
+        return fail("failed to open span memory limit test context");
+    }
+    fex_init_with_config(span_ctx, FEX_CONFIG_ENABLE_SPANS);
+    {
+        size_t baseline_used = fe_get_memory_used(span_ctx);
+        fe_Object *compiled = NULL;
+        FexError span_error;
+        FexStatus span_status;
+
+        fe_set_memory_limit(span_ctx, baseline_used + 16);
+        span_status = fex_try_compile(span_ctx, "1 + 2;\n", "span-limit", &compiled, &span_error);
+        fe_set_memory_limit(span_ctx, 0);
+        if (span_status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(span_error.message, "memory limit exceeded") == NULL) {
+            fe_close(span_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(span_memory);
+            return fail_status("expected span tracking allocations to honor the memory limit", span_status, &span_error);
+        }
+        if (fe_get_memory_used(span_ctx) != baseline_used) {
+            fe_close(span_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(span_memory);
+            return fail("expected span tracking allocation failures to clean up tracked memory");
+        }
+    }
+    fe_close(span_ctx);
+    free(span_memory);
 
     fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS,
         FEX_BUILTINS_STRING | FEX_BUILTINS_DATA);
@@ -891,6 +1088,242 @@ int main(void) {
         free(memory);
         return fail("unexpected pathjoin result after enabling I/O builtins");
     }
+
+    status = fex_try_do_string(ctx, "writefile(\"bad\\0path.txt\", \"x\");", &result, &error);
+    if (status != FEX_STATUS_RUNTIME_ERROR ||
+        strstr(error.message, "writefile: strings containing NUL bytes are not allowed") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail_status("expected writefile to reject embedded NUL bytes in path strings", status, &error);
+    }
+    if (error.frame_count < 1 ||
+        strstr(error.frames[0].expression, "bad\\0path.txt") == NULL ||
+        strstr(error.frames[0].expression, "writefile") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected structured runtime diagnostics to preserve embedded NUL literals");
+    }
+
+    status = fex_try_do_string(
+        ctx,
+        "tojson(parsejson(\"\\\"a\\\\u0000b\\\"\"));\n",
+        &result,
+        &error
+    );
+    if (status != FEX_STATUS_OK) {
+        fe_close(ctx);
+        free(memory);
+        return fail_status("expected tojson to serialize embedded NUL strings as JSON escapes", status, &error);
+    }
+    {
+        char json_buffer[32];
+        fe_tostring(ctx, result, json_buffer, sizeof(json_buffer));
+        if (strcmp(json_buffer, "\"a\\u0000b\"") != 0) {
+            fe_close(ctx);
+            free(memory);
+            return fail("unexpected JSON serialization for embedded NUL string");
+        }
+    }
+
+    status = fex_try_do_string(ctx, "tonumber(\"42\\0junk\");", &result, &error);
+    if (status != FEX_STATUS_RUNTIME_ERROR ||
+        strstr(error.message, "tonumber: invalid number format") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail_status("expected tonumber to reject embedded NUL trailing data", status, &error);
+    }
+    if (error.frame_count < 1 ||
+        strstr(error.frames[0].expression, "42\\0junk") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected tonumber diagnostic to preserve embedded NUL literals");
+    }
+
+    status = fex_try_do_string(ctx, "tonumber(\"\\\\0\");", &result, &error);
+    if (status != FEX_STATUS_RUNTIME_ERROR ||
+        strstr(error.message, "tonumber: invalid number format") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail_status("expected tonumber to reject literal backslash-zero text", status, &error);
+    }
+    if (error.frame_count < 1 ||
+        strstr(error.frames[0].expression, "\"\\\\0\"") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected diagnostics to distinguish literal backslash sequences from embedded NUL bytes");
+    }
+
+    {
+        char *heap_source = (char*)malloc(32);
+        fe_Object *compiled = NULL;
+
+        if (!heap_source) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to allocate transient compile source");
+        }
+        memcpy(heap_source, "tonumber(\"\\\\0\");\n", 18);
+        status = fex_try_compile(ctx, heap_source, "transient-source", &compiled, &error);
+        if (status != FEX_STATUS_OK) {
+            free(heap_source);
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected transient-source compile to succeed", status, &error);
+        }
+        memset(heap_source, 'x', 17);
+        heap_source[17] = '\0';
+        free(heap_source);
+
+        status = fex_try_eval(ctx, compiled, &result, &error);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "tonumber: invalid number format") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected compiled transient-source diagnostics to stay valid", status, &error);
+        }
+        if (error.frame_count < 1 ||
+            strstr(error.frames[0].expression, "\"\\\\0\"") == NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected span excerpts to outlive transient compile buffers");
+        }
+    }
+
+    status = fex_try_do_string(
+        ctx,
+        "let s = \"a\\\"b\";\n"
+        "let bits = split(\"a\\0b,c\", \",\");\n"
+        "list(strlen(s), contains(\"a\\0b\", \"\\0b\"), strlen(concat(\"a\\0b\", \"c\")), strlen(car(bits)), strlen(trim(\"\\t\\0 \\n\")));\n",
+        &result,
+        &error
+    );
+    if (status != FEX_STATUS_OK) {
+        fe_close(ctx);
+        free(memory);
+        return fail_status("expected escaped quotes and embedded NUL string builtins to work", status, &error);
+    }
+    if (fe_tonumber(ctx, fe_car(ctx, result)) != 3 ||
+        fe_car(ctx, fe_cdr(ctx, result)) != FE_TRUE ||
+        fe_tonumber(ctx, fe_car(ctx, fe_cdr(ctx, fe_cdr(ctx, result)))) != 4 ||
+        fe_tonumber(ctx, fe_car(ctx, fe_cdr(ctx, fe_cdr(ctx, fe_cdr(ctx, result))))) != 3 ||
+        fe_tonumber(ctx, fe_car(ctx, fe_cdr(ctx, fe_cdr(ctx, fe_cdr(ctx, fe_cdr(ctx, result)))))) != 1) {
+        fe_close(ctx);
+        free(memory);
+        return fail("unexpected results from escaped quote / embedded NUL string tests");
+    }
+
+    span_memory = malloc(TEST_MEM_SIZE);
+    if (!span_memory) {
+        fe_close(ctx);
+        free(memory);
+        return fail("failed to allocate large literal memory limit test memory");
+    }
+    span_ctx = fe_open(span_memory, TEST_MEM_SIZE);
+    if (!span_ctx) {
+        fe_close(ctx);
+        free(memory);
+        free(span_memory);
+        return fail("failed to open large literal memory limit test context");
+    }
+    fex_init_with_config(span_ctx, FEX_CONFIG_ENABLE_SPANS);
+    {
+        char *large_literal_source = make_large_string_literal_source(4096);
+        size_t baseline_used = fe_get_memory_used(span_ctx);
+        fe_Object *compiled = NULL;
+        FexError span_error;
+        FexStatus span_status;
+
+        if (!large_literal_source) {
+            fe_close(span_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(span_memory);
+            return fail("failed to allocate large literal source");
+        }
+
+        fe_set_memory_limit(span_ctx, baseline_used + 512);
+        span_status = fex_try_compile(span_ctx, large_literal_source, "literal-limit", &compiled, &span_error);
+        fe_set_memory_limit(span_ctx, 0);
+        free(large_literal_source);
+        if (span_status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(span_error.message, "memory limit exceeded") == NULL) {
+            fe_close(span_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(span_memory);
+            return fail_status("expected large literal compilation to honor tracked memory limits", span_status, &span_error);
+        }
+    }
+    fe_close(span_ctx);
+    free(span_memory);
+
+    span_memory = malloc(TEST_MEM_SIZE);
+    if (!span_memory) {
+        fe_close(ctx);
+        free(memory);
+        return fail("failed to allocate direct large literal memory limit test memory");
+    }
+    span_ctx = fe_open(span_memory, TEST_MEM_SIZE);
+    if (!span_ctx) {
+        fe_close(ctx);
+        free(memory);
+        free(span_memory);
+        return fail("failed to open direct large literal memory limit test context");
+    }
+    fex_init_with_config(span_ctx, FEX_CONFIG_ENABLE_SPANS);
+    {
+        char *large_literal_source = make_large_string_literal_source(4096);
+        size_t baseline_used = fe_get_memory_used(span_ctx);
+        fe_ErrorFn previous_error = fe_handlers(span_ctx)->error;
+        ReadTryScope direct_try;
+
+        if (!large_literal_source) {
+            fe_close(span_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(span_memory);
+            return fail("failed to allocate direct large literal source");
+        }
+
+        fe_handlers(span_ctx)->error = read_try_error_handler;
+        g_read_try_scope = &direct_try;
+        direct_try.message[0] = '\0';
+        fe_set_memory_limit(span_ctx, baseline_used + 512);
+
+        if (setjmp(direct_try.env) == 0) {
+            (void)fex_compile(span_ctx, large_literal_source);
+            g_read_try_scope = NULL;
+            fe_handlers(span_ctx)->error = previous_error;
+            fe_set_memory_limit(span_ctx, 0);
+            free(large_literal_source);
+            fe_close(span_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(span_memory);
+            return fail("expected direct compile failure to escape through the error handler");
+        }
+
+        g_read_try_scope = NULL;
+        fe_handlers(span_ctx)->error = previous_error;
+        fe_set_memory_limit(span_ctx, 0);
+        free(large_literal_source);
+        if (strstr(direct_try.message, "memory limit exceeded") == NULL) {
+            fe_close(span_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(span_memory);
+            return fail("expected direct compile memory limit message");
+        }
+        if (fe_get_memory_used(span_ctx) != baseline_used) {
+            fe_close(span_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(span_memory);
+            return fail("expected direct compile temp allocations to be cleaned after error escape");
+        }
+    }
+    fe_close(span_ctx);
+    free(span_memory);
 
     {
         char *large_path = make_large_path_string(256 * 1024);

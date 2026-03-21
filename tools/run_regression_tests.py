@@ -14,6 +14,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BUDGET_LOOP_SOURCE = "while (true) { }\n"
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="backslashreplace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(errors="backslashreplace")
+
 def fex_string_literal(text: str) -> str:
     escaped = (
         text.replace("\\", "\\\\")
@@ -248,6 +253,25 @@ CASES = [
         ),
     },
     {
+        "name": "imported literal diagnostics",
+        "source": (
+            'println("--- Imported Literal Diagnostic Regression ---");\n'
+            "import error_literal;\n"
+            "error_literal.boom();\n"
+        ),
+        "args": [
+            "--module-path", ROOT / "scripts" / "import_file_modules",
+            "--builtin", "type",
+            "--spans",
+        ],
+        "exit_code": 70,
+        "stdout": "--- Imported Literal Diagnostic Regression ---\n",
+        "stderr_contains": [
+            "runtime error: tonumber: invalid number format",
+            '=> (tonumber "\\\\0")',
+        ],
+    },
+    {
         "name": "package ergonomics",
         "script": ROOT / "scripts" / "test_module_package_ergonomics.fex",
         "args": ["--module-path", ROOT / "scripts" / "import_packages"],
@@ -359,6 +383,72 @@ CASES = [
             "loaded eq:true\n"
             "loaded:#bytes[41 42 43]\n"
         ),
+    },
+    {
+        "name": "embedded nul c-string rejection",
+        "source": 'writefile("bad\\0path.txt", "x");\n',
+        "args": ["--builtin", "io", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: writefile: strings containing NUL bytes are not allowed",
+            '=> (writefile "bad\\0path.txt" "x")',
+        ],
+    },
+    {
+        "name": "embedded nul json serialization",
+        "source": 'println(tojson(parsejson("\\"a\\\\u0000b\\"")));\n',
+        "args": ["--builtin", "data"],
+        "exit_code": 0,
+        "stdout": '"a\\u0000b"\n',
+    },
+    {
+        "name": "embedded nul tonumber rejection",
+        "source": 'tonumber("42\\0junk");\n',
+        "args": ["--builtin", "type", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: tonumber: invalid number format",
+            '=> (tonumber "42\\0junk")',
+        ],
+    },
+    {
+        "name": "literal backslash diagnostics",
+        "source": 'tonumber("\\\\0");\n',
+        "args": ["--builtin", "type", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: tonumber: invalid number format",
+            '=> (tonumber "\\\\0")',
+        ],
+    },
+    {
+        "name": "string escapes and embedded nul builtins",
+        "source": (
+            'let s = "a\\\"b";\n'
+            'let parts = split("a\\0b,c", ",");\n'
+            'println(strlen(s));\n'
+            'println(contains("a\\0b", "\\0b"));\n'
+            'println(strlen(concat("a\\0b", "c")));\n'
+            'println(strlen(car(parts)));\n'
+            'println(strlen(trim("\\t\\0 \\n")));\n'
+        ),
+        "args": ["--builtins"],
+        "exit_code": 0,
+        "stdout": (
+            "3\n"
+            "true\n"
+            "4\n"
+            "3\n"
+            "1\n"
+        ),
+    },
+    {
+        "name": "readline long line",
+        "source": 'println(strlen(readline()));\n',
+        "args": ["--builtin", "string"],
+        "stdin": ("a" * 5000) + "\n",
+        "exit_code": 0,
+        "stdout": "5000\n",
     },
     {
         "name": "runcommand",
