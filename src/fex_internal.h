@@ -24,7 +24,9 @@ void fex_try_raise(FexStatus status, const char *source_name,
 FexStatus fex_try_run_internal(fe_Context *ctx, fe_Object **out_result,
                                FexError *out_error,
                                fe_Object *(*fn)(fe_Context *ctx, const void *a, const void *b),
-                               const void *arg_a, const void *arg_b);
+                               const void *arg_a, const void *arg_b,
+                               const char *source_name,
+                               int preserve_result_root);
 
 /* Per-context span state accessors (implemented in fe.c) */
 void *fe_ctx_span_state(fe_Context *ctx);

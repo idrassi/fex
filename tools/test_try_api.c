@@ -453,6 +453,73 @@ int main(void) {
         }
     }
 
+    {
+        int gc_before = fe_savegc(ctx);
+        fe_Object *compiled = NULL;
+
+        status = fex_try_compile(ctx, "40 + 2;", "try-compile-root", &compiled, &error);
+        if (status != FEX_STATUS_OK) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected successful fex_try_compile", status, &error);
+        }
+        if (fe_savegc(ctx) != gc_before + 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected successful fex_try_compile to keep the returned AST rooted");
+        }
+        status = fex_try_eval(ctx, compiled, &result, &error);
+        if (status != FEX_STATUS_OK || fe_tonumber(ctx, result) != 42) {
+            fe_restoregc(ctx, gc_before);
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected rooted fex_try_compile result to evaluate successfully", status, &error);
+        }
+        if (fe_savegc(ctx) != gc_before + 1) {
+            fe_restoregc(ctx, gc_before);
+            fe_close(ctx);
+            free(memory);
+            return fail("expected fex_try_eval to preserve the caller-owned compile root");
+        }
+        fe_restoregc(ctx, gc_before);
+    }
+
+    {
+        void *plain_try_memory = malloc(TEST_MEM_SIZE);
+        fe_Context *plain_try_ctx;
+
+        if (!plain_try_memory) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to allocate non-span runtime diagnostic test memory");
+        }
+        plain_try_ctx = fe_open(plain_try_memory, TEST_MEM_SIZE);
+        if (!plain_try_ctx) {
+            fe_close(ctx);
+            free(memory);
+            free(plain_try_memory);
+            return fail("failed to open non-span runtime diagnostic test context");
+        }
+        fex_init(plain_try_ctx);
+        status = fex_try_do_string_named(plain_try_ctx, "1 / 0;", "<expr>", &result, &error);
+        if (status != FEX_STATUS_RUNTIME_ERROR) {
+            fe_close(plain_try_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(plain_try_memory);
+            return fail_status("expected named runtime diagnostics without spans", status, &error);
+        }
+        if (strcmp(error.source_name, "<expr>") != 0) {
+            fe_close(plain_try_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(plain_try_memory);
+            return fail("expected fex_try_do_string_named to preserve the caller source name without spans");
+        }
+        fe_close(plain_try_ctx);
+        free(plain_try_memory);
+    }
+
     map = fe_map(ctx);
     name_key = fe_symbol(ctx, "name");
     name_value = fe_string(ctx, "fex", 3);

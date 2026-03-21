@@ -3053,7 +3053,8 @@ static fe_Object* import_module_spec(fe_Context *ctx, char *module_spec,
   fe_pushgc(ctx, implicit_exports);
   import_status = fex_try_run_internal(ctx, &result, &import_error,
                                        try_import_file_runner,
-                                       module_path, implicit_exports);
+                                       module_path, implicit_exports,
+                                       module_path, 0);
   if (import_status == FEX_STATUS_OK && result != NULL) {
     fe_pushgc(ctx, result);
   }
