@@ -401,7 +401,7 @@ FeX is a compiler that targets the `fe` virtual machine. The process is as follo
 2.  **Compilation**: The parser builds an Abstract Syntax Tree (AST) directly as `fe` S-expressions (lists of objects). For example, the FeX code `let x = 10;` is compiled into the `fe` list `(let x 10)`.
 3.  **Evaluation**: The resulting S-expression is passed to `fe_eval()`, which evaluates it using the core `fe` interpreter.
 
-The evaluator implements trampoline-based tail-call optimization: when a function call is in tail position (the last expression in a function body, `if`/`else` branch, or `do` block), the evaluator reuses the current C stack frame instead of recursing. This allows tail-recursive functions to run for millions of iterations in constant stack space.
+The evaluator implements trampoline-based tail-call optimization: when a function call is in tail position (the last expression in a function body, `if`/`else` branch, or `do` block), the evaluator reuses the current C stack frame instead of recursing. Combined with FeX's recursive binding rewrite for named function declarations, this lets both direct and mutually recursive named functions run for millions of iterations in constant stack space.
 
 This layered design keeps the VM (`fe.c`) simple and stable, while allowing the user-facing language (`fex.c`) to be expressive and modern.
 

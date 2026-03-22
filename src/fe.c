@@ -3251,8 +3251,36 @@ tail_call:
           if (isnil(ctx->modulestack)) fe_error(ctx, "export outside of module");
 
           fe_Object *decl = fe_nextarg(ctx, &arg);
-          fe_Object *name_sym = fe_car(ctx, fe_cdr(ctx, decl));
+          fe_Object *name_sym = NULL;
           fe_Object *exports = fe_car(ctx, ctx->modulestack);
+
+          if (type(decl) == FE_TSYMBOL) {
+            name_sym = decl;
+          } else if (type(decl) == FE_TPAIR && car(decl) == ctx->let_sym) {
+            name_sym = fe_car(ctx, fe_cdr(ctx, decl));
+          } else if (type(decl) == FE_TPAIR && car(decl) == ctx->do_sym) {
+            fe_Object *exprs = cdr(decl);
+            fe_Object *set_sym = fe_symbol(ctx, "=");
+
+            if (type(exprs) == FE_TPAIR) {
+              fe_Object *first = car(exprs);
+              if (type(first) == FE_TPAIR && car(first) == set_sym) {
+                name_sym = fe_car(ctx, fe_cdr(ctx, first));
+              }
+            }
+
+            if (!name_sym) {
+              fe_Object *tail_exprs = exprs;
+              while (type(tail_exprs) == FE_TPAIR && !isnil(tail_exprs)) {
+                if (isnil(cdr(tail_exprs))) {
+                  name_sym = car(tail_exprs);
+                  break;
+                }
+                tail_exprs = cdr(tail_exprs);
+              }
+            }
+          }
+
           checktype(ctx, name_sym, FE_TSYMBOL);
 
           /* Evaluate declaration to bind it and get value */

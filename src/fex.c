@@ -1234,6 +1234,202 @@ static fe_Object* make_ternary(const char* op, fe_Object* a, fe_Object* b, fe_Ob
     }
 }
 
+#define FEX_FN_DECL_TAG "[fex-fn-decl]"
+#define FEX_EXPORT_FN_DECL_TAG "[fex-export-fn-decl]"
+
+static void copy_span_from(fe_Object *dst, const fe_Object *src) {
+    const FexSpan *sp = fex_lookup_span(P.ctx, src);
+    if (!sp) {
+        return;
+    }
+    fex_record_span(P.ctx, dst,
+                    sp->source ? sp->source : L.source,
+                    sp->source_name ? sp->source_name : L.source_name,
+                    sp->start_line, sp->start_col,
+                    sp->end_line, sp->end_col,
+                    sp->start, sp->end);
+}
+
+static fe_Object* make_named_fn_decl(fe_Object *name, fe_Object *fn_expr, int is_export) {
+    fe_Context *c = P.ctx;
+    int guard = fe_savegc(c);
+    fe_pushgc(c, name);
+    fe_pushgc(c, fn_expr);
+
+    fe_Object *tag = fe_symbol(c, is_export ? FEX_EXPORT_FN_DECL_TAG : FEX_FN_DECL_TAG);
+    fe_pushgc(c, tag);
+
+    fe_Object *tmp = fe_cons(c, fn_expr, fex_nil(c));
+    tmp = fe_cons(c, name, tmp);
+    fe_Object *res = CONS1(tag, tmp);
+
+    fe_restoregc(c, guard);
+    return res;
+}
+
+static int extract_named_fn_decl(fe_Object *stmt, fe_Object **name, fe_Object **fn_expr,
+                                 int *is_export) {
+    fe_Object *tag;
+    fe_Object *args;
+
+    if (fe_type(P.ctx, stmt) != FE_TPAIR) {
+        return 0;
+    }
+
+    tag = fe_car(P.ctx, stmt);
+    if (tag == fe_symbol(P.ctx, FEX_FN_DECL_TAG)) {
+        *is_export = 0;
+    } else if (tag == fe_symbol(P.ctx, FEX_EXPORT_FN_DECL_TAG)) {
+        *is_export = 1;
+    } else {
+        return 0;
+    }
+
+    args = fe_cdr(P.ctx, stmt);
+    if (fe_type(P.ctx, args) != FE_TPAIR) {
+        return 0;
+    }
+    *name = fe_car(P.ctx, args);
+    args = fe_cdr(P.ctx, args);
+    if (fe_type(P.ctx, args) != FE_TPAIR) {
+        return 0;
+    }
+    *fn_expr = fe_car(P.ctx, args);
+    return fe_type(P.ctx, *name) == FE_TSYMBOL;
+}
+
+static fe_Object* make_do_two_with_span(fe_Object *first, fe_Object *second,
+                                        const fe_Object *template_node) {
+    fe_Context *c = P.ctx;
+    int guard = fe_savegc(c);
+    fe_pushgc(c, first);
+    fe_pushgc(c, second);
+
+    fe_Object *op_s = fe_symbol(c, "do");
+    fe_pushgc(c, op_s);
+
+    fe_Object *tmp = fe_cons(c, second, fex_nil(c));
+    tmp = fe_cons(c, first, tmp);
+    fe_Object *res = CONS1(op_s, tmp);
+    copy_span_from(res, template_node);
+
+    fe_restoregc(c, guard);
+    return res;
+}
+
+static fe_Object* make_do_three_with_span(fe_Object *first, fe_Object *second,
+                                          fe_Object *third,
+                                          const fe_Object *template_node) {
+    fe_Context *c = P.ctx;
+    int guard = fe_savegc(c);
+    fe_pushgc(c, first);
+    fe_pushgc(c, second);
+    fe_pushgc(c, third);
+
+    fe_Object *op_s = fe_symbol(c, "do");
+    fe_pushgc(c, op_s);
+
+    fe_Object *tmp = fe_cons(c, third, fex_nil(c));
+    tmp = fe_cons(c, second, tmp);
+    tmp = fe_cons(c, first, tmp);
+    fe_Object *res = CONS1(op_s, tmp);
+    copy_span_from(res, template_node);
+
+    fe_restoregc(c, guard);
+    return res;
+}
+
+static fe_Object* rewrite_named_fn_declarations(fe_Object *stmts, int *count) {
+    fe_Context *c = P.ctx;
+    fe_Object *p;
+    int hoisted = 0;
+
+    for (p = stmts; !fe_isnil(c, p); p = fe_cdr(c, p)) {
+        fe_Object *name;
+        fe_Object *fn_expr;
+        int is_export;
+        if (extract_named_fn_decl(fe_car(c, p), &name, &fn_expr, &is_export)) {
+            hoisted++;
+        }
+    }
+
+    if (hoisted == 0) {
+        return stmts;
+    }
+
+    {
+        fe_Object *nil_obj = fex_nil(c);
+        fe_Object *dummy;
+        fe_Object *tail;
+        int guard = fe_savegc(c);
+
+        dummy = fe_cons(c, nil_obj, nil_obj);
+        fe_pushgc(c, dummy);
+        tail = dummy;
+
+        /* Predeclare all named functions in the scope so mutually recursive
+           declarations share the same binding cells. */
+        for (p = stmts; !fe_isnil(c, p); p = fe_cdr(c, p)) {
+            fe_Object *stmt = fe_car(c, p);
+            fe_Object *name;
+            fe_Object *fn_expr;
+            int is_export;
+
+            if (!extract_named_fn_decl(stmt, &name, &fn_expr, &is_export)) {
+                continue;
+            }
+
+            {
+                fe_Object *placeholder = make_binary("let", name, nil_obj);
+                fe_Object *cell;
+                copy_span_from(placeholder, stmt);
+                fe_pushgc(c, placeholder);
+                cell = fe_cons(c, placeholder, nil_obj);
+                *fe_cdr_ptr(c, tail) = cell;
+                tail = cell;
+                fe_restoregc(c, guard + 1);
+            }
+        }
+
+        for (p = stmts; !fe_isnil(c, p); p = fe_cdr(c, p)) {
+            fe_Object *stmt = fe_car(c, p);
+            fe_Object *name;
+            fe_Object *fn_expr;
+            int is_export;
+            fe_Object *rewritten = stmt;
+            fe_Object *cell;
+
+            if (extract_named_fn_decl(stmt, &name, &fn_expr, &is_export)) {
+                fe_Object *assign_expr = make_binary("=", name, fn_expr);
+                copy_span_from(assign_expr, stmt);
+                if (is_export) {
+                    int inner_guard = fe_savegc(c);
+                    fe_Object *export_expr;
+                    fe_pushgc(c, assign_expr);
+                    export_expr = make_unary("export", name);
+                    copy_span_from(export_expr, stmt);
+                    rewritten = make_do_three_with_span(assign_expr, export_expr, name, stmt);
+                    fe_restoregc(c, inner_guard);
+                } else {
+                    rewritten = make_do_two_with_span(assign_expr, name, stmt);
+                }
+            }
+
+            fe_pushgc(c, rewritten);
+            cell = fe_cons(c, rewritten, nil_obj);
+            *fe_cdr_ptr(c, tail) = cell;
+            tail = cell;
+            fe_restoregc(c, guard + 1);
+        }
+
+        *count += hoisted;
+        stmts = fe_cdr(c, dummy);
+        fe_restoregc(c, guard);
+    }
+
+    return stmts;
+}
+
 static fe_Object* parse_grouping() {
   fe_Object* expr = expression();
   consume(TOKEN_RPAREN, "Expect ')' after expression.");
@@ -1527,10 +1723,27 @@ static fe_Object* block() {
     }
     consume(TOKEN_RBRACE, "Expect '}' after block.");
 
+    if (count > 0) {
+        int guard = fe_savegc(P.ctx);
+        fe_pushgc(P.ctx, head);
+        head = rewrite_named_fn_declarations(head, &count);
+        fe_restoregc(P.ctx, guard);
+    }
+
     if (count == 0) return nil_obj;
     if (count == 1) return fe_car(P.ctx, head);
 
-    return CONS1(fe_symbol(P.ctx, "do"), head);
+    {
+        int guard = fe_savegc(P.ctx);
+        fe_Object *do_sym;
+        fe_Object *res;
+        fe_pushgc(P.ctx, head);
+        do_sym = fe_symbol(P.ctx, "do");
+        fe_pushgc(P.ctx, do_sym);
+        res = CONS1(do_sym, head);
+        fe_restoregc(P.ctx, guard);
+        return res;
+    }
 }
 
 static fe_Object* fn_declaration() {
@@ -1736,7 +1949,8 @@ static fe_Object* declaration() {
         consume(TOKEN_IDENTIFIER, "Expect function name.");
         fe_Object* name = symbol_from_token(&P.previous);
         fe_Object* fn_expr = fn_declaration(); /* Parses `(...) { ... }` */
-        decl = make_binary("let", name, fn_expr);
+        decl = make_named_fn_decl(name, fn_expr, is_export);
+        is_export = 0;
     }
 
     if (decl) {
@@ -1797,9 +2011,25 @@ fe_Object* fex_compile_named(fe_Context *ctx, const char *source,
         return NULL;
     }
 
-    if (count == 0)       program = nil_obj;
-    else if (count == 1)  program = fe_car(ctx, head);
-    else                  program = CONS1(fe_symbol(ctx, "do"), head);
+    if (count > 0) {
+        fe_pushgc(ctx, head);
+        head = rewrite_named_fn_declarations(head, &count);
+        fe_restoregc(ctx, gc_base);
+        fe_pushgc(ctx, head);
+    }
+
+    if (count == 0) {
+        program = nil_obj;
+    } else if (count == 1) {
+        program = fe_car(ctx, head);
+    } else {
+        fe_Object *do_sym = fe_symbol(ctx, "do");
+        fe_pushgc(ctx, do_sym);
+        program = CONS1(do_sym, head);
+        fe_restoregc(ctx, gc_base);
+        fe_pushgc(ctx, head);
+        fe_pushgc(ctx, program);
+    }
 
     /* hand the finished AST back still rooted - caller pushes it again
        immediately, and later pops the whole frame, so no leak occurs.   */

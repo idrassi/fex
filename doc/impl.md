@@ -168,7 +168,7 @@ Everything else — `fe_cons`, `fe_symbol`, `fe_eval`, etc. — is source-compat
 
 * Still recurses on the `car` side during marking.
 * Little-endian bit tricks make the tag scheme non-portable to big-endian.
-* Tail-call optimization covers direct tail calls, `if`/`else` branches, and `do` blocks; mutual recursion and `apply`-based tail calls are not optimized.
+* Tail-call optimization covers direct tail calls, `if`/`else` branches, `do` blocks, and mutually recursive named functions; `apply`-based tail calls are not optimized.
 * Strings remain NUL-terminated; binary blobs require an external pointer type.
 * `import` only establishes a naming convention — host code must load the module.
 

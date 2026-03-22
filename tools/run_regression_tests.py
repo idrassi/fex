@@ -755,6 +755,41 @@ CASES = [
         "stdout": "50005000\n",
     },
     {
+        "name": "mutual tail-call optimization",
+        "source": (
+            "fn even(n) {\n"
+            "  if (n <= 0) { 1; } else { odd(n - 1); }\n"
+            "}\n"
+            "fn odd(n) {\n"
+            "  if (n <= 0) { 0; } else { even(n - 1); }\n"
+            "}\n"
+            "println(even(10000));\n"
+        ),
+        "args": ["--max-eval-depth", "0"],
+        "exit_code": 0,
+        "stdout": "1\n",
+    },
+    {
+        "name": "mutual tail-call optimization with return",
+        "source": (
+            "fn parity(n) {\n"
+            "  fn even(x) {\n"
+            "    if (x <= 0) { return 1; }\n"
+            "    return odd(x - 1);\n"
+            "  }\n"
+            "  fn odd(x) {\n"
+            "    if (x <= 0) { return 0; }\n"
+            "    return even(x - 1);\n"
+            "  }\n"
+            "  return even(n);\n"
+            "}\n"
+            "println(parity(10000));\n"
+        ),
+        "args": ["--max-eval-depth", "0"],
+        "exit_code": 0,
+        "stdout": "1\n",
+    },
+    {
         "name": "while loop with return propagation",
         "source": (
             "fn find_first_over(lst, threshold) {\n"

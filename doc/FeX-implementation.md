@@ -168,7 +168,7 @@ For heavier alterations—pattern matching, algebraic data types, etc.—you sti
 
 ## 8 · Tail-call optimization
 
-The `fe` evaluator implements trampoline-based tail-call optimization (TCO) so that tail-recursive functions execute in constant stack space. Instead of recursing into `eval()` for the last expression in a tail position, the evaluator sets `obj` and `env` to describe the next evaluation and jumps back to a `tail_call:` label at the top of `eval()`, reusing the current C stack frame.
+The `fe` evaluator implements trampoline-based tail-call optimization (TCO) so that tail-recursive functions execute in constant stack space. Instead of recursing into `eval()` for the last expression in a tail position, the evaluator sets `obj` and `env` to describe the next evaluation and jumps back to a `tail_call:` label at the top of `eval()`, reusing the current C stack frame. FeX named function declarations are predeclared before their closure bodies are assigned, so mutually recursive named functions can use the same trampoline path as direct self-recursion.
 
 TCO applies in four positions:
 
