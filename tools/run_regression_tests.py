@@ -143,6 +143,26 @@ def fs_helpers_case_source() -> str:
         'println("cwd.base:", basename(cwd()));\n'
     )
 
+
+def long_module_name_case_source() -> str:
+    name = "mod_" + ("a" * 140)
+    return (
+        f'module ("{name}") {{ export let value = 7; }}\n'
+        f"println({name}.value);\n"
+    )
+
+
+def long_module_name_collision_case_source() -> str:
+    prefix = "mod_" + ("a" * 136)
+    name_one = prefix + "x"
+    name_two = prefix + "y"
+    return (
+        f'module ("{name_one}") {{ export let value = 1; }}\n'
+        f'module ("{name_two}") {{ export let value = 2; }}\n'
+        f"println({name_one}.value);\n"
+        f"println({name_two}.value);\n"
+    )
+
 CASES = [
     {
         "name": "basic module",
@@ -217,6 +237,21 @@ CASES = [
             "loading helper\n"
             "42\n"
             "41\n"
+        ),
+    },
+    {
+        "name": "long module name",
+        "source": long_module_name_case_source(),
+        "exit_code": 0,
+        "stdout": "7\n",
+    },
+    {
+        "name": "long module name collision",
+        "source": long_module_name_collision_case_source(),
+        "exit_code": 0,
+        "stdout": (
+            "1\n"
+            "2\n"
         ),
     },
     {

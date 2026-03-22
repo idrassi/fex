@@ -1,209 +1,142 @@
-**FeX — The Modern-Syntax Veneer over the 2025 *fe* Core**
-*A companion to “Fe / FeX — A Tiny Embeddable Language (2025 Edition)”*
+**FeX - Front-End And Integration Notes**
+
+*A focused companion to the lower-level runtime notes.*
 
 ---
 
-### 0 · Why this addendum exists
+## 1. What FeX adds
 
-The core document tells the full story of the **2025 fe runtime**.
-What it does not cover is **how FeX layers a contemporary, statement-oriented surface over that runtime**—turning parenthesis-heavy s-expressions into something that feels closer to a small-talking JavaScript or Lua. This paper is that missing half: it dissects FeX’s lexer, parser, span-aware error system, and the handful of builtin functions that make the new syntax pleasant inside a C host.
+The `fe` runtime is the evaluator, GC, object model, closure machinery, and low-level module/import execution.
+FeX adds the parts that make that runtime pleasant to use in products and pipelines:
 
----
-
-## 1 · Bird’s-eye view
-
-1. **`fex_init`**
-   Registers an error hook plus *print / println*—the only C builtins FeX adds.
-2. **`fex_compile`**
-   *Lex -> Pratt parse -> produce a **pure fe AST*** (no private node kinds).
-   Every AST cons cell is immediately recorded in a **span table** that maps it back to *line/column* pairs inside the original source buffer.
-3. **`fex_do_string`**
-   Convenience: *compile*, *eval*, *pop GC frame* in one call.
-
-Because the result of `fex_compile` is 100 % vanilla *fe* s-experssion, **the evaluator, garbage collector, closure machinery, module loader \&c. remain untouched**. FeX is therefore *zero-cost* once code is in AST form—the host pays only during compilation.
+- a C-like surface syntax
+- file/module ergonomics
+- span-aware diagnostics
+- recoverable compile/eval wrappers
+- optional builtin groups for data, filesystem, and process automation
 
 ---
 
-## 2 · Lexical layer: from text to tokens
+## 2. Compilation pipeline
 
-*Lexer `scan_token()`* is a minimal, single-pass DFA:
+At a high level, FeX does:
 
-| Category        | Examples                                                            | Notes                                                                                             |
-| --------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| **Single-char** | `(` `)` `{` `}` `[` `]` `,` `.` `+` `-` `*` `/` `;`                 | One-byte look-ups.                                                                                |
-| **Dual-char**   | `==` `!=` `<=` `>=`                                                 | `match()` peeks ahead.                                                                            |
-| **Literals**    | strings, numbers                                                    | Numbers are scanned as *double* text; final fixnum check happens later.                           |
-| **Keywords**    | `fn let return module import export while if and or true false nil` | `identifier_type()` turns raw identifiers into keyword tokens with a perfect-hash-style `switch`. |
+1. lex source text into tokens
+2. parse with a Pratt parser
+3. lower the result into ordinary `fe` ASTs
+4. optionally record source spans for diagnostics
+5. hand the AST to the core evaluator
 
-A single global `Lexer L` keeps track of **line starts** so that we can compute `column = start – line_start + 1` for span recording.
-
----
-
-## 3 · Pratt parser: modern syntax, lisp heart
-
-FeX’s grammar is Pratt-expressed through one static `rules[]` table:
-
-```c
-ParseRule rules[TOKEN_EOF+1] = {
-  [TOKEN_LPAREN] = {parse_grouping, INFIX_MARKER, PREC_CALL},
-  /* ... */
-  [TOKEN_FN]     = {fn_expression , NULL,         PREC_NONE},
-};
-```
-
-* **Prefix functions** build leaf expressions (`parse_number`, `parse_string`, `fn_expression`...).
-* **Infix marker** is the trick: a `NULL` *function* ≠ no rule; instead a *non-NULL* means “operator present but its logic is in the generic loop”.
-* Binding powers (`PREC_*`) follow Lua/JS tradition.
-
-### 3.1 AST shape conventions
-
-The output is always an *fe list* whose **head is a symbol naming the operator**. Examples:
-
-| Source               | FeX AST              | fe core form encountered by the evaluator          |
-| -------------------- | -------------------- | -------------------------------------------------- |
-| `a + b`              | `(+ a b)`            | primitive `+`                                      |
-| `x = y`              | `(= x y)`            | special form `=` (becomes `let` in var-decl sugar) |
-| `[1,2,3]`            | `(list 1 2 3)`       | plain variadic function call                       |
-| `fn (x,y) { x + y }` | `(fn (x y) (+ x y))` | new 2025 closure compiler                          |
-
-Therefore **no interpreter changes were required**—only symbols and lists the old core already understands.
-
-### 3.2 Declarations become sugar for core primitives
-
-```text
-let   x = 42;         ->  (= x 42)    ;; fe’s "let"
-fn    add(a,b){...}     ->  (= add (fn (a b) ...))
-export let x = 1;     ->  (export (= x 1))
-import math;          ->  (import math)
-module("m"){ ... }      ->  (module "m" ...)
-```
-
-Notice that `export` is parsed as a *unary operator* whose right-hand side is whatever it decorates. This keeps the desugar pipeline elegant and orthogonal.
+The output of `fex_compile()` is still a normal `fe` tree, not a separate bytecode or VM-specific IR.
 
 ---
 
-## 4 · Span table: precise source mapping inside a moving GC
+## 3. Surface syntax lowering
 
-`fex_span.c` implements a **pointer-keyed per-context span table**:
+Representative examples:
 
-```c
-void fex_record_span(fe_Context *ctx, const fe_Object* node,
-                     const char* src,
-                     int sline, scol, eline, ecol,
-                     const char *start, const char *end);
-```
+- `let x = 1;` -> `(let x 1)`
+- `if (cond) { a; } else { b; }` -> `(if cond a b)`
+- `fn add(a, b) { return a + b; }` -> a named binding plus an `fn` form
+- `pair.head` -> `(get pair head)`
+- `pair.head = 10` -> `(setcar pair 10)`
+- `obj.key = value` -> `(put obj key value)`
 
-* **Key** The *exact* address of the cons cell—the object never moves because *fe* uses a *non-compacting* mark-and-sweep GC.
-* **Value** Start/end line · column plus an owned source excerpt when the original text is available.
-
-Each consing helper `CONS1` wraps `fe_cons` and *immediately* records a span, guaranteeing a 1:1 mapping. Span state is created lazily when enabled, and span allocations go through the runtime's tracked allocator so memory limits and stats remain accurate.
-
-### 4.1 Error printing
-
-`fex_on_error` overrides `fe_handlers(ctx)->error`. It walks the *call stack list* provided by the core, looks up every node’s span, and prints an annotated trace:
-
-```
-error: division by zero
-[0] <string>:12:7  =>  x / 0
-[1] <string>:8:5   =>  println(add(1,2) / 0)
-```
-
-Where no span is found (e.g., an older macro expanded list) it falls back to `fe_tostring`.
+Named function declarations are rewritten before evaluation so the core only needs to understand its existing forms.
 
 ---
 
-## 5 · Runtime embellishments
+## 4. Parser and diagnostics
 
-Only two new C-level functions are injected:
+The front-end keeps enough source information to produce useful compile and runtime errors.
 
-```c
-(print . args)     ;; writes objects, no newline
-(println . args)   ;; idem, then prints '\n'
-```
+When span tracking is enabled:
 
-Because they are *ordinary cfunc objects* the host can replace, shadow, or delete them like any other global binding.
+- AST nodes are associated with source name, line, and column data
+- runtime trace frames can show the FeX expression that triggered the failure
+- the recoverable `fex_try_*` APIs can return structured errors instead of terminating the process
 
----
-
-## 6 · Interfacing with the host C program
-
-The public header **`fex.h`** exposes three calls:
-
-```c
-void       fex_init(fe_Context*);
-fe_Object* fex_compile(fe_Context*, const char* src);
-fe_Object* fex_do_string(fe_Context*, const char* src);
-```
-
-A canonical embedding looks like:
-
-```c
-char buf[64*1024];
-fe_Context* L = fe_open(buf, sizeof buf);
-fex_init(L);
-
-fex_do_string(L,
-  "module(\"demo\"){\n"
-  "  fn fac(n){ if(n<=1) return 1; return n*fac(n-1); }\n"
-  "  println(fac(10));\n"
-  "}"
-);
-```
-
-No additional headers or libraries beyond the stock *fe* ones are required.
+The parser's recovery strategy is intentionally simple: it synchronizes at statement boundaries such as semicolons and braces.
 
 ---
 
-## 7 · Extending FeX
+## 5. Modules and imports
 
-Because the **front-end is self-contained** you can evolve the language without touching GC or evaluator logic:
+FeX supports both explicit modules and file-backed imports.
 
-* **Add operators** Insert a token, extend `rules[]`, and map it to an existing primitive or macro.
-* **Add keywords** Upgrade `identifier_type()`; point the rule at your syntax sugar function.
-* **Custom debug info** Replace `fex_span.*` with dwarf emission or any schema you like—the core sees just cons cells.
+### 5.1 Explicit modules
 
-For heavier alterations—pattern matching, algebraic data types, etc.—you still translate to the *fe* core forms. The moment you need a runtime change, edit `fe.c` instead and keep FeX a pure compiler layer.
+`module("name") { ... }` creates and returns an export map and binds it under `name`.
 
----
+### 5.2 File imports
 
-## 8 · Tail-call optimization
+`import` supports:
 
-The `fe` evaluator implements trampoline-based tail-call optimization (TCO) so that tail-recursive functions execute in constant stack space. Instead of recursing into `eval()` for the last expression in a tail position, the evaluator sets `obj` and `env` to describe the next evaluation and jumps back to a `tail_call:` label at the top of `eval()`, reusing the current C stack frame. FeX named function declarations are predeclared before their closure bodies are assigned, so mutually recursive named functions can use the same trampoline path as direct self-recursion.
+- bare names such as `import settings;`
+- dotted package names such as `import feature.helper;`
+- string paths such as `import "./local_helper";`
 
-TCO applies in four positions:
+Resolution order:
 
-| Position | How it works |
-| --- | --- |
-| **Function body** (`FE_TFUNC`) | The last expression in a function body is trampolined instead of recursed into. The environment is set to the new frame and `in_func_tail` is flagged so return sentinels are unwrapped. |
-| **`do` block** (`P_DO`) | The last expression in a `do` (i.e. `{ ... }`) block is trampolined. Earlier expressions are evaluated normally. |
-| **`if`/`else` branches** (`P_IF`) | Both the taken branch body and a trailing else clause are trampolined. |
-| **`return` stripping** | When `in_func_tail` is set, a `(return X)` wrapper encountered at the `tail_call:` label is stripped so that `X` is evaluated directly—this lets `return f(x)` benefit from TCO. |
+1. importing file directory
+2. configured import paths
+3. current working directory
 
-`while` loop bodies are evaluated inline (avoiding `dolist()` overhead) but do **not** trampoline their last expression, since control must return to the loop condition check.
+Within each root, FeX tries both `name.fex` and `name/index.fex`.
+Import specifiers containing `..` path components are rejected.
 
-**GC safety**: after `fe_restoregc()` and before `goto tail_call`, `env` is pushed onto the GC stack so the frame survives any collection that occurs during the next trampoline iteration.
-
-**Depth accounting**: `current_eval_depth` is decremented before `goto tail_call` so the trampoline iteration does not inflate the depth counter. With `--max-eval-depth 0` (unlimited), a tail-recursive function can run for millions of iterations in constant space.
+Imported files execute with an implicit export map, so top-level `export let` and `export fn` populate the imported module directly.
 
 ---
 
-## 9 · Known trade-offs specific to FeX
+## 6. Recoverable execution
 
-* **One AST node = one `malloc`ed span record**
-  Fine for configs and scripting, but you might pool-allocate or truncate spans in‐production.
-* **No macro system (yet)**
-  Fe’s hygienic macros still operate at s-exp level. A future “typed quasi-quote” syntax could compile to that.
-* **Error recovery is statement-level**
-  The parser’s `synchronize()` skips until the next semicolon or brace. REPL friendliness is good, but not perfect.
-* **Big-endian machines** inherit the integer-tag caveat from the core.
+For embedding, the important APIs are:
+
+- `fex_try_compile`
+- `fex_try_eval`
+- `fex_try_do_string`
+- `fex_try_do_file`
+
+These wrappers keep failures in-process and report:
+
+- compile, runtime, or I/O status
+- message text
+- source location when available
+- a bounded traceback
+
+This is the recommended integration path for hosts that need predictable failure handling.
 
 ---
 
-## 10 · Closing reflection
+## 7. Optional builtin surface
 
-FeX exemplifies **systems thinking at different zoom levels**:
+The base language stays small.
+Larger scripting features are opt-in through builtin groups.
 
-*Zoom in* A span is four `int`s and a pointer; a Pratt rule is three plain fields.
-*Zoom out* Together they form a language in which “`println map(list,fn(x){x+1})`” can be embedded inside firmware without a single dynamic allocation escaping the arena.
+Examples:
 
-By cleanly **separating *syntax* (FeX) from *semantics* (fe core)**, the project maintains the 1 kLoC readability promise while letting you experiment with syntactic sugar as liberally as you please. Study it, fork it, or simply drop it into your next tool—the whole thing still fits in a weekend brain-load.
+- string/list/data helpers
+- JSON helpers
+- filesystem helpers
+- process execution helpers
+
+This keeps the core embedding surface smaller while still allowing CLI and automation-oriented deployments to expose richer capabilities.
+
+---
+
+## 8. Practical tradeoffs
+
+The current FeX implementation is pragmatic rather than purist:
+
+- spans, import bookkeeping, and maps use tracked heap allocations in addition to the arena
+- the codebase is no longer the original sub-1-kLoC experiment
+- optional helpers for files and processes materially increase the implementation footprint
+- the benefit is a much more usable language for real integration work
+
+---
+
+## 9. Summary
+
+FeX is best viewed as a lowering front-end plus an integration layer around the `fe` runtime.
+That split is what lets the project stay understandable while still supporting modules, diagnostics, selective builtins, and host-safe recoverable APIs.

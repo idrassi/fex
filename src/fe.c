@@ -151,9 +151,10 @@ struct fe_Context {
   int loading_module_count;
   int loading_module_capacity;
   char **loaded_modules;
+  int loaded_module_path_capacity;
   fe_Object **loaded_module_values;
   int loaded_module_count;
-  int loaded_module_capacity;
+  int loaded_module_value_capacity;
   size_t step_limit;
   size_t steps_executed;
   uint64_t timeout_ms;
@@ -788,11 +789,11 @@ static fe_Object* module_cache_get(fe_Context *ctx, const char *path) {
 static int module_cache_push_owned(fe_Context *ctx, char *path, fe_Object *value) {
   int needed = ctx->loaded_module_count + 1;
   if (!ensure_string_array_capacity(ctx, &ctx->loaded_modules,
-                                    &ctx->loaded_module_capacity, needed)) {
+                                    &ctx->loaded_module_path_capacity, needed)) {
     return 0;
   }
   if (!ensure_object_array_capacity(ctx, &ctx->loaded_module_values,
-                                    &ctx->loaded_module_capacity, needed)) {
+                                    &ctx->loaded_module_value_capacity, needed)) {
     return 0;
   }
   ctx->loaded_modules[ctx->loaded_module_count] = path;
@@ -803,9 +804,10 @@ static int module_cache_push_owned(fe_Context *ctx, char *path, fe_Object *value
 
 static void module_cache_clear(fe_Context *ctx) {
   string_array_clear(ctx, &ctx->loaded_modules,
-                     &ctx->loaded_module_count, &ctx->loaded_module_capacity);
+                     &ctx->loaded_module_count, &ctx->loaded_module_path_capacity);
   tracked_free(ctx, ctx->loaded_module_values);
   ctx->loaded_module_values = NULL;
+  ctx->loaded_module_value_capacity = 0;
 }
 
 static int is_path_separator(char chr) {
@@ -2227,6 +2229,29 @@ fe_Object* fe_bytes_raw(fe_Context *ctx, size_t len, unsigned char fill_byte)
     return make_data_obj(ctx, FE_TBYTES, NULL, len, (char)fill_byte);
 }
 
+static fe_Object* fe_symbol_from_string_obj(fe_Context *ctx, fe_Object *name_obj) {
+  fe_Object *obj;
+  int gc_save;
+
+  checktype(ctx, name_obj, FE_TSTRING);
+  gc_save = fe_savegc(ctx);
+  fe_pushgc(ctx, name_obj);
+
+  for (obj = ctx->symlist; !isnil(obj); obj = cdr(obj)) {
+    if (equal(ctx, car(cdr(car(obj))), name_obj)) {
+      fe_restoregc(ctx, gc_save);
+      return car(obj);
+    }
+  }
+
+  obj = object(ctx);
+  settype(obj, FE_TSYMBOL);
+  cdr(obj) = fe_cons(ctx, name_obj, &nil);
+  ctx->symlist = fe_cons(ctx, obj, ctx->symlist);
+  fe_restoregc(ctx, gc_save);
+  return obj;
+}
+
 
 fe_Object* fe_symbol(fe_Context *ctx, const char *name) {
   fe_Object *obj;
@@ -3222,10 +3247,22 @@ tail_call:
     case FE_TPRIM:
       switch (prim(fn)) {
         case P_MODULE: {
-          /* form: (module "name" body) */
-          fe_Object *name_obj = evalarg();
+          /* form: (module "name" body) or (module symbol body) */
+          fe_Object *name_obj = fe_nextarg(ctx, &arg);
           fe_Object *body = fe_nextarg(ctx, &arg);
-          char name_buf[128];
+          fe_Object *name_sym;
+
+          if (type(name_obj) == FE_TSYMBOL) {
+            name_sym = name_obj;
+          } else if (type(name_obj) == FE_TSTRING) {
+            if (fe_string_contains_nul(ctx, name_obj)) {
+              fe_error(ctx, "module: name strings cannot contain NUL bytes");
+            }
+            name_sym = fe_symbol_from_string_obj(ctx, name_obj);
+          } else {
+            checktype(ctx, name_obj, FE_TSTRING);
+            name_sym = &nil;
+          }
 
           /* Create and push module's export table */
           fe_Object *exports = fe_map(ctx);
@@ -3240,9 +3277,7 @@ tail_call:
           ctx->modulestack = cdr(ctx->modulestack);
 
           /* Register module in global environment */
-          checktype(ctx, name_obj, FE_TSTRING);
-          fe_tostring(ctx, name_obj, name_buf, sizeof(name_buf));
-          fe_set(ctx, fe_symbol(ctx, name_buf), exports);
+          fe_set(ctx, name_sym, exports);
           res = exports;
           break;
         }

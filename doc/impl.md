@@ -1,193 +1,203 @@
-# **Fe / FeX — A Tiny Embeddable Language (2025 Edition)**
+# **Fe / FeX - Implementation Notes (2025)**
 
-*A self-contained description of the current implementation, weaving original 2020 concepts with every improvement introduced in FeX.*
-
----
-
-## 1 Origin Story
-
-When **fe** first appeared in 2020 it offered the allure of a Scheme-flavoured interpreter packed into *< 1 kLoC* of strictly portable ANSI C. In 2025 its successor, **FeX**, keeps that spartan ethos while embracing modern conveniences: immediate numbers and booleans, real closures, and a lightweight module system. This document folds the original design notes together with the FeX delta so you have a *single source of truth*.
+*An accurate implementation-level summary of the current runtime and syntax layer.*
 
 ---
 
-## 2 Design Goals — Unchanged, Yet Evolved
+## 1. Scope
 
-| Goal                                          | 2020 Status    | 2025 Status         |
-| --------------------------------------------- | -------------- | ------------------- |
-| **No dynamic `malloc`**                       | ✔ fixed buffer | ✔ unchanged         |
-| **≤ 1000 LoC**                                | \~950          | **920**             |
-| **Host-supplied memory size**                 | ✔              | ✔                   |
-| **Portable (Win / Linux / DOS, 32 & 64-bit)** | ✔              | ✔                   |
-| **Simple C API**                              | single header  | still single header |
-| **Sweet-spot: tiny scripts, configs, REPLs**  | ✔              | ✔ + *modules*       |
+Fe is the small Lisp-like runtime.
+FeX is the C-like surface syntax, module/import layer, diagnostics layer, and optional builtin set built on top of that runtime.
 
-### *New since 2020*
-
-* Immediate **fixnums** & **booleans** (zero allocation).
-* Dynamic GC threshold (`live × 2`, min 1024).
-* Proper lexical **closures** via *up-value frames*.
-* **return**, **module/export/import/get** special forms.
-* Static pass that computes a function’s free variables at definition time.
-* Optional boxed double fallback if a number outgrows fixnum range.
+This document focuses on the implementation that ships in this repository today, not the smaller historical prototype it grew from.
 
 ---
 
-## 3 Memory Layout at a Glance
+## 2. Current Design Goals
 
-```
-┌─ contiguous buffer from host ───────────────────────────────────────────┐
-│ fe_Context • object[0...N-1] • (padding)                                 │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+The current code still aims for the same broad niche:
 
-* `fe_open(ptr,len)` installs the interpreter inside that buffer.
-* A **freelist** threads through the object array; *no allocation* ever leaves it.
-* `gcstack[1024]` temporarily roots freshly-made objects between C calls.
+- small enough to audit without a large toolchain
+- easy to embed in a host process
+- practical for scripts, configs, REPL use, and lightweight automation
+- portable across the major desktop toolchains
 
-The GC runs when either:
+What changed since the original prototype:
 
-1. `allocs_since_gc ≥ max(live × 2, 1024)` –– the *heuristic path*, or
-2. the freelist is already empty –– the *fallback path*.
-
----
-
-## 4 Data Representation
-
-*(Why it matters: understanding tags unlocks the entire C API.)*
-
-### 4.1 Immediates (never stored on the heap)
-
-| Kind        | Low-order bit pattern           | Notes                      |
-| ----------- | ------------------------------- | -------------------------- |
-| **Fixnum**  | ...`xxx1`                         | Signed, word-size-1 bits.  |
-| **Boolean** | ...`0010` = false, ...`0110` = true | Separate tag from numbers. |
-
-Nil remains a unique heap cell for historical reasons.
-
-> **Rule of thumb** If you can represent it as an immediate, you get allocation-free speed.
-
-### 4.2 Heap Objects
-
-```c
-struct fe_Object {
-  Value   car;
-  Value   cdr;
-  uint8_t flags;    /* bit0: 0 = pair, 1 = non-pair
-                       bit1: GC mark
-                       bits2-7: type tag              */
-};
-```
-
-| Tag              | Extra payload (`cdr`)          |
-| ---------------- | ------------------------------ |
-| `PAIR`           | linked cons cell               |
-| `STRING`         | next chunk (roped string)      |
-| `NUMBER`         | boxed `double`                 |
-| `SYMBOL`         | `(string . global-value)` pair |
-| `FUNC` / `MACRO` | closure record (see § 6)       |
-| `PRIM`           | `uint8_t` dispatch index       |
-| `CFUNC`          | `fe_CFunc` pointer             |
-| `PTR`            | host pointer + optional hooks  |
-| `FREE`           | member of freelist             |
+- Core values still live in a host-supplied arena.
+- The implementation is no longer "no malloc" and no longer a sub-1-kLoC experiment.
+- The public CMake build now targets C99.
+- Higher-level features such as import bookkeeping, spans, and maps use tracked auxiliary heap allocations in addition to the arena.
 
 ---
 
-## 5 Evaluator & Core Forms (2025 Set)
+## 3. Memory Model
 
-| Special / Primitive                    | Change since 2020                               |
-| -------------------------------------- | ----------------------------------------------- |
-| `let`                                  | Now supports *let-rec*, returns bound value     |
-| `fn` / `mac`                           | Real closure objects                            |
-| `return`                               | **New** — multi-level return                    |
-| `module` / `export` / `import` / `get` | **New** — minimal module system                 |
-| `while`, `if`, `=`                     | Behaviour preserved; `if`/`do`/`while` now TCO-aware |
-| Arithmetic `+ - * / < <=`              | Works on fixnum *or* boxed double automatically |
+### 3.1 Arena-backed core values
 
-All previous list-processing, logic and I/O primitives remain intact.
+`fe_open(ptr, size)` installs `fe_Context` and the object arena inside a caller-provided memory block.
+Pairs, symbols, functions, macros, primitive wrappers, and other core values are allocated from that arena.
 
----
+### 3.2 Auxiliary tracked heap state
 
-## 6 Environments, Closures & the *\[frame]* Sentinel
+FeX also maintains tracked heap allocations for features that are awkward or wasteful to force into the object arena, including:
 
-### 6.1 Why a Sentinel?
+- source span tables
+- import search-path state
+- source buffers for imported files
+- module-cache metadata
+- map backing arrays
 
-Imagine looking up a symbol. Under FeX you might be traversing:
+Tracked allocations participate in the runtime memory accounting exposed by `fe_get_memory_used()` and enforced by `fe_set_memory_limit()`.
 
-```
-([frame] . (locals . upvalues))
-```
+### 3.3 Garbage collection
 
-without clashing with the *old* association-list world. The literal symbol **\[frame]** in the `car` gives an O(1) test: “is this a runtime closure frame or an ordinary a-list?”
+The collector is mark-and-sweep.
+Core objects are marked from:
 
-> *A tiny marker buys a bullet-proof separation between legacy code and new closures.*
+- the GC root stack
+- globals and interned symbols
+- the active call stack
+- active module/import state
+- cached imported module values
 
-### 6.2 Closure Record Layout
-
-```
-(tag FUNC|MACRO)
-cdr = (definition-env  free-vars  params . body)
-```
-
-* At call time the interpreter builds an *upvalue* list by grabbing each recorded free variable from `definition-env`.
-* A runtime frame is assembled, evaluated, and a `(return . value)` sentinel bubbles up if `return` is used.
-
-A one-time **static analysis pass** computes the free-var list so calls pay *zero* overhead.
+The known structural limitation remains the same: marking still recurses down some object graph shapes, especially deep `car` chains.
 
 ---
 
-## 7 Garbage Collection (Mark-and-Sweep, Updated)
+## 4. Data Representation
 
-1. **Mark** – Iteratively follows `cdr`, recurses only down `car`; PTR hooks fire here.
-2. **Sweep** – Returns dead cells to the freelist and counts survivors -> updates threshold.
+### 4.1 Immediates
 
-The left-leaning recursion hazard (*deep car chains*) still exists but is rarely hit in real-world scripts.
+- fixnums are tagged immediates
+- booleans are tagged immediates
+- `nil` is a singleton runtime value
 
----
+### 4.2 Heap objects
 
-## 8 Error Strategy
+The runtime stores the usual Lisp pair type plus several non-pair object kinds, including:
 
-`fe_handlers(ctx)->error` receives `(msg, callstack)` and may `longjmp` out. *Never* allocate new objects inside the handler—the GC root stack is frozen until control returns to C.
+- strings
+- bytes
+- symbols
+- functions and macros
+- primitive and C function wrappers
+- host pointers
+- maps
 
----
+Maps are important in modern FeX because they back:
 
-## 9 C API Highlights (Additions in Bold)
-
-```c
-fe_Object *fe_fixnum(long n);          /* immediate wrapper          */
-fe_Object *fe_make_number(ctx, val);   /* **auto fixnum / double**   */
-fe_Object *fe_bool(ctx, int b);        /* **true / false immediates** */
-void      *fe_cdr_ptr(ctx,pair);       /* **mutable cdr access**     */
-double      fe_num_value(ctx,obj);     /* works on either number rep */
-```
-
-Everything else — `fe_cons`, `fe_symbol`, `fe_eval`, etc. — is source-compatible with 2020 code.
-
----
-
-## 10 Known Limitations
-
-* Still recurses on the `car` side during marking.
-* Little-endian bit tricks make the tag scheme non-portable to big-endian.
-* Tail-call optimization covers direct tail calls, `if`/`else` branches, `do` blocks, and mutually recursive named functions; `apply`-based tail calls are not optimized.
-* Strings remain NUL-terminated; binary blobs require an external pointer type.
-* `import` only establishes a naming convention — host code must load the module.
+- user-visible map values
+- module export tables
+- several host-facing builtin results
 
 ---
 
-## 11 Migration Cheatsheet
+## 5. Evaluation Model
 
-| 2020 Idiom                 | Modern Replacement                                |                               |
-| -------------------------- | ------------------------------------------------- | ----------------------------- |
-| *All* numbers boxed        | `fe_make_number` -> automatic fixnum when possible |                               |
-| `nil` as boolean           | \`fe\_bool(ctx,1                                  | 0)`or literals`true`/`false\` |
-| DIY closure capture hacks  | just write `fn` — upvalues handled for you        |                               |
-| Macro `(return x)` pattern | use built-in `return`                             |                               |
-| Global table as module     | `(module "name" ...)` with explicit `export`s       |                               |
+Key semantics implemented in `fe.c`:
 
-*Rule:*  re-compile against `fe.c`/`fe.h` (2025) and your existing code should run, usually faster, with richer semantics.
+- lexical scoping with closures
+- mutable captured bindings
+- tail-call optimization through an evaluator trampoline
+- explicit `return` implemented with a hidden sentinel object
+- `do` blocks that thread an evolving local environment
+
+Named `fn` declarations in FeX are lowered into the core forms before evaluation.
 
 ---
 
-## 12 Closing Perspective
+## 6. Modules And Imports
 
-FeX demonstrates a systems-thinking upgrade path: **zoom in** to a single tagged pointer and shave cycles; **zoom out** to a module system that helps organise whole programs. By retaining the fixed-buffer discipline and a < 1 kLoC code base, the language remains *graspable*—small enough to read in an afternoon, yet big enough to script entire tools. Re-embed it, extend it, or simply study it as a living example of minimalist interpreter engineering.
+### 6.1 Explicit modules
+
+`module("name") { ... }` creates an export map, evaluates the body, then binds that map under the given module name.
+
+### 6.2 Imported files as implicit modules
+
+When a file is loaded via `import`, the runtime pushes an implicit export map for that file.
+Top-level `export let` and `export fn` populate that map directly.
+Non-exported top-level names stay local to the imported file's evaluation scope.
+
+### 6.3 Lookup and caching
+
+File-based import resolution searches in this order:
+
+1. the importing file's directory
+2. each configured import path
+3. the current working directory
+
+Within each root, the runtime tries both:
+
+- `name.fex`
+- `name/index.fex`
+
+Imported module values are cached by resolved path.
+Import specifiers containing `..` path components are rejected.
+
+---
+
+## 7. Diagnostics And Recovery
+
+The low-level evaluator still reports errors through the installed `fe_handlers(ctx)->error` hook.
+
+FeX adds recoverable wrappers:
+
+- `fex_try_compile`
+- `fex_try_eval`
+- `fex_try_do_string`
+- `fex_try_do_file`
+
+These wrappers preserve structured error details, including:
+
+- status class
+- message
+- source name
+- line and column when available
+- a bounded traceback of FeX expressions
+
+Span tracking is optional and can be enabled through FeX init flags or the CLI.
+
+---
+
+## 8. Resource Controls
+
+The runtime exposes several host-controlled limits:
+
+- eval step budget
+- wall-clock timeout
+- tracked memory ceiling
+- eval recursion depth
+- read recursion depth
+- host interrupt callback
+
+These controls are intended for embedding and automation scenarios where runaway or untrusted scripts must stay in-process.
+
+---
+
+## 9. Portability Notes
+
+The current codebase is written in portable C, but it is not a strict ANSI C / C89 codebase anymore.
+
+Important practical notes:
+
+- the public CMake build targets C99
+- the code relies on modern integer headers and formatting macros
+- thread-local try-state uses compiler or platform support when available
+- the project is exercised on MSVC, GCC, and Clang
+
+---
+
+## 10. Known Limitations
+
+- Big-endian portability is still not a focus for the tagged-value implementation.
+- GC marking still has recursive cases.
+- Symbol lookup is linear in the interned symbol list.
+- Optional host-facing helpers such as filesystem and process builtins substantially increase code size relative to the original minimal runtime.
+
+---
+
+## 11. Summary
+
+The current Fe / FeX implementation is best understood as a compact arena-based core plus a pragmatic set of higher-level subsystems layered around it.
+It is no longer the original tiny fixed-buffer-only experiment, but it remains small enough to reason about and practical enough to embed in real products and pipelines.

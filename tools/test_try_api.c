@@ -311,6 +311,25 @@ static int write_large_test_file(const char *path, size_t size, unsigned char fi
     return 1;
 }
 
+static int write_text_file(const char *path, const char *text) {
+    FILE *file = fopen(path, "wb");
+    size_t len;
+
+    if (!file) {
+        return 0;
+    }
+
+    len = strlen(text);
+    if (len > 0 && fwrite(text, 1, len, file) != len) {
+        fclose(file);
+        remove(path);
+        return 0;
+    }
+
+    fclose(file);
+    return 1;
+}
+
 static int make_test_directory(const char *path) {
     remove(path);
 #ifdef _WIN32
@@ -648,6 +667,150 @@ int main(void) {
             free(memory);
             return fail("expected recoverable import failures to preserve inner traceback frames");
         }
+    }
+
+    {
+        void *import_limit_memory = malloc(TEST_MEM_SIZE);
+        fe_Context *import_limit_ctx;
+        char import_dir[256];
+        char file_path[256];
+        char source_buf[256];
+        size_t baseline_used;
+        int i;
+
+        if (!import_limit_memory) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to allocate import recovery memory-limit test memory");
+        }
+        import_limit_ctx = fe_open(import_limit_memory, TEST_MEM_SIZE);
+        if (!import_limit_ctx) {
+            fe_close(ctx);
+            free(memory);
+            free(import_limit_memory);
+            return fail("failed to open import recovery memory-limit test context");
+        }
+        fex_init(import_limit_ctx);
+
+        snprintf(import_dir, sizeof(import_dir), "tmp_import_retry_modules");
+        remove_test_directory(import_dir);
+        if (!make_test_directory(import_dir)) {
+            fe_close(import_limit_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(import_limit_memory);
+            return fail("failed to create import recovery module directory");
+        }
+
+        for (i = 0; i < 5; i++) {
+            snprintf(file_path, sizeof(file_path), "%s%cmod%d.fex",
+                     import_dir, TEST_PATH_SEP, i);
+            snprintf(source_buf, sizeof(source_buf),
+                     "export let value = %d;\n", i);
+            if (!write_text_file(file_path, source_buf)) {
+                int j;
+                for (j = 0; j < i; j++) {
+                    snprintf(file_path, sizeof(file_path), "%s%cmod%d.fex",
+                             import_dir, TEST_PATH_SEP, j);
+                    remove(file_path);
+                }
+                remove_test_directory(import_dir);
+                fe_close(import_limit_ctx);
+                fe_close(ctx);
+                free(memory);
+                free(import_limit_memory);
+                return fail("failed to write import recovery module file");
+            }
+        }
+
+        if (!fex_add_import_path(import_limit_ctx, import_dir)) {
+            for (i = 0; i < 5; i++) {
+                snprintf(file_path, sizeof(file_path), "%s%cmod%d.fex",
+                         import_dir, TEST_PATH_SEP, i);
+                remove(file_path);
+            }
+            remove_test_directory(import_dir);
+            fe_close(import_limit_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(import_limit_memory);
+            return fail("expected adding the import recovery path to succeed");
+        }
+
+        for (i = 0; i < 4; i++) {
+            snprintf(source_buf, sizeof(source_buf),
+                     "import mod%d;\nmod%d.value;\n", i, i);
+            status = fex_try_do_string_named(import_limit_ctx, source_buf,
+                                             "<import-limit-warmup>",
+                                             &result, &error);
+            if (status != FEX_STATUS_OK ||
+                fe_tonumber(import_limit_ctx, result) != (double)i) {
+                int j;
+                for (j = 0; j < 5; j++) {
+                    snprintf(file_path, sizeof(file_path), "%s%cmod%d.fex",
+                             import_dir, TEST_PATH_SEP, j);
+                    remove(file_path);
+                }
+                remove_test_directory(import_dir);
+                fe_close(import_limit_ctx);
+                fe_close(ctx);
+                free(memory);
+                free(import_limit_memory);
+                return fail_status("expected warmup imports to succeed", status, &error);
+            }
+        }
+
+        baseline_used = fe_get_memory_used(import_limit_ctx);
+        fe_set_memory_limit(import_limit_ctx, baseline_used);
+        status = fex_try_do_string_named(import_limit_ctx,
+                                         "import mod4;\nmod4.value;\n",
+                                         "<import-limit-fail>",
+                                         &result, &error);
+        fe_set_memory_limit(import_limit_ctx, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "memory limit exceeded") == NULL) {
+            for (i = 0; i < 5; i++) {
+                snprintf(file_path, sizeof(file_path), "%s%cmod%d.fex",
+                         import_dir, TEST_PATH_SEP, i);
+                remove(file_path);
+            }
+            remove_test_directory(import_dir);
+            fe_close(import_limit_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(import_limit_memory);
+            return fail_status("expected import failure to honor the memory limit",
+                               status, &error);
+        }
+
+        status = fex_try_do_string_named(import_limit_ctx,
+                                         "import mod4;\nmod4.value;\n",
+                                         "<import-limit-retry>",
+                                         &result, &error);
+        if (status != FEX_STATUS_OK ||
+            fe_tonumber(import_limit_ctx, result) != 4.0) {
+            for (i = 0; i < 5; i++) {
+                snprintf(file_path, sizeof(file_path), "%s%cmod%d.fex",
+                         import_dir, TEST_PATH_SEP, i);
+                remove(file_path);
+            }
+            remove_test_directory(import_dir);
+            fe_close(import_limit_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(import_limit_memory);
+            return fail_status("expected import retry to succeed after a recoverable failure",
+                               status, &error);
+        }
+
+        for (i = 0; i < 5; i++) {
+            snprintf(file_path, sizeof(file_path), "%s%cmod%d.fex",
+                     import_dir, TEST_PATH_SEP, i);
+            remove(file_path);
+        }
+        remove_test_directory(import_dir);
+        fe_close(import_limit_ctx);
+        free(import_limit_memory);
     }
 
     {

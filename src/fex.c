@@ -1514,7 +1514,7 @@ static fe_Object* parse_import_specifier() {
     }
 }
 
-static fe_Object* parse_string() {
+static fe_Object* parse_string_literal(int as_symbol) {
     const char *src = P.previous.start + 1;
     int raw_len = P.previous.length - 2;
     char stack_buf[1024];
@@ -1522,6 +1522,7 @@ static fe_Object* parse_string() {
     char *heap_buf = NULL;
     int i, out;
     fe_Object *result;
+    int contains_nul = 0;
 
     if (raw_len < 0) raw_len = 0;
 
@@ -1544,7 +1545,10 @@ static fe_Object* parse_string() {
                 case 'r':  buf[out++] = '\r'; break;
                 case '\\': buf[out++] = '\\'; break;
                 case '"':  buf[out++] = '"';  break;
-                case '0':  buf[out++] = '\0'; break;
+                case '0':
+                    buf[out++] = '\0';
+                    contains_nul = 1;
+                    break;
                 default:
                     /* Unknown escape: keep both backslash and character */
                     buf[out++] = '\\';
@@ -1557,7 +1561,18 @@ static fe_Object* parse_string() {
     }
     buf[out] = '\0';
 
-    result = fe_string(P.ctx, buf, out);
+    if (as_symbol) {
+        if (contains_nul) {
+            if (heap_buf) {
+                fex_temp_free(P.ctx, heap_buf);
+            }
+            error("Module name strings cannot contain NUL bytes.");
+            return fe_nil(P.ctx);
+        }
+        result = fe_symbol(P.ctx, buf);
+    } else {
+        result = fe_string(P.ctx, buf, out);
+    }
     fex_record_span(P.ctx, result, L.source, L.source_name,
                     P.previous.line, P.previous.column,
                     P.previous.line, P.previous.column + P.previous.length - 1,
@@ -1566,6 +1581,10 @@ static fe_Object* parse_string() {
         fex_temp_free(P.ctx, heap_buf);
     }
     return result;
+}
+
+static fe_Object* parse_string() {
+    return parse_string_literal(0);
 }
 
 static fe_Object* parse_literal() {
@@ -1806,7 +1825,7 @@ static fe_Object* parse_list() {
 static fe_Object* module_declaration() {
     consume(TOKEN_LPAREN, "Expect '(' after 'module'.");
     consume(TOKEN_STRING, "Expect module name string.");
-    fe_Object* name = parse_string(); /* This returns a fe_string object */
+    fe_Object* name = parse_string_literal(1);
     consume(TOKEN_RPAREN, "Expect ')' after module name.");
 
     consume(TOKEN_LBRACE, "Expect '{' before module body.");

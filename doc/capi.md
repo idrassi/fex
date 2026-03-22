@@ -2,7 +2,7 @@
 
 ## Introduction
 
-FeX is a small embeddable scripting language implemented in ANSI C. It builds on the Lisp-like `fe` core and adds a modern surface syntax, source spans, maps, and optional extended builtins.
+FeX is a small embeddable scripting language implemented in C. It builds on the Lisp-like `fe` core and adds a modern surface syntax, source spans, maps, and optional extended builtins.
 
 This document covers the public C API used to create an interpreter, run FeX code, exchange values with C, and extend the runtime with host functions.
 
@@ -308,7 +308,7 @@ Import lookup order is:
 2. Each path added with `fex_add_import_path()`
 3. The current working directory
 
-Within each root, FeX tries both `name.fex` and `name/index.fex`. Dotted specifiers map to path separators, and string path imports keep explicit relative segments such as `./` and `../`. Imported files evaluate with an implicit export table; direct `fex_do_file()` calls still execute as ordinary scripts. When resolution fails, the runtime error includes the searched candidate paths.
+Within each root, FeX tries both `name.fex` and `name/index.fex`. Dotted specifiers map to path separators, and string path imports keep explicit `./` segments. Import specifiers containing `..` path components are rejected. Imported files evaluate with an implicit export table; direct `fex_do_file()` calls still execute as ordinary scripts. When resolution fails, the runtime error includes the searched candidate paths.
 
 ## Creating and Inspecting Values
 

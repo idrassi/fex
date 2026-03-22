@@ -1,6 +1,6 @@
 # FeX
 
-FeX is a tiny, embeddable scripting language with a modern, C-like syntax. It's implemented in portable ANSI C (C89) and is designed for easy integration into other projects.
+FeX is a tiny, embeddable scripting language with a modern, C-like syntax. It's implemented in portable C and is designed for easy integration into other projects.
 
 FeX is built on top of an enhanced version of `fe` core. For details on the new features and improvements, see the [FeX implementation document](doc/FeX-implementation.md) and the [Fe Core Language — 2025 Edition](doc/lang.md).
 
@@ -35,8 +35,8 @@ FeX provides a familiar "curly-brace" syntax front-end that compiles down to the
 *   **Garbage Collection**: A simple and fast mark-and-sweep garbage collector manages the memory arena.
 *   **Recoverable Diagnostics**: The CLI and C API can surface structured compile, runtime, and file I/O errors without terminating the host process.
 *   **Embeddable C API**: A clean API allows you to easily embed FeX into your C projects, call FeX functions from C, and expose C functions to FeX.
-*   **Highly Portable**: Written in pure ANSI C (C89), it compiles on any standard-compliant C compiler.
-*   **Concise**: The entire implementation (parser, compiler, and VM) is approximately 1800 lines of code.
+*   **Highly Portable**: The public CMake build targets C99 and is exercised on MSVC, GCC, and Clang.
+*   **Compact**: The core evaluator/compiler remains small enough to audit, while optional builtins, import machinery, and diagnostics live in separate translation units.
 
 ## Building
 

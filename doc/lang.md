@@ -1,6 +1,6 @@
 # **Fe Core Language — 2025 Edition**
 
-*A tiny, self-contained, Lisp-dialect designed for embedding (MIT-licensed, ANSI C implementation).*
+*A tiny, self-contained, Lisp-dialect designed for embedding (MIT-licensed, small C implementation).*
 
 ---
 
@@ -68,11 +68,11 @@ Fe’s module mechanism is deliberately minimal but powerful enough for componen
 * **`(export (let sym expr))`**
   Must appear inside a `module`; evaluates the declaration (thereby installing a *local* binding) **and** records the binding in the module’s export table. Returns the exported value.
 
-* **`(import table-sym)`**
-  Currently a no-op placeholder; future reader macros can expand it into `let`s that copy names out of the module’s table.
+* **`(import spec)`**
+  Loads and returns a module value. `spec` may be a symbol or string; file-backed imports search the importing file's directory, then configured import paths, then the current working directory. Import specifiers containing `..` path components are rejected.
 
 * **`(get table symbol)`**
-  Runtime associative lookup. `table` is any alist of `(sym . value)` pairs (including a module table); `symbol` is *not* evaluated. Returns `nil` if absent.
+  Runtime associative lookup. `table` may be a map, module table, or association list; `symbol` is *not* evaluated. Returns `nil` if absent.
 
 ```clojure
 (module "math"
@@ -151,4 +151,4 @@ These are defined in C, so they evaluate all arguments left-to-right before exec
 
 ### *Closing Thought*
 
-Fe’s entire user-visible semantic surface fits in this document; its implementation—under 2 000 lines of portable C—can be read in an afternoon. Use it as a bootstrapping macro-assembler for ideas: start with a DSL, grow into an application language, or embed it as your configuration/runtime layer. Above all, enjoy the freedom of comprehensibility.
+Fe’s entire user-visible semantic surface fits in this document; the implementation remains compact enough to audit without losing the flexibility needed for embedding. Use it as a bootstrapping macro-assembler for ideas: start with a DSL, grow into an application language, or embed it as your configuration/runtime layer. Above all, enjoy the freedom of comprehensibility.
