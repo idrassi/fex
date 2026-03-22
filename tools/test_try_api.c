@@ -673,7 +673,7 @@ int main(void) {
         void *import_limit_memory = malloc(TEST_MEM_SIZE);
         fe_Context *import_limit_ctx;
         char import_dir[256];
-        char file_path[256];
+        char file_path[512];
         char source_buf[256];
         size_t baseline_used;
         int i;

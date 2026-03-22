@@ -987,11 +987,11 @@ struct Parser {
     int panic_mode;
 };
 
-typedef struct FexCompileState {
+struct FexCompileState {
     Lexer lexer;
     Parser parser;
     struct FexCompileState *previous;
-} FexCompileState;
+};
 
 /* Pratt parser precedence levels */
 typedef enum {

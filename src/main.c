@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 #ifdef _WIN32
 #include <io.h>
 #define FEX_ISATTY _isatty
