@@ -172,7 +172,7 @@ fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS,
 | --- | --- |
 | Open a VM | `ctx = fe_open(buf, size); fex_init(ctx);` |
 | Run source once | `fex_do_string(ctx, "code");` |
-| Compile then reuse | `fe_Object *ast = fex_compile(ctx, src); fe_eval(ctx, ast);` |
+| Compile then reuse | `int gc = fe_savegc(ctx); fe_Object *ast = fex_compile(ctx, src); fe_eval(ctx, ast); fe_restoregc(ctx, gc);` |
 | Enable all optional builtins | `fex_init_with_config(ctx, FEX_CONFIG_ENABLE_EXTENDED_BUILTINS);` |
 | Enable selected builtin groups | `fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS, FEX_BUILTINS_SAFE);` |
 | Bound evaluation work | `fe_set_step_limit(ctx, 100000);` |

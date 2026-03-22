@@ -225,7 +225,7 @@ void fex_print_error(FILE *fp, const FexError *error);
 
 Use these APIs when the host must recover from failures instead of exiting.
 
-- `fex_try_compile()` returns a compiled AST or a structured compile error. `source_name` is copied into diagnostics; pass `NULL` for `"<string>"`.
+- `fex_try_compile()` returns a compiled AST or a structured compile error. `source_name` is copied into diagnostics; pass `NULL` for `"<string>"`. On success, the returned AST stays rooted on the GC stack until the caller later restores that stack frame.
 - `fex_try_eval()` evaluates a precompiled AST and captures runtime failures.
 - `fex_try_do_string()` and `fex_try_do_file()` cover the full compile/eval path.
 - `fex_try_do_string_named()` is the recoverable equivalent of `fex_do_string_named()`, useful when inline or generated source should report a custom diagnostic name.
@@ -256,6 +256,18 @@ fe_Object *fe_eval(fe_Context *ctx, fe_Object *obj);
 ```
 
 Use `fex_compile()` and `fe_eval()` directly when you want the low-level split between parsing and evaluation and are willing to manage errors through either the installed handler or the `fex_try_*` wrappers.
+
+Both `fex_compile()` and `fex_try_compile()` hand back an AST that occupies a GC root. Save the GC stack before compiling and restore it after you are done with the compiled tree:
+
+```c
+int gc_idx = fe_savegc(ctx);
+fe_Object *ast = fex_compile(ctx, src);
+if (ast != NULL) {
+    fe_Object *value = fe_eval(ctx, ast);
+    (void)value;
+}
+fe_restoregc(ctx, gc_idx);
+```
 
 ### Installed Package Consumption
 
