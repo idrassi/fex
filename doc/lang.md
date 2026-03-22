@@ -106,7 +106,7 @@ These are defined in C, so they evaluate all arguments left-to-right before exec
 
 1. **Lexical closure** – `fn` and `mac` capture *free variables* by reference; mutation through `=` is visible to every closure sharing that environment.
 2. **`let` builds the local environment** by **extending** the current frame; recursive definitions work because the placeholder cell is allocated first.
-3. **Tail position** in `do` or function bodies is not specially optimised in this reference implementation, but the evaluator is iterative enough for practical programs on moderate stack depth.
+3. **Tail-call optimization** – the evaluator uses a trampoline to reuse the current C stack frame for calls in tail position (last expression in a function body, `do` block, or `if`/`else` branch). Tail-recursive functions run in constant stack space. `return f(x)` is also optimized: the redundant return wrapper is stripped when the call is already in tail position.
 4. **Return handling** is implemented by throwing a hidden pair `'(return . value)` up the call chain until the enclosing `fn` intercepts it.
 
 ---

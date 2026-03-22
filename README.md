@@ -31,6 +31,7 @@ FeX provides a familiar "curly-brace" syntax front-end that compiles down to the
 *   **Rich Data Types**: Numbers (doubles and fixnums), Strings, `nil`, Booleans, Pairs (for lists), and Maps for associative data.
 *   **Pair Sugar**: `::` builds pairs, `.head`/`.first` and `.tail`/`.rest` read them, and pair selectors can be assigned.
 *   **Arena-Based Core Runtime**: Core values live in a fixed-size interpreter arena, while higher-level features such as source spans, import bookkeeping, and maps may use auxiliary heap storage.
+*   **Tail-Call Optimization**: Tail-recursive functions run in constant stack space via a trampoline in the evaluator, enabling deep recursion without stack overflow.
 *   **Garbage Collection**: A simple and fast mark-and-sweep garbage collector manages the memory arena.
 *   **Recoverable Diagnostics**: The CLI and C API can surface structured compile, runtime, and file I/O errors without terminating the host process.
 *   **Embeddable C API**: A clean API allows you to easily embed FeX into your C projects, call FeX functions from C, and expose C functions to FeX.
@@ -399,6 +400,8 @@ FeX is a compiler that targets the `fe` virtual machine. The process is as follo
 1.  **Parsing**: `fex.c` contains a hand-written recursive descent parser (using Pratt parsing for expressions) that consumes FeX source code.
 2.  **Compilation**: The parser builds an Abstract Syntax Tree (AST) directly as `fe` S-expressions (lists of objects). For example, the FeX code `let x = 10;` is compiled into the `fe` list `(let x 10)`.
 3.  **Evaluation**: The resulting S-expression is passed to `fe_eval()`, which evaluates it using the core `fe` interpreter.
+
+The evaluator implements trampoline-based tail-call optimization: when a function call is in tail position (the last expression in a function body, `if`/`else` branch, or `do` block), the evaluator reuses the current C stack frame instead of recursing. This allows tail-recursive functions to run for millions of iterations in constant stack space.
 
 This layered design keeps the VM (`fe.c`) simple and stable, while allowing the user-facing language (`fex.c`) to be expressive and modern.
 

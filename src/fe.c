@@ -3417,14 +3417,36 @@ tail_call:
           break;
         }
 
-        case P_WHILE:
-          va = fe_nextarg(ctx, &arg);
+        case P_WHILE: {
+          fe_Object *cond_expr = fe_nextarg(ctx, &arg);
           n = fe_savegc(ctx);
-          while (fe_truthy(eval(ctx, va, env, NULL))) {
-            dolist(ctx, arg, env);
+          while (fe_truthy(eval(ctx, cond_expr, env, NULL))) {
+            /* Inline body evaluation: eval all but last normally,
+               then tail-call the last expression. */
+            fe_Object *body_cur = arg;
+            int wsave = fe_savegc(ctx);
+            while (!isnil(body_cur)) {
+              fe_Object *expr = fe_nextarg(ctx, &body_cur);
+              if (isnil(body_cur)) {
+                /* Last body expression: eval directly (not goto, since
+                   we need to loop back for the condition check). */
+                fe_restoregc(ctx, wsave);
+                fe_pushgc(ctx, arg);
+                fe_pushgc(ctx, env);
+                res = eval(ctx, expr, env, &env);
+                break;
+              }
+              fe_restoregc(ctx, wsave);
+              fe_pushgc(ctx, body_cur);
+              fe_pushgc(ctx, env);
+              res = eval(ctx, expr, env, &env);
+              if (is_return_obj(ctx, res)) { break; }
+            }
+            if (is_return_obj(ctx, res)) { break; }
             fe_restoregc(ctx, n);
           }
           break;
+        }
 
         case P_QUOTE:
           res = fe_nextarg(ctx, &arg);

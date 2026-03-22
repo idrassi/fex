@@ -754,6 +754,23 @@ CASES = [
         "exit_code": 0,
         "stdout": "50005000\n",
     },
+    {
+        "name": "while loop with return propagation",
+        "source": (
+            "fn find_first_over(lst, threshold) {\n"
+            "  while (lst) {\n"
+            "    let val = car(lst);\n"
+            "    if (val > threshold) { return val; }\n"
+            "    lst = cdr(lst);\n"
+            "  }\n"
+            "  return nil;\n"
+            "}\n"
+            "println(find_first_over([1, 5, 12, 3], 10));\n"
+            "println(find_first_over([1, 2, 3], 10));\n"
+        ),
+        "exit_code": 0,
+        "stdout": "12\nnil\n",
+    },
 ]
 
 

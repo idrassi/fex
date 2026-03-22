@@ -100,7 +100,7 @@ struct fe_Object {
 | `fn` / `mac`                           | Real closure objects                            |
 | `return`                               | **New** — multi-level return                    |
 | `module` / `export` / `import` / `get` | **New** — minimal module system                 |
-| `while`, `if`, `=`                     | Behaviour preserved                             |
+| `while`, `if`, `=`                     | Behaviour preserved; `if`/`do`/`while` now TCO-aware |
 | Arithmetic `+ - * / < <=`              | Works on fixnum *or* boxed double automatically |
 
 All previous list-processing, logic and I/O primitives remain intact.
@@ -168,7 +168,7 @@ Everything else — `fe_cons`, `fe_symbol`, `fe_eval`, etc. — is source-compat
 
 * Still recurses on the `car` side during marking.
 * Little-endian bit tricks make the tag scheme non-portable to big-endian.
-* No proper tail-call elimination (use `while`).
+* Tail-call optimization covers direct tail calls, `if`/`else` branches, and `do` blocks; mutual recursion and `apply`-based tail calls are not optimized.
 * Strings remain NUL-terminated; binary blobs require an external pointer type.
 * `import` only establishes a naming convention — host code must load the module.
 

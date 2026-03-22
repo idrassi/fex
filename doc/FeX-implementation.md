@@ -166,7 +166,28 @@ For heavier alterations—pattern matching, algebraic data types, etc.—you sti
 
 ---
 
-## 8 · Known trade-offs specific to FeX
+## 8 · Tail-call optimization
+
+The `fe` evaluator implements trampoline-based tail-call optimization (TCO) so that tail-recursive functions execute in constant stack space. Instead of recursing into `eval()` for the last expression in a tail position, the evaluator sets `obj` and `env` to describe the next evaluation and jumps back to a `tail_call:` label at the top of `eval()`, reusing the current C stack frame.
+
+TCO applies in four positions:
+
+| Position | How it works |
+| --- | --- |
+| **Function body** (`FE_TFUNC`) | The last expression in a function body is trampolined instead of recursed into. The environment is set to the new frame and `in_func_tail` is flagged so return sentinels are unwrapped. |
+| **`do` block** (`P_DO`) | The last expression in a `do` (i.e. `{ ... }`) block is trampolined. Earlier expressions are evaluated normally. |
+| **`if`/`else` branches** (`P_IF`) | Both the taken branch body and a trailing else clause are trampolined. |
+| **`return` stripping** | When `in_func_tail` is set, a `(return X)` wrapper encountered at the `tail_call:` label is stripped so that `X` is evaluated directly—this lets `return f(x)` benefit from TCO. |
+
+`while` loop bodies are evaluated inline (avoiding `dolist()` overhead) but do **not** trampoline their last expression, since control must return to the loop condition check.
+
+**GC safety**: after `fe_restoregc()` and before `goto tail_call`, `env` is pushed onto the GC stack so the frame survives any collection that occurs during the next trampoline iteration.
+
+**Depth accounting**: `current_eval_depth` is decremented before `goto tail_call` so the trampoline iteration does not inflate the depth counter. With `--max-eval-depth 0` (unlimited), a tail-recursive function can run for millions of iterations in constant space.
+
+---
+
+## 9 · Known trade-offs specific to FeX
 
 * **One AST node = one `malloc`ed span record**
   Fine for configs and scripting, but you might pool-allocate or truncate spans in‐production.
@@ -178,7 +199,7 @@ For heavier alterations—pattern matching, algebraic data types, etc.—you sti
 
 ---
 
-## 9 · Closing reflection
+## 10 · Closing reflection
 
 FeX exemplifies **systems thinking at different zoom levels**:
 
