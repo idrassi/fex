@@ -1376,6 +1376,7 @@ void fe_error(fe_Context *ctx, const char *msg) {
     ctx->timeout_countdown = TIMEOUT_CHECK_INTERVAL;
   }
   ctx->interrupt_countdown = ctx->interrupt_interval;
+  fex_compile_cleanup_ctx(ctx);
   fex_temp_cleanup_all(ctx);
   /* do error handler */
   if (ctx->handlers.error) { ctx->handlers.error(ctx, msg, cl); }
@@ -3066,9 +3067,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, char *module_spec,
     fe_restoregc(ctx, gc_save);
     tracked_free(ctx, module_spec);
     if (fex_try_is_active()) {
-      fex_try_raise(import_error.status, import_error.source_name,
-                    import_error.line, import_error.column,
-                    import_error.message);
+      fex_try_raise_error(&import_error);
     }
     fe_error(ctx, import_error.message);
   }

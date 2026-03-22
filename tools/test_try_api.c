@@ -455,7 +455,24 @@ int main(void) {
 
     {
         int gc_before = fe_savegc(ctx);
+        fe_Object *compiled = fex_compile(ctx, "let broken = ;");
+        if (compiled != NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected direct fex_compile to fail on invalid input");
+        }
+        if (fe_savegc(ctx) != gc_before) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected direct fex_compile failures to restore the GC stack");
+        }
+    }
+
+    {
+        int gc_before = fe_savegc(ctx);
         fe_Object *compiled = NULL;
+        int compiled_gc_depth;
+        int i;
 
         status = fex_try_compile(ctx, "40 + 2;", "try-compile-root", &compiled, &error);
         if (status != FEX_STATUS_OK) {
@@ -467,6 +484,18 @@ int main(void) {
             fe_close(ctx);
             free(memory);
             return fail("expected successful fex_try_compile to keep the returned AST rooted");
+        }
+        compiled_gc_depth = fe_savegc(ctx);
+        for (i = 0; i < 4096; i++) {
+            char churn[32];
+            snprintf(churn, sizeof(churn), "tmp-%d", i);
+            if (!fe_string(ctx, churn, strlen(churn))) {
+                fe_restoregc(ctx, gc_before);
+                fe_close(ctx);
+                free(memory);
+                return fail("expected allocation churn after fex_try_compile to succeed");
+            }
+            fe_restoregc(ctx, compiled_gc_depth);
         }
         status = fex_try_eval(ctx, compiled, &result, &error);
         if (status != FEX_STATUS_OK || fe_tonumber(ctx, result) != 42) {
@@ -581,6 +610,88 @@ int main(void) {
         fe_close(ctx);
         free(memory);
         return fail("runtime traceback was not captured");
+    }
+
+    {
+        char import_dir[256];
+        int i;
+        int found_inner_frame = 0;
+
+        snprintf(import_dir, sizeof(import_dir), "%s%cimport_file_modules",
+                 TEST_SCRIPTS_DIR, TEST_PATH_SEP);
+        if (!fex_add_import_path(ctx, import_dir)) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected adding the import_file_modules path to succeed");
+        }
+        status = fex_try_do_string_named(ctx, "import error_import_runtime;\n",
+                                         "<outer>", &result, &error);
+        if (status != FEX_STATUS_RUNTIME_ERROR) {
+            fe_close(ctx);
+            free(memory);
+            return fail_status("expected top-level imported module runtime error", status, &error);
+        }
+        if (error.frame_count < 1) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected recoverable import failures to preserve traceback frames");
+        }
+        for (i = 0; i < error.frame_count; i++) {
+            if (strstr(error.frames[i].expression, "tonumber") != NULL &&
+                strstr(error.frames[i].expression, "\"\\\\0\"") != NULL) {
+                found_inner_frame = 1;
+                break;
+            }
+        }
+        if (!found_inner_frame) {
+            fe_close(ctx);
+            free(memory);
+            return fail("expected recoverable import failures to preserve inner traceback frames");
+        }
+    }
+
+    {
+        void *limit_memory = malloc(TEST_MEM_SIZE);
+        fe_Context *limit_ctx;
+        fe_Object *compiled = NULL;
+        FexError limit_error;
+        size_t baseline_used;
+
+        if (!limit_memory) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to allocate compiler-state memory-limit test memory");
+        }
+        limit_ctx = fe_open(limit_memory, TEST_MEM_SIZE);
+        if (!limit_ctx) {
+            fe_close(ctx);
+            free(memory);
+            free(limit_memory);
+            return fail("failed to open compiler-state memory-limit test context");
+        }
+        fex_init(limit_ctx);
+        baseline_used = fe_get_memory_used(limit_ctx);
+        fe_set_memory_limit(limit_ctx, baseline_used);
+        status = fex_try_compile(limit_ctx, "1 + 2;", "compile-state-limit", &compiled, &limit_error);
+        fe_set_memory_limit(limit_ctx, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(limit_error.message, "memory limit exceeded") == NULL) {
+            fe_close(limit_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(limit_memory);
+            return fail_status("expected compiler-state allocation to honor the memory limit",
+                               status, &limit_error);
+        }
+        if (fe_get_memory_used(limit_ctx) != baseline_used) {
+            fe_close(limit_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(limit_memory);
+            return fail("expected compiler-state allocation failures to clean up tracked memory");
+        }
+        fe_close(limit_ctx);
+        free(limit_memory);
     }
 
     status = fex_try_do_file(ctx, "missing-file-does-not-exist.fex", &result, &error);

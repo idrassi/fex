@@ -451,6 +451,30 @@ void fex_try_raise(FexStatus status, const char *source_name,
     longjmp(g_try_scope->env, 1);
 }
 
+void fex_try_raise_error(const FexError *error) {
+    if (!g_try_scope) {
+        return;
+    }
+    if (g_try_scope->error) {
+        if (error) {
+            *(g_try_scope->error) = *error;
+            if (g_try_scope->error->status == FEX_STATUS_OK) {
+                g_try_scope->error->status = FEX_STATUS_RUNTIME_ERROR;
+            }
+            if (!g_try_scope->error->source_name[0]) {
+                copy_string(g_try_scope->error->source_name,
+                            sizeof(g_try_scope->error->source_name),
+                            g_try_scope->source_name ? g_try_scope->source_name : "<string>");
+            }
+        } else {
+            fill_basic_error(g_try_scope->error, FEX_STATUS_RUNTIME_ERROR,
+                             g_try_scope->source_name ? g_try_scope->source_name : "<string>",
+                             0, 0, "unknown error");
+        }
+    }
+    longjmp(g_try_scope->env, 1);
+}
+
 static void fill_runtime_trace(fe_Context *ctx, FexError *error, fe_Object *cl) {
     int depth;
 
@@ -996,9 +1020,9 @@ static Parser *current_parser(void) {
 
 static FexCompileState *enter_compile_scope(fe_Context *ctx, const char *source,
                                             const char *source_name) {
-    FexCompileState *scope = (FexCompileState*)malloc(sizeof(*scope));
+    FexCompileState *scope = (FexCompileState*)fe_ctx_tracked_alloc(ctx, sizeof(*scope));
     if (!scope) {
-        fe_error(ctx, "out of memory (compiler state)");
+        fe_ctx_memory_error(ctx, "out of memory (compiler state)");
         return NULL;
     }
 
@@ -1021,7 +1045,13 @@ static void leave_compile_scope(FexCompileState *scope) {
         return;
     }
     g_compile_state = scope->previous;
-    free(scope);
+    fe_ctx_tracked_free(scope->parser.ctx, scope);
+}
+
+void fex_compile_cleanup_ctx(fe_Context *ctx) {
+    while (g_compile_state && g_compile_state->parser.ctx == ctx) {
+        leave_compile_scope(g_compile_state);
+    }
 }
 
 /* Forward declarations for the parser */
@@ -1762,6 +1792,7 @@ fe_Object* fex_compile_named(fe_Context *ctx, const char *source,
     }
 
     if (P.had_error || L.had_error) {
+        fe_restoregc(ctx, gc_base);
         leave_compile_scope(scope);
         return NULL;
     }
