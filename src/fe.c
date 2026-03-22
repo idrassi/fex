@@ -3187,7 +3187,17 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
   fe_Object *fn, *arg, *res;
   fe_Object cl, *va, *vb;
   int n, gc;
+  int in_func_tail = 0;
 
+tail_call:
+  /* If we're in a function's tail position and the expression to evaluate
+     is (return X), strip the redundant return and evaluate X directly.
+     In tail position, return is implicit — the return sentinel would just
+     be unwrapped at the end of eval anyway. */
+  if (in_func_tail && type(obj) == FE_TPAIR && car(obj) == ctx->return_sym) {
+    fe_Object *ret_args = cdr(obj);
+    obj = isnil(ret_args) ? &nil : car(ret_args);
+  }
   check_eval_budget(ctx);
   if (ctx->max_eval_depth > 0 && ctx->current_eval_depth >= ctx->max_eval_depth) {
     fe_error(ctx, "eval recursion depth limit exceeded");
@@ -3203,6 +3213,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
   ctx->calllist = &cl;
 
   gc = fe_savegc(ctx);
+  fe_pushgc(ctx, env);
   fn = eval(ctx, car(obj), env, NULL);
   arg = cdr(obj);
   res = &nil;
@@ -3349,10 +3360,23 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
 
         case P_IF:
           while (!isnil(arg)) {
+            /* If this is the last element (else clause with no body),
+               tail-call it instead of evaluating eagerly */
+            if (isnil(cdr(arg))) {
+              obj = fe_nextarg(ctx, &arg);
+              fe_restoregc(ctx, gc);
+              ctx->calllist = cdr(&cl);
+              ctx->current_eval_depth--;
+              goto tail_call;
+            }
             va = evalarg();
             if (fe_truthy(va)) {
-              res = isnil(arg) ? va : evalarg();
-              break;
+              /* Tail-call: evaluate the taken branch via trampoline */
+              obj = fe_nextarg(ctx, &arg);
+              fe_restoregc(ctx, gc);
+              ctx->calllist = cdr(&cl);
+              ctx->current_eval_depth--;
+              goto tail_call;
             }
             if (isnil(arg)) { break; }
             arg = cdr(arg);
@@ -3414,9 +3438,27 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
           while (!isnil(arg) && !fe_truthy(res = evalarg()));
           break;
 
-        case P_DO:
-          res = dolist(ctx, arg, env);
+        case P_DO: {
+          /* Evaluate all but last expression, then tail-call the last */
+          int save = fe_savegc(ctx);
+          while (!isnil(arg)) {
+            fe_Object *expr = fe_nextarg(ctx, &arg);
+            if (isnil(arg)) {
+              /* Last expression: tail-call */
+              fe_restoregc(ctx, gc);
+              ctx->calllist = cdr(&cl);
+              ctx->current_eval_depth--;
+              obj = expr;
+              goto tail_call;
+            }
+            fe_restoregc(ctx, save);
+            fe_pushgc(ctx, arg);
+            fe_pushgc(ctx, env);
+            res = eval(ctx, expr, env, &env);
+            if (is_return_obj(ctx, res)) { break; }
+          }
           break;
+        }
 
         case P_CONS:
           va = evalarg();
@@ -3541,9 +3583,31 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
       fe_Object *frame = fe_cons(ctx, locals, upvals);
       frame = fe_cons(ctx, ctx->frame_sym, frame);
 
-      res = dolist(ctx, body, frame);
-      if (is_return_obj(ctx, res)) {
-          res = cdr(res);
+      /* Inline body evaluation with tail-call optimization:
+         evaluate all but the last expression normally, then
+         trampoline the last expression via goto tail_call. */
+      {
+        fe_Object *body_cur = body;
+        int save = fe_savegc(ctx);
+        res = &nil;
+        while (!isnil(body_cur)) {
+          fe_Object *expr = fe_nextarg(ctx, &body_cur);
+          if (isnil(body_cur)) {
+            /* Last body expression: tail-call via trampoline */
+            fe_restoregc(ctx, gc);
+            ctx->calllist = cdr(&cl);
+            ctx->current_eval_depth--;
+            obj = expr;
+            env = frame;
+            in_func_tail = 1;
+            goto tail_call;
+          }
+          fe_restoregc(ctx, save);
+          fe_pushgc(ctx, body_cur);
+          fe_pushgc(ctx, frame);
+          res = eval(ctx, expr, frame, &frame);
+          if (is_return_obj(ctx, res)) { res = cdr(res); break; }
+        }
       }
       break;
     }
@@ -3588,6 +3652,12 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
   fe_pushgc(ctx, res);
   ctx->calllist = cdr(&cl);
   ctx->current_eval_depth--;
+  /* Unwrap return sentinel when we're in a function's tail-call chain.
+     The trampoline skips the normal FE_TFUNC return_obj unwrap, so we
+     catch it here instead. */
+  if (in_func_tail && is_return_obj(ctx, res)) {
+    res = cdr(res);
+  }
   return res;
 }
 

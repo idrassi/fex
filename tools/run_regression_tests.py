@@ -674,7 +674,7 @@ CASES = [
     },
     {
         "name": "eval depth limit",
-        "source": "fn f(n) { return f(n + 1); }\nf(0);\n",
+        "source": "fn f(n) { return 1 + f(n + 1); }\nf(0);\n",
         "args": ["--max-eval-depth", "64", "--spans"],
         "exit_code": 70,
         "stderr_contains": [
@@ -728,6 +728,31 @@ CASES = [
             '"exit_code":65',
             '"message":',
         ],
+    },
+    {
+        "name": "tail-call optimization",
+        "source": (
+            "fn count(n) {\n"
+            "  if (n <= 0) { 0; } else { count(n - 1); }\n"
+            "}\n"
+            "println(count(10000));\n"
+        ),
+        "args": ["--max-eval-depth", "0"],
+        "exit_code": 0,
+        "stdout": "0\n",
+    },
+    {
+        "name": "tail-call optimization with return",
+        "source": (
+            "fn sum(n, acc) {\n"
+            "  if (n <= 0) { return acc; }\n"
+            "  return sum(n - 1, acc + n);\n"
+            "}\n"
+            "println(sum(10000, 0));\n"
+        ),
+        "args": ["--max-eval-depth", "0"],
+        "exit_code": 0,
+        "stdout": "50005000\n",
     },
 ]
 
