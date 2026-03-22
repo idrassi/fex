@@ -210,6 +210,113 @@ static void print_runtime_stats(FILE *fp, fe_Context *ctx) {
   fprintf(fp, "  gc_runs: %llu\n", (unsigned long long)stats.gc_runs);
 }
 
+/* --- JSON output helpers --- */
+
+static void json_write_escaped_string(FILE *fp, const char *s) {
+  fputc('"', fp);
+  for (; *s; s++) {
+    switch (*s) {
+      case '"':  fprintf(fp, "\\\""); break;
+      case '\\': fprintf(fp, "\\\\"); break;
+      case '\n': fprintf(fp, "\\n"); break;
+      case '\r': fprintf(fp, "\\r"); break;
+      case '\t': fprintf(fp, "\\t"); break;
+      default:
+        if ((unsigned char)*s < 0x20) {
+          fprintf(fp, "\\u%04x", (unsigned char)*s);
+        } else {
+          fputc(*s, fp);
+        }
+    }
+  }
+  fputc('"', fp);
+}
+
+static const char* status_string(FexStatus status) {
+  switch (status) {
+    case FEX_STATUS_OK:            return "ok";
+    case FEX_STATUS_COMPILE_ERROR: return "compile_error";
+    case FEX_STATUS_RUNTIME_ERROR: return "runtime_error";
+    case FEX_STATUS_IO_ERROR:      return "io_error";
+    default:                       return "error";
+  }
+}
+
+static void print_json_stats(FILE *fp, fe_Context *ctx) {
+  fe_Stats stats;
+
+  fe_get_stats(ctx, &stats);
+  fprintf(fp, "{\"steps_executed\":%llu", (unsigned long long)stats.steps_executed);
+  fprintf(fp, ",\"step_limit\":%llu", (unsigned long long)stats.step_limit);
+  fprintf(fp, ",\"timeout_ms\":%" PRIu64, stats.timeout_ms);
+  fprintf(fp, ",\"memory_used\":%llu", (unsigned long long)stats.memory_used);
+  fprintf(fp, ",\"peak_memory_used\":%llu", (unsigned long long)stats.peak_memory_used);
+  fprintf(fp, ",\"memory_limit\":%llu", (unsigned long long)stats.memory_limit);
+  fprintf(fp, ",\"base_memory_bytes\":%llu", (unsigned long long)stats.base_memory_bytes);
+  fprintf(fp, ",\"object_capacity\":%llu", (unsigned long long)stats.object_capacity);
+  fprintf(fp, ",\"live_objects\":%llu", (unsigned long long)stats.live_objects);
+  fprintf(fp, ",\"object_allocations_total\":%llu", (unsigned long long)stats.object_allocations_total);
+  fprintf(fp, ",\"allocs_since_gc\":%llu", (unsigned long long)stats.allocs_since_gc);
+  fprintf(fp, ",\"gc_runs\":%llu}", (unsigned long long)stats.gc_runs);
+}
+
+static void print_json_result(FILE *fp, int exit_code, const FexError *error,
+                               fe_Context *ctx, int include_stats) {
+  int i;
+
+  fprintf(fp, "{\"status\":");
+  if (error != NULL && error->status != FEX_STATUS_OK) {
+    json_write_escaped_string(fp, status_string(error->status));
+  } else {
+    fprintf(fp, "\"ok\"");
+  }
+  fprintf(fp, ",\"exit_code\":%d", exit_code);
+
+  if (error != NULL && error->status != FEX_STATUS_OK) {
+    fprintf(fp, ",\"error\":{\"message\":");
+    json_write_escaped_string(fp, error->message[0] ? error->message : "unknown error");
+    if (error->source_name[0]) {
+      fprintf(fp, ",\"source\":");
+      json_write_escaped_string(fp, error->source_name);
+    }
+    if (error->line > 0) {
+      fprintf(fp, ",\"line\":%d,\"column\":%d",
+              error->line, error->column > 0 ? error->column : 1);
+    }
+    if (error->frame_count > 0) {
+      fprintf(fp, ",\"trace\":[");
+      for (i = 0; i < error->frame_count; i++) {
+        const FexErrorFrame *frame = &error->frames[i];
+        if (i > 0) fputc(',', fp);
+        fputc('{', fp);
+        if (frame->source_name[0]) {
+          fprintf(fp, "\"source\":");
+          json_write_escaped_string(fp, frame->source_name);
+          if (frame->line > 0) {
+            fprintf(fp, ",\"line\":%d,\"column\":%d",
+                    frame->line, frame->column > 0 ? frame->column : 1);
+          }
+        }
+        if (frame->expression[0]) {
+          if (frame->source_name[0]) fputc(',', fp);
+          fprintf(fp, "\"expression\":");
+          json_write_escaped_string(fp, frame->expression);
+        }
+        fputc('}', fp);
+      }
+      fputc(']', fp);
+    }
+    fputc('}', fp);
+  }
+
+  if (include_stats) {
+    fprintf(fp, ",\"stats\":");
+    print_json_stats(fp, ctx);
+  }
+
+  fprintf(fp, "}\n");
+}
+
 static void run_repl(fe_Context *ctx) {
   char buffer[REPL_BUFFER_SIZE];
   FexError error;
@@ -237,20 +344,23 @@ static void run_repl(fe_Context *ctx) {
   }
 }
 
-static int run_file(fe_Context *ctx, const char *path) {
+static int run_file(fe_Context *ctx, const char *path, int json_output,
+                    FexError *out_error) {
   FexError error;
   fe_Object *result;
   FexStatus status = fex_try_do_file(ctx, path, &result, &error);
 
   (void)result;
   if (status != FEX_STATUS_OK) {
-    fex_print_error(stderr, &error);
+    if (out_error) *out_error = error;
+    if (!json_output) fex_print_error(stderr, &error);
     return exit_code_for_status(status);
   }
   return 0;
 }
 
-static int run_source(fe_Context *ctx, const char *source, const char *source_name) {
+static int run_source(fe_Context *ctx, const char *source, const char *source_name,
+                      int json_output, FexError *out_error) {
   FexError error;
   fe_Object *result = NULL;
   FexStatus status;
@@ -262,7 +372,8 @@ static int run_source(fe_Context *ctx, const char *source, const char *source_na
   status = fex_try_do_string_named(ctx, source, source_name, &result, &error);
   (void)result;
   if (status != FEX_STATUS_OK) {
-    fex_print_error(stderr, &error);
+    if (out_error) *out_error = error;
+    if (!json_output) fex_print_error(stderr, &error);
     return exit_code_for_status(status);
   }
 
@@ -285,6 +396,7 @@ static void print_usage(const char *program_name) {
   fprintf(stderr, "  --max-memory N  Abort when tracked context memory exceeds N bytes (0 disables)\n");
   fprintf(stderr, "  --max-eval-depth N  Limit eval recursion depth (0 disables, default: 512)\n");
   fprintf(stderr, "  --max-read-depth N  Limit read nesting depth (0 disables, default: 512)\n");
+  fprintf(stderr, "  --json-output Emit structured JSON diagnostics to stderr instead of text\n");
   fprintf(stderr, "  --stats       Print runtime stats to stderr after non-REPL execution\n");
   fprintf(stderr, "  --memory-pool-size SIZE  Set memory pool size in MB (default: 5MB)\n");
   fprintf(stderr, "  --version, -V  Show version information\n");
@@ -299,6 +411,7 @@ int main(int argc, char **argv) {
   int read_stdin = 0;
   int end_of_options = 0;
   int show_stats = 0;
+  int json_output = 0;
   int exit_code = 0;
   int stdin_interactive;
   size_t memory_pool_size = MEMORY_POOL_SIZE;
@@ -487,6 +600,8 @@ int main(int argc, char **argv) {
         return 64;
       }
       max_read_depth = (int)parsed_depth;
+    } else if (!end_of_options && strcmp(argv[i], "--json-output") == 0) {
+      json_output = 1;
     } else if (!end_of_options && strcmp(argv[i], "--stats") == 0) {
       show_stats = 1;
     } else if (!end_of_options && strcmp(argv[i], "--memory-pool-size") == 0) {
@@ -590,25 +705,46 @@ int main(int argc, char **argv) {
   free(module_paths);
 
   stdin_interactive = stdin_is_interactive();
-  if (eval_source != NULL) {
-    exit_code = run_source(ctx, eval_source, "<expr>");
-  } else if (filename != NULL) {
-    exit_code = run_file(ctx, filename);
-  } else if (read_stdin || !stdin_interactive) {
-    char *stdin_source = NULL;
-    if (!read_stream_source(stdin, &stdin_source)) {
-      fprintf(stderr, "I/O error: could not read stdin\n");
-      exit_code = 74;
-    } else {
-      exit_code = run_source(ctx, stdin_source, "<stdin>");
-      free(stdin_source);
-    }
-  } else {
-    run_repl(ctx);
-  }
+  {
+    FexError run_error;
+    int has_error = 0;
+    int is_batch;
+    fex_error_clear(&run_error);
 
-  if (show_stats && (eval_source != NULL || filename != NULL || read_stdin || !stdin_interactive)) {
-    print_runtime_stats(stderr, ctx);
+    if (eval_source != NULL) {
+      exit_code = run_source(ctx, eval_source, "<expr>", json_output, &run_error);
+      has_error = (exit_code != 0);
+    } else if (filename != NULL) {
+      exit_code = run_file(ctx, filename, json_output, &run_error);
+      has_error = (exit_code != 0);
+    } else if (read_stdin || !stdin_interactive) {
+      char *stdin_source = NULL;
+      if (!read_stream_source(stdin, &stdin_source)) {
+        if (!json_output) {
+          fprintf(stderr, "I/O error: could not read stdin\n");
+        }
+        exit_code = 74;
+        run_error.status = FEX_STATUS_IO_ERROR;
+        snprintf(run_error.message, sizeof(run_error.message),
+                 "could not read stdin");
+        has_error = 1;
+      } else {
+        exit_code = run_source(ctx, stdin_source, "<stdin>", json_output, &run_error);
+        has_error = (exit_code != 0);
+        free(stdin_source);
+      }
+    } else {
+      run_repl(ctx);
+    }
+
+    is_batch = (eval_source != NULL || filename != NULL || read_stdin || !stdin_interactive);
+
+    if (json_output && is_batch) {
+      print_json_result(stderr, exit_code, has_error ? &run_error : NULL,
+                        ctx, show_stats);
+    } else if (show_stats && is_batch) {
+      print_runtime_stats(stderr, ctx);
+    }
   }
 
   free(eval_source);

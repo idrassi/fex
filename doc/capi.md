@@ -538,18 +538,40 @@ If span tracking is enabled, this returns source information for an AST node in 
 
 ## Threading and Re-entrancy
 
-`fe_Context` is not thread-safe. All operations on a given context must stay on one thread.
+### Thread Safety
 
-You may create multiple contexts and use one per thread.
+`fe_Context` is **not thread-safe**. No internal locking or synchronization is provided. All operations on a given context — creation, evaluation, compilation, GC, and teardown — must be performed on the same thread.
 
-Compiled ASTs are ordinary `fe_Object *` values owned by the context that created them. Reuse them within that same context. Do not pass them to a different context or thread.
+To use FeX from multiple threads, create a separate `fe_Context` (with its own memory arena) for each thread. Contexts do not share state and can safely run in parallel.
 
-The interpreter and compiler are re-entrant on a single thread: a host `fe_CFunc` may call back into `fe_eval()` on that same context, and nested `fex_try_*` / compile calls are supported as long as they stay on that thread.
+### Internal Thread-Local State
+
+The recoverable error API (`fex_try_*`) uses a thread-local scope stack internally. On platforms where `_Thread_local` or `__thread` is available, each thread gets its own scope chain, so multiple threads can each use their own context with `fex_try_*` concurrently. On platforms without thread-local storage support, the scope stack is a plain global, and only one thread may use `fex_try_*` at a time.
+
+### What Must Not Cross Thread Boundaries
+
+- `fe_Context *` — must remain on the thread that created it.
+- `fe_Object *` — all objects are owned by a specific context's arena. Passing an object pointer to a different context (even on the same thread) is undefined behavior.
+- Compiled ASTs — these are ordinary `fe_Object *` values and follow the same ownership rules.
+
+### Re-entrancy
+
+The interpreter and compiler are re-entrant **on a single thread**: a host `fe_CFunc` may call back into `fe_eval()` or `fex_try_do_string()` on the same context, and nested `fex_try_*` calls are supported. The try-scope stack handles nesting correctly.
+
+### Summary
+
+| Scenario | Supported |
+|---|---|
+| One context, one thread | Yes |
+| Multiple contexts, each on its own thread | Yes |
+| One context shared across threads | **No** |
+| Nested eval/compile on same context and thread | Yes |
 
 ## Common Pitfalls
 
 - Forgetting GC protection for temporary objects across further allocations.
 - Returning `NULL` from a `fe_CFunc`.
 - Passing a compiled AST or other `fe_Object *` from one context into another.
+- Sharing a single `fe_Context` across threads without external synchronization.
 - Assuming optional helpers such as `sqrt`, `map`, `parsejson`, `runcommand`, or `runprocess` are always present. They require `FEX_CONFIG_ENABLE_EXTENDED_BUILTINS`, `fex_init_with_builtins(...)`, `--builtins`, or `--builtin NAME`.
 - Using `fe_cdr_ptr()` without first ensuring the target is non-nil.

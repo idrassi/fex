@@ -20,6 +20,12 @@
 
 #define FE_VERSION "1.0"
 
+/*
+ * Threading: fe_Context is NOT thread-safe.  Each thread must use its own
+ * context created with fe_open().  Multiple contexts on separate threads
+ * may run concurrently.  See doc/capi.md "Threading and Re-entrancy".
+ */
+
 typedef double fe_Number;
 typedef struct fe_Object fe_Object;
 typedef struct fe_Context fe_Context;

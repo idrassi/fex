@@ -65,6 +65,13 @@ typedef struct {
 } FexError;
 
 /*
+ * Threading: The fex_try_* APIs use a thread-local error scope internally.
+ * Each thread may use its own fe_Context with fex_try_* concurrently,
+ * provided the platform supports thread-local storage (_Thread_local or
+ * __thread).  See doc/capi.md "Threading and Re-entrancy" for details.
+ */
+
+/*
  * Initializes the FeX environment, registering custom built-in
  * functions like 'print'. Must be called after fe_open().
  */

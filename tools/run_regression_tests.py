@@ -681,6 +681,54 @@ CASES = [
             "runtime error: eval recursion depth limit exceeded",
         ],
     },
+    {
+        "name": "json output success",
+        "source": "println(42);\n",
+        "args": ["--json-output"],
+        "exit_code": 0,
+        "stdout": "42\n",
+        "stderr_contains": [
+            '"status":"ok"',
+            '"exit_code":0',
+        ],
+    },
+    {
+        "name": "json output with stats",
+        "source": "println(42);\n",
+        "args": ["--json-output", "--stats"],
+        "exit_code": 0,
+        "stdout": "42\n",
+        "stderr_contains": [
+            '"status":"ok"',
+            '"exit_code":0',
+            '"stats":{',
+            '"steps_executed":',
+            '"gc_runs":',
+        ],
+    },
+    {
+        "name": "json output runtime error",
+        "source": "let x = 1/0;\n",
+        "args": ["--json-output", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            '"status":"runtime_error"',
+            '"exit_code":70',
+            '"message":"division by zero"',
+            '"trace":[',
+        ],
+    },
+    {
+        "name": "json output compile error",
+        "source": "fn {\n",
+        "args": ["--json-output", "--spans"],
+        "exit_code": 65,
+        "stderr_contains": [
+            '"status":"compile_error"',
+            '"exit_code":65',
+            '"message":',
+        ],
+    },
 ]
 
 
