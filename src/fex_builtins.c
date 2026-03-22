@@ -402,7 +402,7 @@ static int append_process_capture(TextBuffer *buf, const unsigned char *data,
     }
 
     if (to_copy > 0 && !buf_append_mem(buf, (const char*)data, to_copy)) {
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg), "%s: out of memory", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -416,26 +416,26 @@ static char* string_to_cstr(fe_Context *ctx, fe_Object *str_obj, const char *fun
     char msg[160];
 
     if (fe_type(ctx, str_obj) != FE_TSTRING) {
-        sprintf(msg, "%s: type mismatch", func_name);
+        snprintf(msg, sizeof(msg), "%s: type mismatch", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     len = fe_strlen(ctx, str_obj);
     if (len + 1 > (size_t)INT_MAX) {
-        sprintf(msg, "%s: string too large", func_name);
+        snprintf(msg, sizeof(msg),"%s: string too large", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     buffer = malloc(len + 1);
     if (!buffer) {
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     fe_tostring(ctx, str_obj, buffer, (int)(len + 1));
     if (len > 0 && memchr(buffer, '\0', len) != NULL) {
         free(buffer);
-        sprintf(msg, "%s: strings containing NUL bytes are not allowed", func_name);
+        snprintf(msg, sizeof(msg),"%s: strings containing NUL bytes are not allowed", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
@@ -448,19 +448,19 @@ static char* string_to_buffer(fe_Context *ctx, fe_Object *str_obj, const char *f
     char msg[160];
 
     if (fe_type(ctx, str_obj) != FE_TSTRING) {
-        sprintf(msg, "%s: type mismatch", func_name);
+        snprintf(msg, sizeof(msg),"%s: type mismatch", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     len = fe_strlen(ctx, str_obj);
     if (len + 1 > (size_t)INT_MAX) {
-        sprintf(msg, "%s: string too large", func_name);
+        snprintf(msg, sizeof(msg),"%s: string too large", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     buffer = malloc(len + 1);
     if (!buffer) {
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
@@ -477,14 +477,14 @@ static unsigned char* bytes_to_buffer(fe_Context *ctx, fe_Object *bytes_obj, con
     char msg[128];
 
     if (fe_type(ctx, bytes_obj) != FE_TBYTES) {
-        sprintf(msg, "%s: type mismatch", func_name);
+        snprintf(msg, sizeof(msg),"%s: type mismatch", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     len = fe_byteslen(ctx, bytes_obj);
     buffer = malloc((len > 0) ? len : 1);
     if (!buffer) {
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
@@ -502,7 +502,7 @@ static fe_Object* string_to_bytes(fe_Context *ctx, fe_Object *str_obj, const cha
 
     if (fe_type(ctx, str_obj) != FE_TSTRING) {
         char msg[128];
-        sprintf(msg, "%s: type mismatch", func_name);
+        snprintf(msg, sizeof(msg),"%s: type mismatch", func_name);
         fe_error(ctx, msg);
         return fe_nil(ctx);
     }
@@ -532,14 +532,14 @@ static int copy_string_to_fixed_buffer(fe_Context *ctx, fe_Object *str_obj,
     char msg[160];
 
     if (fe_type(ctx, str_obj) != FE_TSTRING) {
-        sprintf(msg, "%s: type mismatch", func_name);
+        snprintf(msg, sizeof(msg),"%s: type mismatch", func_name);
         fe_error(ctx, msg);
         return 0;
     }
 
     len = fe_strlen(ctx, str_obj);
     if (len + 1 > capacity) {
-        sprintf(msg, "%s: string too long", func_name);
+        snprintf(msg, sizeof(msg),"%s: string too long", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -608,7 +608,7 @@ static char* build_merged_command(fe_Context *ctx, const char *command, const ch
     char msg[160];
 
     if (!merged) {
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
@@ -654,7 +654,7 @@ static int build_shell_process_argv(fe_Context *ctx, const char *command,
         !cstring_array_push_copy(argv, "/s") ||
         !cstring_array_push_copy(argv, "/c") ||
         !cstring_array_push_copy(argv, command)) {
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -662,7 +662,7 @@ static int build_shell_process_argv(fe_Context *ctx, const char *command,
     if (!cstring_array_push_copy(argv, "/bin/sh") ||
         !cstring_array_push_copy(argv, "-c") ||
         !cstring_array_push_copy(argv, command)) {
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -2125,7 +2125,7 @@ static int json_write_string(JsonWriter *writer, fe_Object *obj, TextBuffer *buf
             default:
                 if (chr < 0x20) {
                     char hexbuf[7];
-                    sprintf(hexbuf, "\\u%04x", chr);
+                    snprintf(hexbuf, sizeof(hexbuf),"\\u%04x", chr);
                     if (!buf_append_str(buf, hexbuf)) goto fail;
                 } else if (!buf_append_char(buf, (char)chr)) {
                     goto fail;
@@ -2149,7 +2149,7 @@ static int json_write_value(JsonWriter *writer, fe_Object *obj, TextBuffer *buf)
         case FE_TBOOLEAN:
             return buf_append_str(buf, (obj == fe_bool(writer->ctx, 1)) ? "true" : "false");
         case FE_TNUMBER:
-            sprintf(number_buf, "%.15g", fe_tonumber(writer->ctx, obj));
+            snprintf(number_buf, sizeof(number_buf),"%.15g", fe_tonumber(writer->ctx, obj));
             return buf_append_str(buf, number_buf);
         case FE_TSTRING:
             return json_write_string(writer, obj, buf);
@@ -2271,26 +2271,26 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
 
     file = fopen(filename, "rb");
     if (!file) {
-        sprintf(msg, "%s: could not open file", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not open file", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
-        sprintf(msg, "%s: could not determine file size", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not determine file size", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     size = ftell(file);
     if (size < 0) {
         fclose(file);
-        sprintf(msg, "%s: could not determine file size", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not determine file size", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     if ((size_t)size > max_size) {
         fclose(file);
-        sprintf(msg, "%s: file too large", func_name);
+        snprintf(msg, sizeof(msg),"%s: file too large", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
@@ -2299,7 +2299,7 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
     buffer = malloc((size_t)size + 1);
     if (!buffer) {
         fclose(file);
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
@@ -2325,7 +2325,7 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
             if (ferror(file)) {
                 free(buffer);
                 fclose(file);
-                sprintf(msg, "%s: error reading file", func_name);
+                snprintf(msg, sizeof(msg),"%s: error reading file", func_name);
                 fe_error(ctx, msg);
                 return NULL;
             }
@@ -2991,7 +2991,7 @@ static int count_list_length(fe_Context *ctx, fe_Object *list,
             return -1;
         }
         if (fe_type(ctx, node) != FE_TPAIR) {
-            sprintf(msg, "%s: %s must be a list", func_name, label);
+            snprintf(msg, sizeof(msg),"%s: %s must be a list", func_name, label);
             fe_error(ctx, msg);
             return -1;
         }
@@ -3066,7 +3066,7 @@ static int collect_process_argv(fe_Context *ctx, fe_Object *exe_obj,
 
     items = calloc((size_t)extra_count + 2, sizeof(char*));
     if (!items) {
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3125,7 +3125,7 @@ static int collect_process_env(fe_Context *ctx, fe_Object *env_obj,
 
     items = calloc((size_t)count + 1, sizeof(char*));
     if (!items) {
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3171,7 +3171,7 @@ static int collect_process_env(fe_Context *ctx, fe_Object *env_obj,
             free(key);
             free(value);
             free_cstring_items(items, index);
-            sprintf(msg, "%s: out of memory", func_name);
+            snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
             fe_error(ctx, msg);
             return 0;
         }
@@ -3203,7 +3203,7 @@ static int parse_process_stream_mode(fe_Context *ctx, fe_Object *value,
     }
     if (fe_type(ctx, value) != FE_TSTRING) {
         char msg[160];
-        sprintf(msg, "%s: %s must be a string or nil", func_name, option_name);
+        snprintf(msg, sizeof(msg),"%s: %s must be a string or nil", func_name, option_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3221,7 +3221,7 @@ static int parse_process_stream_mode(fe_Context *ctx, fe_Object *value,
         *out_mode = PROCESS_STREAM_DISCARD;
     } else {
         char msg[192];
-        sprintf(msg, "%s: %s must be 'capture', 'inherit', 'discard', or nil",
+        snprintf(msg, sizeof(msg),"%s: %s must be 'capture', 'inherit', 'discard', or nil",
                 func_name, option_name);
         fe_error(ctx, msg);
         result = 0;
@@ -3244,7 +3244,7 @@ static int parse_process_size_limit(fe_Context *ctx, fe_Object *value,
 
     if (fe_type(ctx, value) != FE_TNUMBER) {
         char msg[160];
-        sprintf(msg, "%s: %s must be a non-negative integer or nil",
+        snprintf(msg, sizeof(msg),"%s: %s must be a non-negative integer or nil",
                 func_name, option_name);
         fe_error(ctx, msg);
         return 0;
@@ -3253,7 +3253,7 @@ static int parse_process_size_limit(fe_Context *ctx, fe_Object *value,
     number_value = fe_tonumber(ctx, value);
     if (number_value < 0 || number_value != floor(number_value)) {
         char msg[160];
-        sprintf(msg, "%s: %s must be a non-negative integer or nil",
+        snprintf(msg, sizeof(msg),"%s: %s must be a non-negative integer or nil",
                 func_name, option_name);
         fe_error(ctx, msg);
         return 0;
@@ -3261,7 +3261,7 @@ static int parse_process_size_limit(fe_Context *ctx, fe_Object *value,
 
     if ((double)number_value > (double)((size_t)-1)) {
         char msg[160];
-        sprintf(msg, "%s: %s is too large", func_name, option_name);
+        snprintf(msg, sizeof(msg),"%s: %s is too large", func_name, option_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3373,14 +3373,14 @@ static int open_null_redirect_file(fe_Context *ctx, TempRedirectFile *file,
         NULL
     );
     if (file->handle == INVALID_HANDLE_VALUE) {
-        sprintf(msg, "%s: could not open null device", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not open null device", func_name);
         fe_error(ctx, msg);
         return 0;
     }
 #else
     file->fd = open("/dev/null", writable ? O_WRONLY : O_RDONLY);
     if (file->fd < 0) {
-        sprintf(msg, "%s: could not open null device", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not open null device", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3400,12 +3400,12 @@ static int create_process_capture_pipe(fe_Context *ctx, ProcessCapturePipe *capt
     sa.lpSecurityDescriptor = NULL;
     sa.bInheritHandle = TRUE;
     if (!CreatePipe(&capture_pipe->read_handle, &capture_pipe->write_handle, &sa, 0)) {
-        sprintf(msg, "%s: could not create capture pipe", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not create capture pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
     if (!SetHandleInformation(capture_pipe->read_handle, HANDLE_FLAG_INHERIT, 0)) {
-        sprintf(msg, "%s: could not configure capture pipe", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not configure capture pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3414,7 +3414,7 @@ static int create_process_capture_pipe(fe_Context *ctx, ProcessCapturePipe *capt
     int flags;
 
     if (pipe(fds) != 0) {
-        sprintf(msg, "%s: could not create capture pipe", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not create capture pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3431,7 +3431,7 @@ static int create_process_capture_pipe(fe_Context *ctx, ProcessCapturePipe *capt
     capture_pipe->write_fd = fds[1];
     flags = fcntl(capture_pipe->read_fd, F_GETFL, 0);
     if (flags < 0 || fcntl(capture_pipe->read_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-        sprintf(msg, "%s: could not configure capture pipe", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not configure capture pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3451,12 +3451,12 @@ static int create_process_input_pipe(fe_Context *ctx, ProcessCapturePipe *captur
     sa.lpSecurityDescriptor = NULL;
     sa.bInheritHandle = TRUE;
     if (!CreatePipe(&capture_pipe->read_handle, &capture_pipe->write_handle, &sa, 0)) {
-        sprintf(msg, "%s: could not create stdin pipe", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not create stdin pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
     if (!SetHandleInformation(capture_pipe->write_handle, HANDLE_FLAG_INHERIT, 0)) {
-        sprintf(msg, "%s: could not configure stdin pipe", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not configure stdin pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3465,7 +3465,7 @@ static int create_process_input_pipe(fe_Context *ctx, ProcessCapturePipe *captur
     int flags;
 
     if (pipe(fds) != 0) {
-        sprintf(msg, "%s: could not create stdin pipe", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not create stdin pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3482,7 +3482,7 @@ static int create_process_input_pipe(fe_Context *ctx, ProcessCapturePipe *captur
     capture_pipe->write_fd = fds[1];
     flags = fcntl(capture_pipe->write_fd, F_GETFL, 0);
     if (flags < 0 || fcntl(capture_pipe->write_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-        sprintf(msg, "%s: could not configure stdin pipe", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not configure stdin pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3580,7 +3580,7 @@ static int drain_windows_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
                 *pipe_open = 0;
                 return 1;
             }
-            sprintf(msg, "%s: could not read capture pipe", func_name);
+            snprintf(msg, sizeof(msg),"%s: could not read capture pipe", func_name);
             fe_error(ctx, msg);
             return 0;
         }
@@ -3604,7 +3604,7 @@ static int drain_windows_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
                     *pipe_open = 0;
                     return 1;
                 }
-                sprintf(msg, "%s: could not read capture pipe", func_name);
+                snprintf(msg, sizeof(msg),"%s: could not read capture pipe", func_name);
                 fe_error(ctx, msg);
                 return 0;
             }
@@ -3677,7 +3677,7 @@ static int write_posix_input_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
             return 1;
         }
 
-        sprintf(msg, "%s: could not write stdin", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not write stdin", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3723,7 +3723,7 @@ static int drain_posix_capture_pipe(fe_Context *ctx, ProcessCapturePipe *pipe,
             return 1;
         }
 
-        sprintf(msg, "%s: could not read capture pipe", func_name);
+        snprintf(msg, sizeof(msg),"%s: could not read capture pipe", func_name);
         fe_error(ctx, msg);
         return 0;
     }
@@ -3848,7 +3848,7 @@ static char* build_windows_command_line(fe_Context *ctx, CStringArray *argv,
         }
         if (i > 0 && !buf_append_char(&buf, ' ')) {
             buf_free(&buf);
-            sprintf(msg, "%s: out of memory", func_name);
+            snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
             fe_error(ctx, msg);
             return NULL;
         }
@@ -3858,7 +3858,7 @@ static char* build_windows_command_line(fe_Context *ctx, CStringArray *argv,
             if (abort_error != NULL) {
                 fe_error(ctx, abort_error);
             } else {
-                sprintf(msg, "%s: out of memory", func_name);
+                snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
                 fe_error(ctx, msg);
             }
             return NULL;
@@ -3868,7 +3868,7 @@ static char* build_windows_command_line(fe_Context *ctx, CStringArray *argv,
     if (!buf.data) {
         buf.data = copy_cstr("");
         if (!buf.data) {
-            sprintf(msg, "%s: out of memory", func_name);
+            snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
             fe_error(ctx, msg);
             return NULL;
         }
@@ -3899,7 +3899,7 @@ static char* build_windows_environment_block(fe_Context *ctx, CStringArray *env,
 
     block = malloc(total);
     if (!block) {
-        sprintf(msg, "%s: out of memory", func_name);
+        snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return NULL;
     }

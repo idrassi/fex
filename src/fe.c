@@ -54,6 +54,10 @@
 #define GCMARKBIT     ( 0x2 )
 #define GCSTACKSIZE   ( 1024 )
 
+/* --- Recursion depth defaults --- */
+#define FE_DEFAULT_MAX_EVAL_DEPTH  512
+#define FE_DEFAULT_MAX_READ_DEPTH  512
+
 /* --- GC constants --- */
 #define GC_GROWTH_FACTOR 2
 #define GC_INITIAL_DIVISOR 4
@@ -160,6 +164,10 @@ struct fe_Context {
   fe_InterruptFn interrupt_handler;
   void *interrupt_udata;
   int eval_depth;
+  int current_eval_depth;
+  int max_eval_depth;
+  int current_read_depth;
+  int max_read_depth;
   /* --- GC fields --- */
   int live_count;          /* Objects surviving last GC */
   int allocs_since_gc;     /* Objects allocated since last GC */
@@ -565,6 +573,23 @@ void fe_set_interrupt_handler(fe_Context *ctx, fe_InterruptFn fn,
     ? (check_interval_steps > 0 ? check_interval_steps : 1024)
     : 0;
   ctx->interrupt_countdown = ctx->interrupt_interval;
+}
+
+
+void fe_set_eval_depth_limit(fe_Context *ctx, int max_depth) {
+  ctx->max_eval_depth = max_depth;
+}
+
+int fe_get_eval_depth_limit(fe_Context *ctx) {
+  return ctx->max_eval_depth;
+}
+
+void fe_set_read_depth_limit(fe_Context *ctx, int max_depth) {
+  ctx->max_read_depth = max_depth;
+}
+
+int fe_get_read_depth_limit(fe_Context *ctx) {
+  return ctx->max_read_depth;
 }
 
 
@@ -1051,7 +1076,7 @@ static fe_Object* ensure_package_chain(fe_Context *ctx, char **segments, int cou
       fe_map_set(ctx, current, segment_sym, next);
     } else if (type(next) != FE_TMAP) {
       char error_buf[256];
-      sprintf(error_buf, "package segment '%s' is not a module/map", segments[i]);
+      snprintf(error_buf, sizeof(error_buf), "package segment '%s' is not a module/map", segments[i]);
       fe_error(ctx, error_buf);
     }
     current = next;
@@ -1372,6 +1397,8 @@ void fe_error(fe_Context *ctx, const char *msg) {
   /* reset context state */
   ctx->calllist = &nil;
   ctx->eval_depth = 0;
+  ctx->current_eval_depth = 0;
+  ctx->current_read_depth = 0;
   if (ctx->timeout_ms > 0) {
     ctx->timeout_countdown = TIMEOUT_CHECK_INTERVAL;
   }
@@ -1412,7 +1439,7 @@ static fe_Object* checktype(fe_Context *ctx, fe_Object *obj, int expected) {
   }
 
   if (actual_type != expected) {
-    sprintf(buf, "expected %s, got %s",
+    snprintf(buf, sizeof(buf), "expected %s, got %s",
             typenames[expected],
             FE_IS_FIXNUM(obj) ? "number" : typenames[actual_type]);
     fe_error(ctx, buf);
@@ -2303,9 +2330,9 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
 
     case FE_TNUMBER:
       if (FE_IS_FIXNUM(obj)) {
-          sprintf(buf, "%" PRIdMAX, (intmax_t)FE_UNBOX_FIXNUM(obj));
+          snprintf(buf, sizeof(buf), "%" PRIdMAX, (intmax_t)FE_UNBOX_FIXNUM(obj));
       } else {
-          sprintf(buf, "%.7g", number(obj));
+          snprintf(buf, sizeof(buf), "%.7g", number(obj));
       }
       writestr(ctx, fn, udata, buf, &poll_countdown);
       break;
@@ -2439,7 +2466,7 @@ void fe_write(fe_Context *ctx, fe_Object *obj, fe_WriteFn fn, void *udata, int q
     }
 
     default:
-      sprintf(buf, "[%s %p]", typenames[type(obj)], (void*) obj);
+      snprintf(buf, sizeof(buf), "[%s %p]", typenames[type(obj)], (void*) obj);
       writestr(ctx, fn, udata, buf, &poll_countdown);
       break;
   }
@@ -2662,6 +2689,10 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
       return &rparen;
 
     case '(':
+      if (ctx->max_read_depth > 0 && ctx->current_read_depth >= ctx->max_read_depth) {
+        fe_error(ctx, "read nesting depth limit exceeded");
+      }
+      ctx->current_read_depth++;
       res = &nil;
       tail = &res;
       gc = fe_savegc(ctx);
@@ -2683,11 +2714,17 @@ static fe_Object* read_(fe_Context *ctx, fe_ReadFn fn, void *udata) {
         fe_restoregc(ctx, gc);
         fe_pushgc(ctx, res);
       }
+      ctx->current_read_depth--;
       return res;
 
     case '\'':
+      if (ctx->max_read_depth > 0 && ctx->current_read_depth >= ctx->max_read_depth) {
+        fe_error(ctx, "read nesting depth limit exceeded");
+      }
+      ctx->current_read_depth++;
       v = fe_read(ctx, fn, udata);
       if (!v) { fe_error(ctx, "stray '''"); }
+      ctx->current_read_depth--;
       return fe_cons(ctx, fe_symbol(ctx, "quote"), fe_cons(ctx, v, &nil));
 
     case '"':
@@ -2855,6 +2892,21 @@ static fe_Object* argstoenv(fe_Context *ctx, fe_Object *prm, fe_Object *arg, fe_
 }
 
 
+static int path_contains_dotdot(const char *path) {
+  const char *p = path;
+  while (*p) {
+    /* Match ".." at start, after a separator, or at end */
+    if (p[0] == '.' && p[1] == '.') {
+      /* Check that ".." is bounded by separators or string boundaries */
+      int at_start = (p == path) || is_path_separator(p[-1]);
+      int at_end = (p[2] == '\0') || is_path_separator(p[2]);
+      if (at_start && at_end) return 1;
+    }
+    p++;
+  }
+  return 0;
+}
+
 static char* import_spec_to_cstring(fe_Context *ctx, fe_Object *spec_obj) {
   size_t len;
   char *module_spec;
@@ -2877,6 +2929,10 @@ static char* import_spec_to_cstring(fe_Context *ctx, fe_Object *spec_obj) {
     tracked_free(ctx, module_spec);
     fe_error(ctx, "import: strings containing NUL bytes are not allowed");
   }
+  if (path_contains_dotdot(module_spec)) {
+    tracked_free(ctx, module_spec);
+    fe_error(ctx, "import: '..' path components are not allowed in import specifiers");
+  }
   return module_spec;
 }
 
@@ -2886,7 +2942,7 @@ static void append_module_search_error(char *error_buf, size_t error_buf_size,
   size_t error_len;
   size_t remaining;
 
-  sprintf(error_buf, "could not resolve module '%s'", module_spec);
+  snprintf(error_buf, error_buf_size, "could not resolve module '%s'", module_spec);
   if (!searched_paths || !*searched_paths) return;
 
   error_len = strlen(error_buf);
@@ -3036,7 +3092,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, char *module_spec,
     tracked_free(ctx, module_path);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     fe_restoregc(ctx, gc_save);
-    sprintf(error_buf, "cyclic import detected for module '%s'", module_spec);
+    snprintf(error_buf, sizeof(error_buf), "cyclic import detected for module '%s'", module_spec);
     tracked_free(ctx, module_spec);
     fe_error(ctx, error_buf);
   }
@@ -3097,7 +3153,7 @@ static fe_Object* import_module_spec(fe_Context *ctx, char *module_spec,
     tracked_free(ctx, module_path);
     string_array_clear(ctx, &segments, &segment_count, &segment_capacity);
     fe_restoregc(ctx, gc_save);
-    sprintf(error_buf, "module '%s' did not produce a module value", module_spec);
+    snprintf(error_buf, sizeof(error_buf), "module '%s' did not produce a module value", module_spec);
     tracked_free(ctx, module_spec);
     fe_error(ctx, error_buf);
   }
@@ -3133,8 +3189,13 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
   int n, gc;
 
   check_eval_budget(ctx);
-  if (type(obj) == FE_TSYMBOL) { return cdr(getbound(ctx, obj, env)); }
-  if (type(obj) != FE_TPAIR) { return obj; }
+  if (ctx->max_eval_depth > 0 && ctx->current_eval_depth >= ctx->max_eval_depth) {
+    fe_error(ctx, "eval recursion depth limit exceeded");
+  }
+  ctx->current_eval_depth++;
+
+  if (type(obj) == FE_TSYMBOL) { ctx->current_eval_depth--; return cdr(getbound(ctx, obj, env)); }
+  if (type(obj) != FE_TPAIR) { ctx->current_eval_depth--; return obj; }
 
   /* Call stack frames are synthetic pair cells that live on the C stack. */
   tag(&cl) = 0;
@@ -3515,6 +3576,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
       *obj = *dolist(ctx, body, frame);
       fe_restoregc(ctx, gc);
       ctx->calllist = cdr(&cl);
+      ctx->current_eval_depth--;
       return eval(ctx, obj, env, NULL);
     }
 
@@ -3525,6 +3587,7 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
   fe_restoregc(ctx, gc);
   fe_pushgc(ctx, res);
   ctx->calllist = cdr(&cl);
+  ctx->current_eval_depth--;
   return res;
 }
 
@@ -3600,6 +3663,12 @@ fe_Context* fe_open(void *ptr, size_t size) {
   ctx->byte_threshold = (size_t)ctx->object_count * sizeof(fe_Object) / 3;
   ctx->gc_runs = 0;
   ctx->object_allocations_total = 0;
+
+  /* init recursion depth limits */
+  ctx->current_eval_depth = 0;
+  ctx->max_eval_depth = FE_DEFAULT_MAX_EVAL_DEPTH;
+  ctx->current_read_depth = 0;
+  ctx->max_read_depth = FE_DEFAULT_MAX_READ_DEPTH;
 
   /* init lists */
   ctx->calllist = &nil;

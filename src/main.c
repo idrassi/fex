@@ -283,6 +283,8 @@ static void print_usage(const char *program_name) {
   fprintf(stderr, "  --max-steps N  Abort evaluation after approximately N eval steps (0 disables)\n");
   fprintf(stderr, "  --timeout-ms N  Abort evaluation after roughly N milliseconds (0 disables)\n");
   fprintf(stderr, "  --max-memory N  Abort when tracked context memory exceeds N bytes (0 disables)\n");
+  fprintf(stderr, "  --max-eval-depth N  Limit eval recursion depth (0 disables, default: 512)\n");
+  fprintf(stderr, "  --max-read-depth N  Limit read nesting depth (0 disables, default: 512)\n");
   fprintf(stderr, "  --stats       Print runtime stats to stderr after non-REPL execution\n");
   fprintf(stderr, "  --memory-pool-size SIZE  Set memory pool size in MB (default: 5MB)\n");
   fprintf(stderr, "  --version, -V  Show version information\n");
@@ -303,6 +305,8 @@ int main(int argc, char **argv) {
   size_t max_steps = 0;
   size_t max_memory = 0;
   uint64_t timeout_ms = 0;
+  int max_eval_depth = -1;  /* -1 = use default */
+  int max_read_depth = -1;
   const char *filename = NULL;
   char *eval_source = NULL;
   size_t eval_source_len = 0;
@@ -443,6 +447,46 @@ int main(int argc, char **argv) {
         return 64;
       }
       max_memory = (size_t)parsed_max_memory;
+    } else if (!end_of_options && strcmp(argv[i], "--max-eval-depth") == 0) {
+      char *endptr;
+      long parsed_depth;
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --max-eval-depth requires an integer value\n");
+        print_usage(argv[0]);
+        free(eval_source);
+        free(module_paths);
+        return 64;
+      }
+      i++;
+      parsed_depth = strtol(argv[i], &endptr, 10);
+      if (*endptr != '\0' || parsed_depth < 0 || parsed_depth > INT_MAX) {
+        fprintf(stderr, "Error: Invalid eval depth limit '%s'. Must be a non-negative integer.\n", argv[i]);
+        print_usage(argv[0]);
+        free(eval_source);
+        free(module_paths);
+        return 64;
+      }
+      max_eval_depth = (int)parsed_depth;
+    } else if (!end_of_options && strcmp(argv[i], "--max-read-depth") == 0) {
+      char *endptr;
+      long parsed_depth;
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: --max-read-depth requires an integer value\n");
+        print_usage(argv[0]);
+        free(eval_source);
+        free(module_paths);
+        return 64;
+      }
+      i++;
+      parsed_depth = strtol(argv[i], &endptr, 10);
+      if (*endptr != '\0' || parsed_depth < 0 || parsed_depth > INT_MAX) {
+        fprintf(stderr, "Error: Invalid read depth limit '%s'. Must be a non-negative integer.\n", argv[i]);
+        print_usage(argv[0]);
+        free(eval_source);
+        free(module_paths);
+        return 64;
+      }
+      max_read_depth = (int)parsed_depth;
     } else if (!end_of_options && strcmp(argv[i], "--stats") == 0) {
       show_stats = 1;
     } else if (!end_of_options && strcmp(argv[i], "--memory-pool-size") == 0) {
@@ -530,6 +574,8 @@ int main(int argc, char **argv) {
   fe_set_step_limit(ctx, max_steps);
   fe_set_memory_limit(ctx, max_memory);
   fe_set_timeout_ms(ctx, timeout_ms);
+  if (max_eval_depth >= 0) fe_set_eval_depth_limit(ctx, max_eval_depth);
+  if (max_read_depth >= 0) fe_set_read_depth_limit(ctx, max_read_depth);
 
   for (i = 0; i < module_path_count; i++) {
     if (!fex_add_import_path(ctx, module_paths[i])) {

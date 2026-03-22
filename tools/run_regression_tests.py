@@ -663,6 +663,24 @@ CASES = [
             "I/O error: could not open input file",
         ],
     },
+    {
+        "name": "import path traversal rejected",
+        "source": 'import "../../etc/passwd";\n',
+        "args": ["--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: import: '..' path components are not allowed in import specifiers",
+        ],
+    },
+    {
+        "name": "eval depth limit",
+        "source": "fn f(n) { return f(n + 1); }\nf(0);\n",
+        "args": ["--max-eval-depth", "64", "--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: eval recursion depth limit exceeded",
+        ],
+    },
 ]
 
 
