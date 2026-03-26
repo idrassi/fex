@@ -21,20 +21,64 @@ jobs:
           - os: ubuntu-latest
             package_generator: TGZ
             artifact_name: fex-linux
+            cmake_generator: Ninja
+            cmake_generator_args: ""
+            cmake_build_type_arg: -DCMAKE_BUILD_TYPE=Release
+            build_config_args: ""
+            test_config_args: ""
+            install_config_args: ""
+            package_config_args: ""
+            smoke_cmake_generator: Ninja
+            smoke_cmake_generator_args: ""
+            smoke_cmake_build_type_arg: -DCMAKE_BUILD_TYPE=Release
+            smoke_build_config_args: ""
             configure_args: ""
           - os: windows-latest
             toolchain: msvc
             package_generator: ZIP
             artifact_name: fex-windows-msvc
+            cmake_generator: "Visual Studio 17 2022"
+            cmake_generator_args: -A x64
+            cmake_build_type_arg: ""
+            build_config_args: --config Release
+            test_config_args: -C Release
+            install_config_args: --config Release
+            package_config_args: -C Release
+            smoke_cmake_generator: "Visual Studio 17 2022"
+            smoke_cmake_generator_args: -A x64
+            smoke_cmake_build_type_arg: ""
+            smoke_build_config_args: --config Release
             configure_args: ""
           - os: macos-latest
             package_generator: TGZ
             artifact_name: fex-macos
+            cmake_generator: Ninja
+            cmake_generator_args: ""
+            cmake_build_type_arg: -DCMAKE_BUILD_TYPE=Release
+            build_config_args: ""
+            test_config_args: ""
+            install_config_args: ""
+            package_config_args: ""
+            smoke_cmake_generator: Ninja
+            smoke_cmake_generator_args: ""
+            smoke_cmake_build_type_arg: -DCMAKE_BUILD_TYPE=Release
+            smoke_build_config_args: ""
             configure_args: ""
           - os: windows-latest
             toolchain: mingw
             package_generator: ZIP
             artifact_name: fex-windows-mingw
+            cmake_generator: Ninja
+            cmake_generator_args: ""
+            cmake_build_type_arg: -DCMAKE_BUILD_TYPE=Release
+            build_config_args: ""
+            test_config_args: ""
+            install_config_args: ""
+            package_config_args: ""
+            smoke_cmake_generator: Ninja
+            smoke_cmake_generator_args: ""
+            smoke_cmake_build_type_arg: -DCMAKE_BUILD_TYPE=Release
+            smoke_build_config_args: ""
             configure_args: "-DCMAKE_C_COMPILER=C:/mingw64/bin/gcc.exe"
 
     steps:
@@ -44,32 +88,28 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Set up MSVC toolchain
-        if: matrix.toolchain == 'msvc'
-        uses: ilammy/msvc-dev-cmd@v1
-
       - name: Configure
-        run: cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DFEX_WARNINGS_AS_ERRORS=ON ${{ matrix.configure_args }}
+        run: cmake -S . -B build-release -G "${{ matrix.cmake_generator }}" ${{ matrix.cmake_generator_args }} ${{ matrix.cmake_build_type_arg }} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DFEX_WARNINGS_AS_ERRORS=ON ${{ matrix.configure_args }}
 
       - name: Build
-        run: cmake --build build-release
+        run: cmake --build build-release ${{ matrix.build_config_args }}
 
       - name: Test
-        run: ctest --test-dir build-release --output-on-failure
+        run: ctest --test-dir build-release --output-on-failure ${{ matrix.test_config_args }}
 
       - name: Install
-        run: cmake --install build-release --prefix install-root
+        run: cmake --install build-release --prefix install-root ${{ matrix.install_config_args }}
 
       - name: Verify install layout
         run: python tools/check_install_layout.py --prefix install-root
 
       - name: CMake package smoke test
         run: |
-          cmake -S tools/install_smoke -B install-smoke -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-root"
-          cmake --build install-smoke
+          cmake -S tools/install_smoke -B install-smoke -G "${{ matrix.smoke_cmake_generator }}" ${{ matrix.smoke_cmake_generator_args }} ${{ matrix.smoke_cmake_build_type_arg }} -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-root"
+          cmake --build install-smoke ${{ matrix.smoke_build_config_args }}
 
       - name: Package
-        run: cpack --config build-release/CPackConfig.cmake -G ${{ matrix.package_generator }} -B dist
+        run: cpack --config build-release/CPackConfig.cmake ${{ matrix.package_config_args }} -G ${{ matrix.package_generator }} -B dist
 
       - name: Verify package output
         run: python tools/check_install_layout.py --prefix install-root --dist dist
