@@ -27,6 +27,7 @@
 #include <limits.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #include <io.h>
 #define FEX_ISATTY _isatty
 #define FEX_FILENO _fileno
@@ -71,6 +72,44 @@ static void free_utf8_argv(int argc, char **argv) {
     free(argv[i]);
   }
   free(argv);
+}
+
+static int fex_main_utf8(int argc, char **argv);
+
+static int windows_main_utf8_from_command_line(void) {
+  LPWSTR *wargv;
+  char **argv;
+  int argc = 0;
+  int i;
+  int result;
+
+  wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  if (!wargv) {
+    fprintf(stderr, "Failed to read Unicode command-line arguments.\n");
+    return 1;
+  }
+
+  argv = (char**)calloc((size_t)((argc > 0) ? argc : 1), sizeof(*argv));
+  if (!argv) {
+    fprintf(stderr, "Failed to allocate UTF-8 argv storage.\n");
+    LocalFree(wargv);
+    return 1;
+  }
+
+  for (i = 0; i < argc; i++) {
+    argv[i] = utf8_from_wide_arg(wargv[i]);
+    if (!argv[i]) {
+      fprintf(stderr, "Failed to convert command-line arguments to UTF-8.\n");
+      LocalFree(wargv);
+      free_utf8_argv(argc, argv);
+      return 1;
+    }
+  }
+
+  LocalFree(wargv);
+  result = fex_main_utf8(argc, argv);
+  free_utf8_argv(argc, argv);
+  return result;
 }
 #endif
 
@@ -788,29 +827,10 @@ static int fex_main_utf8(int argc, char **argv) {
 }
 
 #ifdef _WIN32
-int wmain(int argc, wchar_t **wargv) {
-  char **argv;
-  int i;
-  int result;
-
-  argv = (char**)calloc((size_t)((argc > 0) ? argc : 1), sizeof(*argv));
-  if (!argv) {
-    fprintf(stderr, "Failed to allocate UTF-8 argv storage.\n");
-    return 1;
-  }
-
-  for (i = 0; i < argc; i++) {
-    argv[i] = utf8_from_wide_arg(wargv[i]);
-    if (!argv[i]) {
-      fprintf(stderr, "Failed to convert command-line arguments to UTF-8.\n");
-      free_utf8_argv(argc, argv);
-      return 1;
-    }
-  }
-
-  result = fex_main_utf8(argc, argv);
-  free_utf8_argv(argc, argv);
-  return result;
+int main(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  return windows_main_utf8_from_command_line();
 }
 #else
 int main(int argc, char **argv) {

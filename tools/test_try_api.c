@@ -62,6 +62,11 @@ typedef struct {
 } StringReader;
 
 static ReadTryScope *g_read_try_scope = NULL;
+static ReadTryScope g_test_read_try_scope;
+static int g_test_interrupt_calls = 0;
+
+static char* make_large_read_list_source(size_t item_count);
+static char* make_large_string_literal_source(size_t literal_len);
 
 static void read_try_error_handler(fe_Context *ctx, const char *err, fe_Object *cl) {
     (void)ctx;
@@ -127,6 +132,203 @@ static fe_Object* make_string_key_map(fe_Context *ctx, int count) {
 
     fe_restoregc(ctx, gc_save);
     return map;
+}
+
+static const char* run_mapkeys_interrupt_test(void) {
+    void *map_memory = malloc(TEST_MEM_SIZE);
+    fe_Context *map_ctx;
+    fe_Object *bigmap;
+    fe_ErrorFn previous_error;
+    int gc_save;
+
+    if (!map_memory) {
+        return "failed to allocate mapkeys interrupt context";
+    }
+
+    map_ctx = fe_open(map_memory, TEST_MEM_SIZE);
+    if (!map_ctx) {
+        free(map_memory);
+        return "failed to open mapkeys interrupt context";
+    }
+
+    fex_init_with_config(map_ctx, FEX_CONFIG_ENABLE_SPANS);
+    bigmap = make_string_key_map(map_ctx, 4096);
+    gc_save = fe_savegc(map_ctx);
+    previous_error = fe_handlers(map_ctx)->error;
+    fe_handlers(map_ctx)->error = read_try_error_handler;
+    g_read_try_scope = &g_test_read_try_scope;
+    g_test_read_try_scope.message[0] = '\0';
+    g_test_interrupt_calls = 0;
+    fe_set_interrupt_handler(map_ctx, interrupt_once, &g_test_interrupt_calls, 1);
+
+    if (setjmp(g_test_read_try_scope.env) == 0) {
+        (void)fe_map_keys(map_ctx, bigmap);
+        g_read_try_scope = NULL;
+        fe_handlers(map_ctx)->error = previous_error;
+        fe_set_interrupt_handler(map_ctx, NULL, NULL, 0);
+        fe_restoregc(map_ctx, gc_save);
+        fe_close(map_ctx);
+        free(map_memory);
+        return "expected fe_map_keys to honor interrupt polling";
+    }
+
+    g_read_try_scope = NULL;
+    fe_restoregc(map_ctx, gc_save);
+    fe_handlers(map_ctx)->error = previous_error;
+    fe_set_interrupt_handler(map_ctx, NULL, NULL, 0);
+    if (strstr(g_test_read_try_scope.message, "execution interrupted") == NULL) {
+        fe_close(map_ctx);
+        free(map_memory);
+        return "expected fe_map_keys interrupt message";
+    }
+    if (g_test_interrupt_calls < 1) {
+        fe_close(map_ctx);
+        free(map_memory);
+        return "expected fe_map_keys interrupt handler to run";
+    }
+
+    fe_close(map_ctx);
+    free(map_memory);
+    return NULL;
+}
+
+static const char* run_symbol_interrupt_test(fe_Context *ctx) {
+    fe_ErrorFn previous_error = fe_handlers(ctx)->error;
+    int gc_save = fe_savegc(ctx);
+
+    fe_handlers(ctx)->error = read_try_error_handler;
+    g_read_try_scope = &g_test_read_try_scope;
+    g_test_read_try_scope.message[0] = '\0';
+    g_test_interrupt_calls = 0;
+    fe_set_interrupt_handler(ctx, interrupt_once, &g_test_interrupt_calls, 1);
+
+    if (setjmp(g_test_read_try_scope.env) == 0) {
+        (void)fe_symbol(ctx, "sym_interrupt_target");
+        g_read_try_scope = NULL;
+        fe_handlers(ctx)->error = previous_error;
+        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+        fe_restoregc(ctx, gc_save);
+        return "expected fe_symbol to honor interrupt polling";
+    }
+
+    g_read_try_scope = NULL;
+    fe_restoregc(ctx, gc_save);
+    fe_handlers(ctx)->error = previous_error;
+    fe_set_interrupt_handler(ctx, NULL, NULL, 0);
+    if (strstr(g_test_read_try_scope.message, "execution interrupted") == NULL) {
+        return "expected fe_symbol interrupt message";
+    }
+    if (g_test_interrupt_calls < 1) {
+        return "expected fe_symbol interrupt handler to run";
+    }
+    return NULL;
+}
+
+static const char* run_read_interrupt_test(void) {
+    void *read_memory = malloc(TEST_MEM_SIZE);
+    fe_Context *read_ctx;
+    char *read_source = make_large_read_list_source(4096);
+    StringReader reader;
+    fe_ErrorFn previous_error;
+    int gc_save;
+
+    if (!read_memory || !read_source) {
+        free(read_source);
+        free(read_memory);
+        return "failed to allocate fe_read interrupt fixtures";
+    }
+
+    read_ctx = fe_open(read_memory, TEST_MEM_SIZE);
+    if (!read_ctx) {
+        free(read_source);
+        free(read_memory);
+        return "failed to open fe_read interrupt context";
+    }
+
+    fex_init_with_config(read_ctx, FEX_CONFIG_ENABLE_SPANS);
+    gc_save = fe_savegc(read_ctx);
+    g_test_interrupt_calls = 0;
+    fe_set_interrupt_handler(read_ctx, interrupt_once, &g_test_interrupt_calls, 1);
+    reader.text = read_source;
+    reader.offset = 0;
+    previous_error = fe_handlers(read_ctx)->error;
+    fe_handlers(read_ctx)->error = read_try_error_handler;
+    g_read_try_scope = &g_test_read_try_scope;
+    g_test_read_try_scope.message[0] = '\0';
+
+    if (setjmp(g_test_read_try_scope.env) == 0) {
+        (void)fe_read(read_ctx, read_from_string, &reader);
+        g_read_try_scope = NULL;
+        fe_handlers(read_ctx)->error = previous_error;
+        fe_set_interrupt_handler(read_ctx, NULL, NULL, 0);
+        fe_restoregc(read_ctx, gc_save);
+        fe_close(read_ctx);
+        free(read_source);
+        free(read_memory);
+        return "expected fe_read to honor interrupt polling";
+    }
+
+    g_read_try_scope = NULL;
+    fe_restoregc(read_ctx, gc_save);
+    fe_handlers(read_ctx)->error = previous_error;
+    fe_set_interrupt_handler(read_ctx, NULL, NULL, 0);
+    if (strstr(g_test_read_try_scope.message, "execution interrupted") == NULL) {
+        fe_close(read_ctx);
+        free(read_source);
+        free(read_memory);
+        return "expected fe_read interrupt message";
+    }
+    if (g_test_interrupt_calls < 1) {
+        fe_close(read_ctx);
+        free(read_source);
+        free(read_memory);
+        return "expected fe_read interrupt handler to run";
+    }
+
+    fe_close(read_ctx);
+    free(read_source);
+    free(read_memory);
+    return NULL;
+}
+
+static const char* run_direct_large_literal_limit_test(fe_Context *span_ctx) {
+    char *large_literal_source = make_large_string_literal_source(4096);
+    size_t baseline_used = fe_get_memory_used(span_ctx);
+    fe_ErrorFn previous_error = fe_handlers(span_ctx)->error;
+    int gc_save = fe_savegc(span_ctx);
+
+    if (!large_literal_source) {
+        return "failed to allocate direct large literal source";
+    }
+
+    fe_handlers(span_ctx)->error = read_try_error_handler;
+    g_read_try_scope = &g_test_read_try_scope;
+    g_test_read_try_scope.message[0] = '\0';
+    fe_set_memory_limit(span_ctx, baseline_used + 512);
+
+    if (setjmp(g_test_read_try_scope.env) == 0) {
+        (void)fex_compile(span_ctx, large_literal_source);
+        g_read_try_scope = NULL;
+        fe_handlers(span_ctx)->error = previous_error;
+        fe_set_memory_limit(span_ctx, 0);
+        fe_restoregc(span_ctx, gc_save);
+        free(large_literal_source);
+        return "expected direct compile failure to escape through the error handler";
+    }
+
+    g_read_try_scope = NULL;
+    fe_restoregc(span_ctx, gc_save);
+    fe_handlers(span_ctx)->error = previous_error;
+    fe_set_memory_limit(span_ctx, 0);
+    free(large_literal_source);
+    if (strstr(g_test_read_try_scope.message, "memory limit exceeded") == NULL) {
+        return "expected direct compile memory limit message";
+    }
+    if (fe_get_memory_used(span_ctx) != baseline_used) {
+        return "expected direct compile memory limit failures to restore tracked memory";
+    }
+
+    return NULL;
 }
 
 static char* make_large_parsejson_source(size_t item_count) {
@@ -848,7 +1050,6 @@ int main(void) {
         fe_close(import_limit_ctx);
         free(import_limit_memory);
     }
-
     {
         void *limit_memory = malloc(TEST_MEM_SIZE);
         fe_Context *limit_ctx;
@@ -892,7 +1093,6 @@ int main(void) {
         fe_close(limit_ctx);
         free(limit_memory);
     }
-
     status = fex_try_do_file(ctx, "missing-file-does-not-exist.fex", &result, &error);
     if (status != FEX_STATUS_IO_ERROR) {
         fe_close(ctx);
@@ -1051,7 +1251,6 @@ int main(void) {
             return fail("expected tracked memory usage to stay within the configured limit");
         }
     }
-
     span_memory = malloc(TEST_MEM_SIZE);
     if (!span_memory) {
         fe_close(ctx);
@@ -1089,7 +1288,6 @@ int main(void) {
     }
     fe_close(span_ctx);
     free(span_memory);
-
     span_memory = malloc(TEST_MEM_SIZE);
     if (!span_memory) {
         fe_close(ctx);
@@ -1166,7 +1364,6 @@ int main(void) {
         free(memory);
         return fail("unexpected selective JSON helper result");
     }
-
     {
         char *parsejson_source = make_large_parsejson_source(100);
         int interrupt_calls = 0;
@@ -1193,105 +1390,22 @@ int main(void) {
             return fail("expected parsejson interrupt handler to run");
         }
     }
-
     {
-        void *map_memory = malloc(TEST_MEM_SIZE);
-        fe_Context *map_ctx;
-        fe_Object *bigmap;
-        fe_ErrorFn previous_error;
-        ReadTryScope direct_try;
-        int interrupt_calls = 0;
-
-        if (!map_memory) {
+        const char *mapkeys_error = run_mapkeys_interrupt_test();
+        if (mapkeys_error != NULL) {
             fe_close(ctx);
             free(memory);
-            return fail("failed to allocate mapkeys interrupt context");
-        }
-
-        map_ctx = fe_open(map_memory, TEST_MEM_SIZE);
-        if (!map_ctx) {
-            free(map_memory);
-            fe_close(ctx);
-            free(memory);
-            return fail("failed to open mapkeys interrupt context");
-        }
-
-        fex_init_with_config(map_ctx, FEX_CONFIG_ENABLE_SPANS);
-        bigmap = make_string_key_map(map_ctx, 4096);
-        previous_error = fe_handlers(map_ctx)->error;
-        fe_handlers(map_ctx)->error = read_try_error_handler;
-        g_read_try_scope = &direct_try;
-        direct_try.message[0] = '\0';
-        fe_set_interrupt_handler(map_ctx, interrupt_once, &interrupt_calls, 1);
-
-        if (setjmp(direct_try.env) == 0) {
-            (void)fe_map_keys(map_ctx, bigmap);
-            g_read_try_scope = NULL;
-            fe_handlers(map_ctx)->error = previous_error;
-            fe_set_interrupt_handler(map_ctx, NULL, NULL, 0);
-            fe_close(map_ctx);
-            free(map_memory);
-            fe_close(ctx);
-            free(memory);
-            return fail("expected fe_map_keys to honor interrupt polling");
-        }
-
-        g_read_try_scope = NULL;
-        fe_handlers(map_ctx)->error = previous_error;
-        fe_set_interrupt_handler(map_ctx, NULL, NULL, 0);
-        if (strstr(direct_try.message, "execution interrupted") == NULL) {
-            fe_close(map_ctx);
-            free(map_memory);
-            fe_close(ctx);
-            free(memory);
-            return fail("expected fe_map_keys interrupt message");
-        }
-        if (interrupt_calls < 1) {
-            fe_close(map_ctx);
-            free(map_memory);
-            fe_close(ctx);
-            free(memory);
-            return fail("expected fe_map_keys interrupt handler to run");
-        }
-        fe_close(map_ctx);
-        free(map_memory);
-    }
-
-    {
-        fe_ErrorFn previous_error = fe_handlers(ctx)->error;
-        ReadTryScope direct_try;
-        int interrupt_calls = 0;
-
-        fe_handlers(ctx)->error = read_try_error_handler;
-        g_read_try_scope = &direct_try;
-        direct_try.message[0] = '\0';
-        fe_set_interrupt_handler(ctx, interrupt_once, &interrupt_calls, 1);
-
-        if (setjmp(direct_try.env) == 0) {
-            (void)fe_symbol(ctx, "sym_interrupt_target");
-            g_read_try_scope = NULL;
-            fe_handlers(ctx)->error = previous_error;
-            fe_set_interrupt_handler(ctx, NULL, NULL, 0);
-            fe_close(ctx);
-            free(memory);
-            return fail("expected fe_symbol to honor interrupt polling");
-        }
-
-        g_read_try_scope = NULL;
-        fe_handlers(ctx)->error = previous_error;
-        fe_set_interrupt_handler(ctx, NULL, NULL, 0);
-        if (strstr(direct_try.message, "execution interrupted") == NULL) {
-            fe_close(ctx);
-            free(memory);
-            return fail("expected fe_symbol interrupt message");
-        }
-        if (interrupt_calls < 1) {
-            fe_close(ctx);
-            free(memory);
-            return fail("expected fe_symbol interrupt handler to run");
+            return fail(mapkeys_error);
         }
     }
-
+    {
+        const char *symbol_error = run_symbol_interrupt_test(ctx);
+        if (symbol_error != NULL) {
+            fe_close(ctx);
+            free(memory);
+            return fail(symbol_error);
+        }
+    }
     {
         char *large_split = make_large_split_string(512);
         fe_Object *bigsplit;
@@ -1374,77 +1488,13 @@ int main(void) {
     }
 
     {
-        void *read_memory = malloc(TEST_MEM_SIZE);
-        fe_Context *read_ctx;
-        char *read_source = make_large_read_list_source(4096);
-        StringReader reader;
-        ReadTryScope read_try;
-        fe_ErrorFn previous_error;
-        int interrupt_calls = 0;
-
-        if (!read_memory || !read_source) {
-            free(read_source);
-            free(read_memory);
+        const char *read_error = run_read_interrupt_test();
+        if (read_error != NULL) {
             fe_close(ctx);
             free(memory);
-            return fail("failed to allocate fe_read interrupt fixtures");
+            return fail(read_error);
         }
-
-        read_ctx = fe_open(read_memory, TEST_MEM_SIZE);
-        if (!read_ctx) {
-            free(read_source);
-            free(read_memory);
-            fe_close(ctx);
-            free(memory);
-            return fail("failed to open fe_read interrupt context");
-        }
-
-        fex_init_with_config(read_ctx, FEX_CONFIG_ENABLE_SPANS);
-        fe_set_interrupt_handler(read_ctx, interrupt_once, &interrupt_calls, 1);
-        reader.text = read_source;
-        reader.offset = 0;
-        previous_error = fe_handlers(read_ctx)->error;
-        fe_handlers(read_ctx)->error = read_try_error_handler;
-        g_read_try_scope = &read_try;
-        read_try.message[0] = '\0';
-
-        if (setjmp(read_try.env) == 0) {
-            (void)fe_read(read_ctx, read_from_string, &reader);
-            g_read_try_scope = NULL;
-            fe_handlers(read_ctx)->error = previous_error;
-            fe_set_interrupt_handler(read_ctx, NULL, NULL, 0);
-            fe_close(read_ctx);
-            free(read_source);
-            free(read_memory);
-            fe_close(ctx);
-            free(memory);
-            return fail("expected fe_read to honor interrupt polling");
-        }
-
-        g_read_try_scope = NULL;
-        fe_handlers(read_ctx)->error = previous_error;
-        fe_set_interrupt_handler(read_ctx, NULL, NULL, 0);
-        if (strstr(read_try.message, "execution interrupted") == NULL) {
-            fe_close(read_ctx);
-            free(read_source);
-            free(read_memory);
-            fe_close(ctx);
-            free(memory);
-            return fail("expected fe_read interrupt message");
-        }
-        if (interrupt_calls < 1) {
-            fe_close(read_ctx);
-            free(read_source);
-            free(read_memory);
-            fe_close(ctx);
-            free(memory);
-            return fail("expected fe_read interrupt handler to run");
-        }
-        fe_close(read_ctx);
-        free(read_source);
-        free(read_memory);
     }
-
     status = fex_try_do_string(ctx, "pathjoin(\"build\", \"fex\");", &result, &error);
     if (status != FEX_STATUS_RUNTIME_ERROR || strstr(error.message, "tried to call non-callable value") == NULL) {
         fe_close(ctx);
@@ -1546,7 +1596,6 @@ int main(void) {
         free(io_limit_memory);
         remove(io_limit_path);
     }
-
     status = fex_try_do_string(ctx, "writefile(\"bad\\0path.txt\", \"x\");", &result, &error);
     if (status != FEX_STATUS_RUNTIME_ERROR ||
         strstr(error.message, "writefile: strings containing NUL bytes are not allowed") == NULL) {
@@ -1730,54 +1779,13 @@ int main(void) {
     }
     fex_init_with_config(span_ctx, FEX_CONFIG_ENABLE_SPANS);
     {
-        char *large_literal_source = make_large_string_literal_source(4096);
-        size_t baseline_used = fe_get_memory_used(span_ctx);
-        fe_ErrorFn previous_error = fe_handlers(span_ctx)->error;
-        ReadTryScope direct_try;
-
-        if (!large_literal_source) {
+        const char *direct_compile_error = run_direct_large_literal_limit_test(span_ctx);
+        if (direct_compile_error != NULL) {
             fe_close(span_ctx);
             fe_close(ctx);
             free(memory);
             free(span_memory);
-            return fail("failed to allocate direct large literal source");
-        }
-
-        fe_handlers(span_ctx)->error = read_try_error_handler;
-        g_read_try_scope = &direct_try;
-        direct_try.message[0] = '\0';
-        fe_set_memory_limit(span_ctx, baseline_used + 512);
-
-        if (setjmp(direct_try.env) == 0) {
-            (void)fex_compile(span_ctx, large_literal_source);
-            g_read_try_scope = NULL;
-            fe_handlers(span_ctx)->error = previous_error;
-            fe_set_memory_limit(span_ctx, 0);
-            free(large_literal_source);
-            fe_close(span_ctx);
-            fe_close(ctx);
-            free(memory);
-            free(span_memory);
-            return fail("expected direct compile failure to escape through the error handler");
-        }
-
-        g_read_try_scope = NULL;
-        fe_handlers(span_ctx)->error = previous_error;
-        fe_set_memory_limit(span_ctx, 0);
-        free(large_literal_source);
-        if (strstr(direct_try.message, "memory limit exceeded") == NULL) {
-            fe_close(span_ctx);
-            fe_close(ctx);
-            free(memory);
-            free(span_memory);
-            return fail("expected direct compile memory limit message");
-        }
-        if (fe_get_memory_used(span_ctx) != baseline_used) {
-            fe_close(span_ctx);
-            fe_close(ctx);
-            free(memory);
-            free(span_memory);
-            return fail("expected direct compile temp allocations to be cleaned after error escape");
+            return fail(direct_compile_error);
         }
     }
     fe_close(span_ctx);
@@ -1882,7 +1890,6 @@ int main(void) {
             return fail("expected listdir interrupt handler to run");
         }
     }
-
     fex_init_with_builtins(ctx, FEX_CONFIG_ENABLE_SPANS, FEX_BUILTINS_SYSTEM);
     status = fex_try_do_string(
         ctx,
@@ -2007,7 +2014,6 @@ int main(void) {
             return fail("expected runprocess stderr to reflect env and cwd overrides");
         }
     }
-
     status = fex_try_do_string(
         ctx,
         "let proc = runprocess(\"" FEX_TEST_PYTHON_EXECUTABLE "\", [\"-c\", \"import sys; sys.stdout.write('inherit-out\\\\n'); sys.stderr.write('discard-err\\\\n')\"], "

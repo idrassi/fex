@@ -2140,9 +2140,13 @@ int fe_map_count(fe_Context *ctx, fe_Object *map_obj) {
 fe_Object* fe_map_keys(fe_Context *ctx, fe_Object *map_obj) {
   fe_Map *map;
   fe_Object *result = &nil;
+  int gc_save;
   int i;
   size_t poll_countdown = FE_IO_ABORT_CHECK_INTERVAL;
   checktype(ctx, map_obj, FE_TMAP);
+  gc_save = fe_savegc(ctx);
+  fe_pushgc(ctx, map_obj);
+  fe_pushgc(ctx, result);
   map = mapdata(map_obj);
   for (i = map->capacity - 1; i >= 0; i--) {
     const char *abort_msg = poll_io_abort(ctx, &poll_countdown);
@@ -2150,9 +2154,13 @@ fe_Object* fe_map_keys(fe_Context *ctx, fe_Object *map_obj) {
       fe_error(ctx, abort_msg);
     }
     if (map->states[i] == MAP_USED) {
+      fe_restoregc(ctx, gc_save);
+      fe_pushgc(ctx, map_obj);
+      fe_pushgc(ctx, result);
       result = fe_cons(ctx, map->keys[i], result);
     }
   }
+  fe_restoregc(ctx, gc_save);
   return result;
 }
 
