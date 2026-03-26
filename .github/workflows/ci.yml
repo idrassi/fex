@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build-and-test:
     runs-on: ${{ matrix.os }}
@@ -31,9 +34,9 @@ jobs:
             configure_args: "-DCMAKE_C_COMPILER=C:/mingw64/bin/gcc.exe"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
@@ -71,7 +74,7 @@ jobs:
         run: python -c "import shutil; shutil.rmtree('dist/_CPack_Packages', ignore_errors=True)"
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fex-package-${{ matrix.artifact_suffix }}
           path: |
@@ -88,9 +91,9 @@ jobs:
       UBSAN_OPTIONS: print_stacktrace=1
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 

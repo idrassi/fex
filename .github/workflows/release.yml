@@ -6,6 +6,9 @@ on:
       - "v*"
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build-release-packages:
     runs-on: ${{ matrix.os }}
@@ -35,9 +38,9 @@ jobs:
             configure_args: "-DCMAKE_C_COMPILER=C:/mingw64/bin/gcc.exe"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
@@ -75,7 +78,7 @@ jobs:
         run: python -c "import shutil; shutil.rmtree('dist/_CPack_Packages', ignore_errors=True)"
 
       - name: Upload packaged artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_name }}
           path: |
@@ -93,7 +96,7 @@ jobs:
 
     steps:
       - name: Download packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
