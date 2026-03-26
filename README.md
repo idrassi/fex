@@ -4,6 +4,13 @@ FeX is a tiny, embeddable scripting language with a modern, C-like syntax. It's 
 
 FeX is built on top of an enhanced version of `fe` core. For details on the new features and improvements, see the [FeX implementation document](doc/FeX-implementation.md) and the [Fe Core Language — 2025 Edition](doc/lang.md).
 
+For full user-facing language documentation, start with the
+[FeX Language Guide](doc/FeX-lang.md). For lower-level runtime and
+implementation details, see the
+[FeX implementation document](doc/FeX-implementation.md), the
+[Fe Core Language - 2025 Edition](doc/lang.md), and the
+[FeX C API guide](doc/capi.md).
+
 ```c
 // Define a function to reverse a list.
 fn reverse(lst) {
@@ -37,6 +44,21 @@ FeX provides a familiar "curly-brace" syntax front-end that compiles down to the
 *   **Embeddable C API**: A clean API allows you to easily embed FeX into your C projects, call FeX functions from C, and expose C functions to FeX.
 *   **Highly Portable**: The public CMake build targets C99 and is exercised on MSVC, GCC, and Clang.
 *   **Compact**: The core evaluator/compiler remains small enough to audit, while optional builtins, import machinery, and diagnostics live in separate translation units.
+
+## Language Documentation
+
+The README gives a short orientation, but the main language reference now lives
+in [doc/FeX-lang.md](doc/FeX-lang.md).
+
+- [FeX Language Guide](doc/FeX-lang.md): syntax, values, operators, functions,
+  lists, maps, modules, imports, bytes, JSON, builtins, CLI behavior, and
+  common gotchas
+- [FeX C API guide](doc/capi.md): embedding, structured errors, runtime limits,
+  and extending FeX from C
+- [Fe Core Language - 2025 Edition](doc/lang.md): the lower-level `fe` forms
+  that FeX compiles into
+- [FeX implementation document](doc/FeX-implementation.md): implementation
+  details, architecture, and portability notes
 
 ## Building
 
@@ -131,6 +153,9 @@ If stdin is piped and no file or `-e` input is provided, FeX executes stdin inst
 Pass `--builtins` to enable the full optional builtins set, or use repeated `--builtin NAME` flags to opt into specific categories such as `string`, `data`, `io`, or the `safe` preset. `--spans` enables richer source-location diagnostics, `--module-path PATH` adds file-based import search directories, `--max-steps N` aborts runaway evaluation after roughly `N` eval steps, `--timeout-ms N` adds a wall-clock timeout, `--max-memory N` aborts when tracked context memory exceeds `N` bytes, `--max-eval-depth N` and `--max-read-depth N` limit recursion depth (default 512, 0 disables), `--json-output` emits structured JSON diagnostics to `stderr` instead of plain text (for pipeline integration), `--stats` prints a runtime stats snapshot to `stderr` after non-REPL execution, and `--version` prints the CLI version. Imports accept bare names (`import settings;`), dotted package names (`import feature.helper;`), and string paths (`import "./helper";`). Imported files act as implicit module scopes, so top-level `export let` / `export fn` populate the imported module directly. Resolution still tries both `name.fex` and `name/index.fex`, so directory-style packages work out of the box. Import specifiers containing `..` path components are rejected to prevent directory traversal. The CLI exits with `65` for compile errors, `70` for runtime errors, and `74` for file I/O errors.
 
 ## Language Quick Tour
+
+This section is intentionally brief. For comprehensive language documentation,
+see the [FeX Language Guide](doc/FeX-lang.md).
 
 ### Variables and Types
 
