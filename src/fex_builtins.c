@@ -2456,7 +2456,8 @@ static fe_Object* builtin_to_json(fe_Context *ctx, fe_Object *args) {
 ================================================================================
 */
 
-static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max_size, size_t *out_size, const char *func_name) {
+static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max_size, size_t *out_size,
+                               const char *func_name, char *owned_filename) {
     FILE *file;
     long size;
     char *buffer;
@@ -2474,12 +2475,14 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
 #endif
         func_name);
     if (!file) {
+        builtin_free(ctx, owned_filename);
         snprintf(msg, sizeof(msg),"%s: could not open file", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
+        builtin_free(ctx, owned_filename);
         snprintf(msg, sizeof(msg),"%s: could not determine file size", func_name);
         fe_error(ctx, msg);
         return NULL;
@@ -2487,12 +2490,14 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
     size = ftell(file);
     if (size < 0) {
         fclose(file);
+        builtin_free(ctx, owned_filename);
         snprintf(msg, sizeof(msg),"%s: could not determine file size", func_name);
         fe_error(ctx, msg);
         return NULL;
     }
     if ((size_t)size > max_size) {
         fclose(file);
+        builtin_free(ctx, owned_filename);
         snprintf(msg, sizeof(msg),"%s: file too large", func_name);
         fe_error(ctx, msg);
         return NULL;
@@ -2502,6 +2507,7 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
     buffer = (char*)tracked_builtin_alloc(ctx, (size_t)size + 1);
     if (!buffer) {
         fclose(file);
+        builtin_free(ctx, owned_filename);
         snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_ctx_memory_error(ctx, msg);
         return NULL;
@@ -2518,6 +2524,7 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
         if (abort_error != NULL) {
             tracked_builtin_free(ctx, buffer);
             fclose(file);
+            builtin_free(ctx, owned_filename);
             fe_error(ctx, abort_error);
             return NULL;
         }
@@ -2528,6 +2535,7 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
             if (ferror(file)) {
                 tracked_builtin_free(ctx, buffer);
                 fclose(file);
+                builtin_free(ctx, owned_filename);
                 snprintf(msg, sizeof(msg),"%s: error reading file", func_name);
                 fe_error(ctx, msg);
                 return NULL;
@@ -2946,7 +2954,7 @@ static fe_Object* builtin_read_file(fe_Context *ctx, fe_Object *args) {
         return fe_nil(ctx);
     }
 
-    buffer = read_file_dynamic(ctx, filename, 256 * 1024, &bytes_read, "readfile");
+    buffer = read_file_dynamic(ctx, filename, 256 * 1024, &bytes_read, "readfile", filename);
     builtin_free(ctx, filename);
     if (!buffer) return fe_nil(ctx);
 
@@ -2967,7 +2975,7 @@ static fe_Object* builtin_read_bytes(fe_Context *ctx, fe_Object *args) {
     filename = string_to_cstr(ctx, filename_obj, "readbytes");
     if (!filename) return fe_nil(ctx);
 
-    buffer = read_file_dynamic(ctx, filename, 256 * 1024, &bytes_read, "readbytes");
+    buffer = read_file_dynamic(ctx, filename, 256 * 1024, &bytes_read, "readbytes", filename);
     builtin_free(ctx, filename);
     if (!buffer) return fe_nil(ctx);
 
@@ -3124,7 +3132,7 @@ static fe_Object* builtin_read_json(fe_Context *ctx, fe_Object *args) {
     filename = string_to_cstr(ctx, filename_obj, "readjson");
     if (!filename) return fe_nil(ctx);
 
-    buffer = read_file_dynamic(ctx, filename, 256 * 1024, NULL, "readjson");
+    buffer = read_file_dynamic(ctx, filename, 256 * 1024, NULL, "readjson", filename);
     builtin_free(ctx, filename);
     if (!buffer) return fe_nil(ctx);
 
