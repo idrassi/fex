@@ -39,6 +39,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 #include <io.h>
+#include <wchar.h>
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,18 +60,21 @@
 #endif
 
 #include "fex_builtins.h"
+#include "fex_internal.h"
 #include "sfc32.h"
 
 #define FEX_BUILTIN_ABORT_CHECK_INTERVAL 64u
 #define FEX_FILE_IO_CHUNK_SIZE 16384u
 
 typedef struct {
+    fe_Context *ctx;
     char *data;
     size_t len;
     size_t cap;
 } TextBuffer;
 
 typedef struct {
+    fe_Context *ctx;
     char **items;
     int count;
 } CStringArray;
@@ -131,6 +135,109 @@ typedef struct {
 #define PROCESS_STREAM_INHERIT 1
 #define PROCESS_STREAM_DISCARD 2
 
+static void* builtin_alloc(fe_Context *ctx, size_t size) {
+    (void)ctx;
+    return malloc(size > 0 ? size : 1);
+}
+
+static void* builtin_realloc(fe_Context *ctx, void *ptr, size_t size) {
+    (void)ctx;
+    if (size == 0) {
+        free(ptr);
+        return NULL;
+    }
+    return realloc(ptr, size);
+}
+
+static void builtin_free(fe_Context *ctx, void *ptr) {
+    (void)ctx;
+    free(ptr);
+}
+
+static void* tracked_builtin_alloc(fe_Context *ctx, size_t size) {
+    return fe_ctx_tracked_alloc(ctx, size);
+}
+
+static void tracked_builtin_free(fe_Context *ctx, void *ptr) {
+    fe_ctx_tracked_free(ctx, ptr);
+}
+
+#ifdef _WIN32
+static wchar_t* utf8_to_wide_alloc(fe_Context *ctx, const char *text, const char *func_name) {
+    int needed;
+    wchar_t *wide;
+    char msg[160];
+
+    needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, NULL, 0);
+    if (needed <= 0) {
+        snprintf(msg, sizeof(msg), "%s: invalid UTF-8 path", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+
+    wide = (wchar_t*)builtin_alloc(ctx, (size_t)needed * sizeof(wchar_t));
+    if (!wide) {
+        snprintf(msg, sizeof(msg), "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, wide, needed) <= 0) {
+        builtin_free(ctx, wide);
+        snprintf(msg, sizeof(msg), "%s: invalid UTF-8 path", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    return wide;
+}
+
+static char* wide_to_utf8_alloc(fe_Context *ctx, const wchar_t *text, const char *func_name) {
+    int needed;
+    char *utf8;
+    char msg[160];
+
+    needed = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
+    if (needed <= 0) {
+        snprintf(msg, sizeof(msg), "%s: could not convert wide string", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+
+    utf8 = (char*)builtin_alloc(ctx, (size_t)needed);
+    if (!utf8) {
+        snprintf(msg, sizeof(msg), "%s: out of memory", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    if (WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8, needed, NULL, NULL) <= 0) {
+        builtin_free(ctx, utf8);
+        snprintf(msg, sizeof(msg), "%s: could not convert wide string", func_name);
+        fe_error(ctx, msg);
+        return NULL;
+    }
+    return utf8;
+}
+
+static FILE* fopen_utf8(fe_Context *ctx, const char *path, const wchar_t *mode,
+                        const char *func_name) {
+    wchar_t *wide_path = utf8_to_wide_alloc(ctx, path, func_name);
+    FILE *file;
+
+    if (!wide_path) {
+        return NULL;
+    }
+    file = _wfopen(wide_path, mode);
+    builtin_free(ctx, wide_path);
+    return file;
+}
+#else
+static FILE* fopen_utf8(fe_Context *ctx, const char *path, const char *mode,
+                        const char *func_name) {
+    (void)ctx;
+    (void)func_name;
+    return fopen(path, mode);
+}
+#endif
+
 static int buf_reserve(TextBuffer *buf, size_t extra) {
     size_t needed;
     size_t new_cap;
@@ -146,7 +253,11 @@ static int buf_reserve(TextBuffer *buf, size_t extra) {
         new_cap *= 2;
     }
 
-    new_data = realloc(buf->data, new_cap);
+    if (buf->ctx) {
+        new_data = (char*)builtin_realloc(buf->ctx, buf->data, new_cap);
+    } else {
+        new_data = (char*)realloc(buf->data, new_cap);
+    }
     if (!new_data) {
         return 0;
     }
@@ -232,18 +343,27 @@ static int buf_append_utf8(TextBuffer *buf, unsigned codepoint) {
 }
 
 static void buf_free(TextBuffer *buf) {
-    free(buf->data);
+    if (buf->ctx) {
+        builtin_free(buf->ctx, buf->data);
+    } else {
+        free(buf->data);
+    }
+    buf->ctx = NULL;
     buf->data = NULL;
     buf->len = 0;
     buf->cap = 0;
 }
 
-static char* copy_cstr(const char *str) {
+static char* copy_cstr_ctx(fe_Context *ctx, const char *str) {
     size_t len;
     char *copy;
 
     len = strlen(str);
-    copy = malloc(len + 1);
+    if (ctx) {
+        copy = (char*)builtin_alloc(ctx, len + 1);
+    } else {
+        copy = (char*)malloc(len + 1);
+    }
     if (!copy) {
         return NULL;
     }
@@ -260,14 +380,23 @@ static void free_cstring_array(CStringArray *array) {
     }
 
     for (i = 0; i < array->count; i++) {
-        free(array->items[i]);
+        if (array->ctx) {
+            builtin_free(array->ctx, array->items[i]);
+        } else {
+            free(array->items[i]);
+        }
     }
-    free(array->items);
+    if (array->ctx) {
+        builtin_free(array->ctx, array->items);
+    } else {
+        free(array->items);
+    }
     array->items = NULL;
     array->count = 0;
+    array->ctx = NULL;
 }
 
-static void free_cstring_items(char **items, int count) {
+static void free_cstring_items(fe_Context *ctx, char **items, int count) {
     int i;
 
     if (!items) {
@@ -275,16 +404,24 @@ static void free_cstring_items(char **items, int count) {
     }
 
     for (i = 0; i < count; i++) {
-        free(items[i]);
+        if (ctx) {
+            builtin_free(ctx, items[i]);
+        } else {
+            free(items[i]);
+        }
     }
-    free(items);
+    if (ctx) {
+        builtin_free(ctx, items);
+    } else {
+        free(items);
+    }
 }
 
-static void free_process_options(ProcessOptions *options) {
-    free(options->stdin_data);
+static void free_process_options(fe_Context *ctx, ProcessOptions *options) {
+    builtin_free(ctx, options->stdin_data);
     options->stdin_data = NULL;
     options->stdin_len = 0;
-    free(options->cwd);
+    builtin_free(ctx, options->cwd);
     options->cwd = NULL;
     free_cstring_array(&options->env);
     options->use_env = 0;
@@ -294,11 +431,11 @@ static void free_process_options(ProcessOptions *options) {
     options->max_stderr = FEX_COMMAND_OUTPUT_MAX_BYTES;
 }
 
-static void free_process_output(ProcessOutput *output) {
-    free(output->stdout_data);
+static void free_process_output(fe_Context *ctx, ProcessOutput *output) {
+    builtin_free(ctx, output->stdout_data);
     output->stdout_data = NULL;
     output->stdout_len = 0;
-    free(output->stderr_data);
+    builtin_free(ctx, output->stderr_data);
     output->stderr_data = NULL;
     output->stderr_len = 0;
     output->stdout_captured = 0;
@@ -426,7 +563,7 @@ static char* string_to_cstr(fe_Context *ctx, fe_Object *str_obj, const char *fun
         fe_error(ctx, msg);
         return NULL;
     }
-    buffer = malloc(len + 1);
+    buffer = (char*)builtin_alloc(ctx, len + 1);
     if (!buffer) {
         snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
@@ -434,7 +571,7 @@ static char* string_to_cstr(fe_Context *ctx, fe_Object *str_obj, const char *fun
     }
     fe_tostring(ctx, str_obj, buffer, (int)(len + 1));
     if (len > 0 && memchr(buffer, '\0', len) != NULL) {
-        free(buffer);
+        builtin_free(ctx, buffer);
         snprintf(msg, sizeof(msg),"%s: strings containing NUL bytes are not allowed", func_name);
         fe_error(ctx, msg);
         return NULL;
@@ -458,7 +595,7 @@ static char* string_to_buffer(fe_Context *ctx, fe_Object *str_obj, const char *f
         fe_error(ctx, msg);
         return NULL;
     }
-    buffer = malloc(len + 1);
+    buffer = (char*)builtin_alloc(ctx, len + 1);
     if (!buffer) {
         snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
@@ -482,7 +619,7 @@ static unsigned char* bytes_to_buffer(fe_Context *ctx, fe_Object *bytes_obj, con
         return NULL;
     }
     len = fe_byteslen(ctx, bytes_obj);
-    buffer = malloc((len > 0) ? len : 1);
+    buffer = (unsigned char*)builtin_alloc(ctx, (len > 0) ? len : 1);
     if (!buffer) {
         snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
@@ -511,7 +648,7 @@ static fe_Object* string_to_bytes(fe_Context *ctx, fe_Object *str_obj, const cha
         fe_error(ctx, "tobytes: string too large");
         return fe_nil(ctx);
     }
-    buffer = malloc((len > 0) ? len + 1 : 1);
+    buffer = (char*)builtin_alloc(ctx, (len > 0) ? len + 1 : 1);
     if (!buffer) {
         fe_error(ctx, "tobytes: out of memory");
         return fe_nil(ctx);
@@ -520,7 +657,7 @@ static fe_Object* string_to_bytes(fe_Context *ctx, fe_Object *str_obj, const cha
         fe_tostring(ctx, str_obj, buffer, (int)(len + 1));
     }
     result = fe_bytes(ctx, buffer, len);
-    free(buffer);
+    builtin_free(ctx, buffer);
     return result;
 }
 
@@ -604,7 +741,7 @@ static char* build_merged_command(fe_Context *ctx, const char *command, const ch
     const char *suffix = ") 2>&1";
     size_t command_len = strlen(command);
     size_t total_len = strlen(prefix) + command_len + strlen(suffix);
-    char *merged = malloc(total_len + 1);
+    char *merged = (char*)builtin_alloc(ctx, total_len + 1);
     char msg[160];
 
     if (!merged) {
@@ -623,14 +760,24 @@ static int cstring_array_push_copy(CStringArray *array, const char *value) {
     char **new_items;
     char *copy;
 
-    copy = copy_cstr(value);
+    copy = copy_cstr_ctx(array->ctx, value);
     if (!copy) {
         return 0;
     }
 
-    new_items = realloc(array->items, sizeof(*array->items) * (size_t)(array->count + 2));
+    if (array->ctx) {
+        new_items = (char**)builtin_realloc(array->ctx, array->items,
+                                            sizeof(*array->items) * (size_t)(array->count + 2));
+    } else {
+        new_items = (char**)realloc(array->items,
+                                    sizeof(*array->items) * (size_t)(array->count + 2));
+    }
     if (!new_items) {
-        free(copy);
+        if (array->ctx) {
+            builtin_free(array->ctx, copy);
+        } else {
+            free(copy);
+        }
         return 0;
     }
 
@@ -697,7 +844,7 @@ static fe_Object* cstring_array_to_list(fe_Context *ctx, const CStringArray *arr
         return fe_nil(ctx);
     }
 
-    items = malloc(sizeof(*items) * (size_t)array->count);
+    items = (fe_Object**)builtin_alloc(ctx, sizeof(*items) * (size_t)array->count);
     if (!items) {
         fe_error(ctx, "listdir: out of memory");
         return fe_nil(ctx);
@@ -708,7 +855,7 @@ static fe_Object* cstring_array_to_list(fe_Context *ctx, const CStringArray *arr
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
             fe_restoregc(ctx, gc_save);
-            free(items);
+            builtin_free(ctx, items);
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
@@ -718,13 +865,27 @@ static fe_Object* cstring_array_to_list(fe_Context *ctx, const CStringArray *arr
 
     result = fe_list(ctx, items, array->count);
     fe_restoregc(ctx, gc_save);
-    free(items);
+    builtin_free(ctx, items);
     return result;
 }
 
 static int path_exists_cstr(const char *path) {
 #ifdef _WIN32
-    DWORD attrs = GetFileAttributesA(path);
+    int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    DWORD attrs = INVALID_FILE_ATTRIBUTES;
+    wchar_t *wide_path;
+
+    if (needed <= 0) {
+        return 0;
+    }
+    wide_path = (wchar_t*)malloc((size_t)needed * sizeof(wchar_t));
+    if (!wide_path) {
+        return 0;
+    }
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, needed) > 0) {
+        attrs = GetFileAttributesW(wide_path);
+    }
+    free(wide_path);
     return attrs != INVALID_FILE_ATTRIBUTES;
 #else
     struct stat st;
@@ -734,7 +895,21 @@ static int path_exists_cstr(const char *path) {
 
 static int path_is_directory_cstr(const char *path) {
 #ifdef _WIN32
-    DWORD attrs = GetFileAttributesA(path);
+    int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    DWORD attrs = INVALID_FILE_ATTRIBUTES;
+    wchar_t *wide_path;
+
+    if (needed <= 0) {
+        return 0;
+    }
+    wide_path = (wchar_t*)malloc((size_t)needed * sizeof(wchar_t));
+    if (!wide_path) {
+        return 0;
+    }
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, needed) > 0) {
+        attrs = GetFileAttributesW(wide_path);
+    }
+    free(wide_path);
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         return 0;
     }
@@ -750,9 +925,26 @@ static int path_is_directory_cstr(const char *path) {
 
 static int create_directory_cstr(const char *path) {
 #ifdef _WIN32
-    if (CreateDirectoryA(path, NULL)) {
+    int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    wchar_t *wide_path;
+    int created = 0;
+
+    if (needed <= 0) {
+        return 0;
+    }
+    wide_path = (wchar_t*)malloc((size_t)needed * sizeof(wchar_t));
+    if (!wide_path) {
+        return 0;
+    }
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, needed) > 0 &&
+        CreateDirectoryW(wide_path, NULL)) {
+        created = 1;
+    }
+    if (created) {
+        free(wide_path);
         return 1;
     }
+    free(wide_path);
     if (GetLastError() == ERROR_ALREADY_EXISTS && path_is_directory_cstr(path)) {
         return 1;
     }
@@ -824,28 +1016,30 @@ static int ensure_directory_tree_cstr(char *path) {
     return create_directory_cstr(path);
 }
 
-static char* current_working_directory_cstr(void) {
+static char* current_working_directory_cstr(fe_Context *ctx) {
 #ifdef _WIN32
     DWORD size = MAX_PATH;
-    char *buffer = NULL;
+    wchar_t *wide_buffer = NULL;
 
     for (;;) {
-        char *new_buffer = realloc(buffer, size);
+        wchar_t *new_buffer = (wchar_t*)builtin_realloc(ctx, wide_buffer, (size_t)size * sizeof(wchar_t));
         DWORD written;
 
         if (!new_buffer) {
-            free(buffer);
+            builtin_free(ctx, wide_buffer);
             return NULL;
         }
-        buffer = new_buffer;
+        wide_buffer = new_buffer;
 
-        written = GetCurrentDirectoryA(size, buffer);
+        written = GetCurrentDirectoryW(size, wide_buffer);
         if (written == 0) {
-            free(buffer);
+            builtin_free(ctx, wide_buffer);
             return NULL;
         }
         if (written < size) {
-            return buffer;
+            char *utf8 = wide_to_utf8_alloc(ctx, wide_buffer, "cwd");
+            builtin_free(ctx, wide_buffer);
+            return utf8;
         }
         size = written + 1;
     }
@@ -854,10 +1048,10 @@ static char* current_working_directory_cstr(void) {
     char *buffer = NULL;
 
     for (;;) {
-        char *new_buffer = realloc(buffer, size);
+        char *new_buffer = (char*)builtin_realloc(ctx, buffer, size);
 
         if (!new_buffer) {
-            free(buffer);
+            builtin_free(ctx, buffer);
             return NULL;
         }
         buffer = new_buffer;
@@ -866,7 +1060,7 @@ static char* current_working_directory_cstr(void) {
             return buffer;
         }
         if (errno != ERANGE) {
-            free(buffer);
+            builtin_free(ctx, buffer);
             return NULL;
         }
         size *= 2;
@@ -1157,6 +1351,7 @@ static fe_Object* builtin_string_concat(fe_Context *ctx, fe_Object *args) {
     size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     const char *abort_error = NULL;
 
+    result.ctx = NULL;
     result.data = NULL;
     result.len = 0;
     result.cap = 0;
@@ -1171,7 +1366,7 @@ static fe_Object* builtin_string_concat(fe_Context *ctx, fe_Object *args) {
         if (fe_type(ctx, arg) == FE_TSTRING) {
             len = fe_strlen(ctx, arg);
             if (len + 1 > sizeof(stack_buffer)) {
-                buffer = (char*)malloc(len + 1);
+                buffer = (char*)builtin_alloc(ctx, len + 1);
                 if (!buffer) {
                     buf_free(&result);
                     fe_error(ctx, "concat: out of memory");
@@ -1187,7 +1382,7 @@ static fe_Object* builtin_string_concat(fe_Context *ctx, fe_Object *args) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
             if (dynamic_buffer) {
-                free(buffer);
+                builtin_free(ctx, buffer);
             }
             buf_free(&result);
             fe_error(ctx, abort_error);
@@ -1197,7 +1392,7 @@ static fe_Object* builtin_string_concat(fe_Context *ctx, fe_Object *args) {
         if (!buf_append_mem_polling(ctx, &result, buffer, len,
                                     &poll_countdown, &abort_error)) {
             if (dynamic_buffer) {
-                free(buffer);
+                builtin_free(ctx, buffer);
             }
             buf_free(&result);
             if (abort_error != NULL) {
@@ -1209,7 +1404,7 @@ static fe_Object* builtin_string_concat(fe_Context *ctx, fe_Object *args) {
         }
 
         if (dynamic_buffer) {
-            free(buffer);
+            builtin_free(ctx, buffer);
         }
     }
 
@@ -1522,14 +1717,14 @@ static fe_Object* builtin_bytes_slice(fe_Context *ctx, fe_Object *args) {
     }
 
     slice_len = (size_t)(end - start);
-    buffer = malloc(slice_len);
+    buffer = builtin_alloc(ctx, slice_len > 0 ? slice_len : 1);
     if (!buffer) {
         fe_error(ctx, "byteslice: out of memory");
         return fe_nil(ctx);
     }
     fe_bytescopy(ctx, bytes_obj, (size_t)start, buffer, slice_len);
     result = fe_bytes(ctx, buffer, slice_len);
-    free(buffer);
+    builtin_free(ctx, buffer);
     return result;
 }
 
@@ -1862,6 +2057,7 @@ static fe_Object* json_parse_string(JsonParser *parser) {
     int hi, lo, hi2, lo2;
     const char *abort_error;
 
+    buf.ctx = NULL;
     buf.data = NULL;
     buf.len = 0;
     buf.cap = 0;
@@ -2103,14 +2299,14 @@ static int json_write_string(JsonWriter *writer, fe_Object *obj, TextBuffer *buf
         return 0;
     }
     if (!buf_append_char(buf, '"')) {
-        free(text);
+        builtin_free(writer->ctx, text);
         return 0;
     }
     for (i = 0; i < text_len; i++) {
         unsigned char chr = (unsigned char)text[i];
         abort_error = builtin_poll_abort(writer->ctx, &writer->poll_countdown);
         if (abort_error != NULL) {
-            free(text);
+            builtin_free(writer->ctx, text);
             fe_error(writer->ctx, abort_error);
             return 0;
         }
@@ -2133,11 +2329,11 @@ static int json_write_string(JsonWriter *writer, fe_Object *obj, TextBuffer *buf
                 break;
         }
     }
-    free(text);
+    builtin_free(writer->ctx, text);
     return buf_append_char(buf, '"');
 
 fail:
-    free(text);
+    builtin_free(writer->ctx, text);
     return 0;
 }
 
@@ -2221,11 +2417,11 @@ static fe_Object* builtin_parse_json(fe_Context *ctx, fe_Object *args) {
     result = json_parse_value(&parser);
     json_skip_ws(&parser);
     if (*parser.current != '\0') {
-        free(text);
+        builtin_free(ctx, text);
         fe_error(ctx, "parsejson: trailing characters");
         return fe_nil(ctx);
     }
-    free(text);
+    builtin_free(ctx, text);
     return result;
 }
 
@@ -2238,6 +2434,7 @@ static fe_Object* builtin_to_json(fe_Context *ctx, fe_Object *args) {
     FEX_CHECK_ARGS(ctx, args, 1, "tojson");
     value = fe_nextarg(ctx, &args);
 
+    buf.ctx = NULL;
     buf.data = NULL;
     buf.len = 0;
     buf.cap = 0;
@@ -2269,7 +2466,13 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
     const char *abort_error;
     char msg[160];
 
-    file = fopen(filename, "rb");
+    file = fopen_utf8(ctx, filename,
+#ifdef _WIN32
+        L"rb",
+#else
+        "rb",
+#endif
+        func_name);
     if (!file) {
         snprintf(msg, sizeof(msg),"%s: could not open file", func_name);
         fe_error(ctx, msg);
@@ -2296,11 +2499,11 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
     }
     rewind(file);
 
-    buffer = malloc((size_t)size + 1);
+    buffer = (char*)tracked_builtin_alloc(ctx, (size_t)size + 1);
     if (!buffer) {
         fclose(file);
         snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
-        fe_error(ctx, msg);
+        fe_ctx_memory_error(ctx, msg);
         return NULL;
     }
 
@@ -2313,7 +2516,7 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
 
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
-            free(buffer);
+            tracked_builtin_free(ctx, buffer);
             fclose(file);
             fe_error(ctx, abort_error);
             return NULL;
@@ -2323,7 +2526,7 @@ static char* read_file_dynamic(fe_Context *ctx, const char *filename, size_t max
         total_read += bytes_read;
         if (bytes_read < chunk_size) {
             if (ferror(file)) {
-                free(buffer);
+                tracked_builtin_free(ctx, buffer);
                 fclose(file);
                 snprintf(msg, sizeof(msg),"%s: error reading file", func_name);
                 fe_error(ctx, msg);
@@ -2348,6 +2551,7 @@ static fe_Object* builtin_path_join(fe_Context *ctx, fe_Object *args) {
     const char *abort_error = NULL;
 
     FEX_CHECK_ARGS(ctx, args, 1, "pathjoin");
+    buf.ctx = NULL;
     buf.data = NULL;
     buf.len = 0;
     buf.cap = 0;
@@ -2368,7 +2572,7 @@ static fe_Object* builtin_path_join(fe_Context *ctx, fe_Object *args) {
         while (start < end && is_path_separator_char(part[start]) && buf.len > 0) {
             abort_error = builtin_poll_abort(ctx, &poll_countdown);
             if (abort_error != NULL) {
-                free(part);
+                builtin_free(ctx, part);
                 buf_free(&buf);
                 fe_error(ctx, abort_error);
                 return fe_nil(ctx);
@@ -2378,7 +2582,7 @@ static fe_Object* builtin_path_join(fe_Context *ctx, fe_Object *args) {
         while (end > start && is_path_separator_char(part[end - 1])) {
             abort_error = builtin_poll_abort(ctx, &poll_countdown);
             if (abort_error != NULL) {
-                free(part);
+                builtin_free(ctx, part);
                 buf_free(&buf);
                 fe_error(ctx, abort_error);
                 return fe_nil(ctx);
@@ -2388,7 +2592,7 @@ static fe_Object* builtin_path_join(fe_Context *ctx, fe_Object *args) {
 
         if (need_sep && start < end && buf.len > 0 && buf.data[buf.len - 1] != '/') {
             if (!buf_append_char(&buf, '/')) {
-                free(part);
+                builtin_free(ctx, part);
                 buf_free(&buf);
                 fe_error(ctx, "pathjoin: out of memory");
                 return fe_nil(ctx);
@@ -2399,20 +2603,20 @@ static fe_Object* builtin_path_join(fe_Context *ctx, fe_Object *args) {
             char chr = is_path_separator_char(part[i]) ? '/' : part[i];
             abort_error = builtin_poll_abort(ctx, &poll_countdown);
             if (abort_error != NULL) {
-                free(part);
+                builtin_free(ctx, part);
                 buf_free(&buf);
                 fe_error(ctx, abort_error);
                 return fe_nil(ctx);
             }
             if (!buf_append_char(&buf, chr)) {
-                free(part);
+                builtin_free(ctx, part);
                 buf_free(&buf);
                 fe_error(ctx, "pathjoin: out of memory");
                 return fe_nil(ctx);
             }
         }
         need_sep = buf.len > 0;
-        free(part);
+        builtin_free(ctx, part);
     }
 
     if (buf.len == 0 && !buf_append_char(&buf, '.')) {
@@ -2446,7 +2650,7 @@ static fe_Object* builtin_dirname(fe_Context *ctx, fe_Object *args) {
     while (end > 1 && is_path_separator_char(path[end - 1])) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
-            free(path);
+            builtin_free(ctx, path);
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
@@ -2455,7 +2659,7 @@ static fe_Object* builtin_dirname(fe_Context *ctx, fe_Object *args) {
     for (i = end; i > 0; i--) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
-            free(path);
+            builtin_free(ctx, path);
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
@@ -2463,7 +2667,7 @@ static fe_Object* builtin_dirname(fe_Context *ctx, fe_Object *args) {
             while (i > 1 && is_path_separator_char(path[i - 2])) {
                 abort_error = builtin_poll_abort(ctx, &poll_countdown);
                 if (abort_error != NULL) {
-                    free(path);
+                    builtin_free(ctx, path);
                     fe_error(ctx, abort_error);
                     return fe_nil(ctx);
                 }
@@ -2474,12 +2678,12 @@ static fe_Object* builtin_dirname(fe_Context *ctx, fe_Object *args) {
             } else {
                 result = fe_string(ctx, path, i - 1);
             }
-            free(path);
+            builtin_free(ctx, path);
             return result;
         }
     }
 
-    free(path);
+    builtin_free(ctx, path);
     return fe_string(ctx, ".", 1);
 }
 
@@ -2501,7 +2705,7 @@ static fe_Object* builtin_basename(fe_Context *ctx, fe_Object *args) {
     while (end > 1 && is_path_separator_char(path[end - 1])) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
-            free(path);
+            builtin_free(ctx, path);
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
@@ -2511,14 +2715,14 @@ static fe_Object* builtin_basename(fe_Context *ctx, fe_Object *args) {
     while (start > 0 && !is_path_separator_char(path[start - 1])) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
-            free(path);
+            builtin_free(ctx, path);
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
         start--;
     }
     result = fe_string(ctx, path + start, end - start);
-    free(path);
+    builtin_free(ctx, path);
     return result;
 }
 
@@ -2535,7 +2739,7 @@ static fe_Object* builtin_exists(fe_Context *ctx, fe_Object *args) {
     }
 
     exists = path_exists_cstr(path);
-    free(path);
+    builtin_free(ctx, path);
     return fe_bool(ctx, exists);
 }
 
@@ -2554,11 +2758,12 @@ static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
         return fe_nil(ctx);
     }
 
-    entries.items = NULL;
-    entries.count = 0;
+        entries.ctx = ctx;
+        entries.items = NULL;
+        entries.count = 0;
 
     if (!path_is_directory_cstr(path)) {
-        free(path);
+        builtin_free(ctx, path);
         fe_error(ctx, "listdir: not a directory");
         return fe_nil(ctx);
     }
@@ -2566,36 +2771,44 @@ static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
 #ifdef _WIN32
     {
         TextBuffer pattern;
-        WIN32_FIND_DATAA find_data;
+        WIN32_FIND_DATAW find_data;
         HANDLE find_handle;
+        wchar_t *wide_pattern;
 
+        pattern.ctx = NULL;
         pattern.data = NULL;
         pattern.len = 0;
         pattern.cap = 0;
         if (!buf_append_str(&pattern, path)) {
-            free(path);
+            builtin_free(ctx, path);
             fe_error(ctx, "listdir: out of memory");
             return fe_nil(ctx);
         }
         if (pattern.len == 0 || !is_path_separator_char(pattern.data[pattern.len - 1])) {
             if (!buf_append_char(&pattern, '\\')) {
-                free(path);
+                builtin_free(ctx, path);
                 buf_free(&pattern);
                 fe_error(ctx, "listdir: out of memory");
                 return fe_nil(ctx);
             }
         }
         if (!buf_append_char(&pattern, '*')) {
-            free(path);
+            builtin_free(ctx, path);
             buf_free(&pattern);
             fe_error(ctx, "listdir: out of memory");
             return fe_nil(ctx);
         }
 
-        find_handle = FindFirstFileA(pattern.data, &find_data);
+        wide_pattern = utf8_to_wide_alloc(ctx, pattern.data, "listdir");
         buf_free(&pattern);
+        if (!wide_pattern) {
+            builtin_free(ctx, path);
+            return fe_nil(ctx);
+        }
+        find_handle = FindFirstFileW(wide_pattern, &find_data);
+        builtin_free(ctx, wide_pattern);
         if (find_handle == INVALID_HANDLE_VALUE) {
-            free(path);
+            builtin_free(ctx, path);
             fe_error(ctx, "listdir: could not read directory");
             return fe_nil(ctx);
         }
@@ -2604,23 +2817,34 @@ static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
             abort_error = builtin_poll_abort(ctx, &poll_countdown);
             if (abort_error != NULL) {
                 FindClose(find_handle);
-                free(path);
+                builtin_free(ctx, path);
                 free_cstring_array(&entries);
                 fe_error(ctx, abort_error);
                 return fe_nil(ctx);
             }
-            if (strcmp(find_data.cFileName, ".") == 0 ||
-                strcmp(find_data.cFileName, "..") == 0) {
+            if (wcscmp(find_data.cFileName, L".") == 0 ||
+                wcscmp(find_data.cFileName, L"..") == 0) {
                 continue;
             }
-            if (!cstring_array_push_copy(&entries, find_data.cFileName)) {
-                FindClose(find_handle);
-                free(path);
-                free_cstring_array(&entries);
-                fe_error(ctx, "listdir: out of memory");
-                return fe_nil(ctx);
+            {
+                char *entry_name = wide_to_utf8_alloc(ctx, find_data.cFileName, "listdir");
+                if (!entry_name) {
+                    FindClose(find_handle);
+                    builtin_free(ctx, path);
+                    free_cstring_array(&entries);
+                    return fe_nil(ctx);
+                }
+                if (!cstring_array_push_copy(&entries, entry_name)) {
+                    builtin_free(ctx, entry_name);
+                    FindClose(find_handle);
+                    builtin_free(ctx, path);
+                    free_cstring_array(&entries);
+                    fe_error(ctx, "listdir: out of memory");
+                    return fe_nil(ctx);
+                }
+                builtin_free(ctx, entry_name);
             }
-        } while (FindNextFileA(find_handle, &find_data));
+        } while (FindNextFileW(find_handle, &find_data));
 
         FindClose(find_handle);
     }
@@ -2630,7 +2854,7 @@ static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
         struct dirent *entry;
 
         if (!dir) {
-            free(path);
+            builtin_free(ctx, path);
             fe_error(ctx, "listdir: could not read directory");
             return fe_nil(ctx);
         }
@@ -2639,7 +2863,7 @@ static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
             abort_error = builtin_poll_abort(ctx, &poll_countdown);
             if (abort_error != NULL) {
                 closedir(dir);
-                free(path);
+                builtin_free(ctx, path);
                 free_cstring_array(&entries);
                 fe_error(ctx, abort_error);
                 return fe_nil(ctx);
@@ -2650,7 +2874,7 @@ static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
             }
             if (!cstring_array_push_copy(&entries, entry->d_name)) {
                 closedir(dir);
-                free(path);
+                builtin_free(ctx, path);
                 free_cstring_array(&entries);
                 fe_error(ctx, "listdir: out of memory");
                 return fe_nil(ctx);
@@ -2664,7 +2888,7 @@ static fe_Object* builtin_list_dir(fe_Context *ctx, fe_Object *args) {
     cstring_array_sort(&entries);
     result = cstring_array_to_list(ctx, &entries);
     free_cstring_array(&entries);
-    free(path);
+    builtin_free(ctx, path);
     return result;
 }
 
@@ -2681,7 +2905,7 @@ static fe_Object* builtin_make_dir(fe_Context *ctx, fe_Object *args) {
     }
 
     ok = create_directory_cstr(path);
-    free(path);
+    builtin_free(ctx, path);
     if (!ok) {
         fe_error(ctx, "mkdir: could not create directory");
         return fe_nil(ctx);
@@ -2702,7 +2926,7 @@ static fe_Object* builtin_make_dir_parents(fe_Context *ctx, fe_Object *args) {
     }
 
     ok = ensure_directory_tree_cstr(path);
-    free(path);
+    builtin_free(ctx, path);
     if (!ok) {
         fe_error(ctx, "mkdirp: could not create directory tree");
         return fe_nil(ctx);
@@ -2723,11 +2947,11 @@ static fe_Object* builtin_read_file(fe_Context *ctx, fe_Object *args) {
     }
 
     buffer = read_file_dynamic(ctx, filename, 256 * 1024, &bytes_read, "readfile");
-    free(filename);
+    builtin_free(ctx, filename);
     if (!buffer) return fe_nil(ctx);
 
     result = fe_string(ctx, buffer, bytes_read);
-    free(buffer);
+    tracked_builtin_free(ctx, buffer);
     return result;
 }
 
@@ -2744,11 +2968,11 @@ static fe_Object* builtin_read_bytes(fe_Context *ctx, fe_Object *args) {
     if (!filename) return fe_nil(ctx);
 
     buffer = read_file_dynamic(ctx, filename, 256 * 1024, &bytes_read, "readbytes");
-    free(filename);
+    builtin_free(ctx, filename);
     if (!buffer) return fe_nil(ctx);
 
     result = fe_bytes(ctx, buffer, bytes_read);
-    free(buffer);
+    tracked_builtin_free(ctx, buffer);
     return result;
 }
 
@@ -2767,16 +2991,22 @@ static fe_Object* builtin_write_file(fe_Context *ctx, fe_Object *args) {
     FILE *file;
 
     if (!filename || !content) {
-        free(filename);
-        free(content);
+        builtin_free(ctx, filename);
+        builtin_free(ctx, content);
         return fe_nil(ctx);
     }
 
     content_len = strlen(content);
-    file = fopen(filename, "wb");
+    file = fopen_utf8(ctx, filename,
+#ifdef _WIN32
+        L"wb",
+#else
+        "wb",
+#endif
+        "writefile");
     if (!file) {
-        free(filename);
-        free(content);
+        builtin_free(ctx, filename);
+        builtin_free(ctx, content);
         fe_error(ctx, "writefile: could not open file for writing");
         return fe_nil(ctx);
     }
@@ -2790,8 +3020,8 @@ static fe_Object* builtin_write_file(fe_Context *ctx, fe_Object *args) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
             fclose(file);
-            free(filename);
-            free(content);
+            builtin_free(ctx, filename);
+            builtin_free(ctx, content);
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
@@ -2799,16 +3029,16 @@ static fe_Object* builtin_write_file(fe_Context *ctx, fe_Object *args) {
         total_written += written;
         if (written < chunk_size || ferror(file)) {
             fclose(file);
-            free(filename);
-            free(content);
+            builtin_free(ctx, filename);
+            builtin_free(ctx, content);
             fe_error(ctx, "writefile: error writing file");
             return fe_nil(ctx);
         }
     }
 
     fclose(file);
-    free(filename);
-    free(content);
+    builtin_free(ctx, filename);
+    builtin_free(ctx, content);
     return fe_make_number(ctx, (fe_Number)total_written);
 }
 
@@ -2833,14 +3063,20 @@ static fe_Object* builtin_write_bytes(fe_Context *ctx, fe_Object *args) {
 
     content = bytes_to_buffer(ctx, content_obj, "writebytes", &content_len);
     if (!content) {
-        free(filename);
+        builtin_free(ctx, filename);
         return fe_nil(ctx);
     }
 
-    file = fopen(filename, "wb");
+    file = fopen_utf8(ctx, filename,
+#ifdef _WIN32
+        L"wb",
+#else
+        "wb",
+#endif
+        "writebytes");
     if (!file) {
-        free(filename);
-        free(content);
+        builtin_free(ctx, filename);
+        builtin_free(ctx, content);
         fe_error(ctx, "writebytes: could not open file for writing");
         return fe_nil(ctx);
     }
@@ -2854,8 +3090,8 @@ static fe_Object* builtin_write_bytes(fe_Context *ctx, fe_Object *args) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
             fclose(file);
-            free(filename);
-            free(content);
+            builtin_free(ctx, filename);
+            builtin_free(ctx, content);
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
         }
@@ -2863,16 +3099,16 @@ static fe_Object* builtin_write_bytes(fe_Context *ctx, fe_Object *args) {
         total_written += written;
         if (written < chunk_size || ferror(file)) {
             fclose(file);
-            free(filename);
-            free(content);
+            builtin_free(ctx, filename);
+            builtin_free(ctx, content);
             fe_error(ctx, "writebytes: error writing file");
             return fe_nil(ctx);
         }
     }
 
     fclose(file);
-    free(filename);
-    free(content);
+    builtin_free(ctx, filename);
+    builtin_free(ctx, content);
     return fe_make_number(ctx, (fe_Number)total_written);
 }
 
@@ -2889,7 +3125,7 @@ static fe_Object* builtin_read_json(fe_Context *ctx, fe_Object *args) {
     if (!filename) return fe_nil(ctx);
 
     buffer = read_file_dynamic(ctx, filename, 256 * 1024, NULL, "readjson");
-    free(filename);
+    builtin_free(ctx, filename);
     if (!buffer) return fe_nil(ctx);
 
     parser.ctx = ctx;
@@ -2898,11 +3134,11 @@ static fe_Object* builtin_read_json(fe_Context *ctx, fe_Object *args) {
     result = json_parse_value(&parser);
     json_skip_ws(&parser);
     if (*parser.current != '\0') {
-        free(buffer);
+        tracked_builtin_free(ctx, buffer);
         fe_error(ctx, "readjson: trailing characters");
         return fe_nil(ctx);
     }
-    free(buffer);
+    tracked_builtin_free(ctx, buffer);
     return result;
 }
 
@@ -2926,20 +3162,27 @@ static fe_Object* builtin_write_json(fe_Context *ctx, fe_Object *args) {
     filename = string_to_cstr(ctx, filename_obj, "writejson");
     if (!filename) return fe_nil(ctx);
 
+    buf.ctx = NULL;
     buf.data = NULL;
     buf.len = 0;
     buf.cap = 0;
     writer.ctx = ctx;
     writer.poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     if (!json_write_value(&writer, value, &buf)) {
-        free(filename);
+        builtin_free(ctx, filename);
         buf_free(&buf);
         return fe_nil(ctx);
     }
 
-    file = fopen(filename, "wb");
+    file = fopen_utf8(ctx, filename,
+#ifdef _WIN32
+        L"wb",
+#else
+        "wb",
+#endif
+        "writejson");
     if (!file) {
-        free(filename);
+        builtin_free(ctx, filename);
         buf_free(&buf);
         fe_error(ctx, "writejson: could not open file for writing");
         return fe_nil(ctx);
@@ -2954,7 +3197,7 @@ static fe_Object* builtin_write_json(fe_Context *ctx, fe_Object *args) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
             fclose(file);
-            free(filename);
+            builtin_free(ctx, filename);
             buf_free(&buf);
             fe_error(ctx, abort_error);
             return fe_nil(ctx);
@@ -2963,7 +3206,7 @@ static fe_Object* builtin_write_json(fe_Context *ctx, fe_Object *args) {
         total_written += written;
         if (written < chunk_size || ferror(file)) {
             fclose(file);
-            free(filename);
+            builtin_free(ctx, filename);
             buf_free(&buf);
             fe_error(ctx, "writejson: error writing file");
             return fe_nil(ctx);
@@ -2971,7 +3214,7 @@ static fe_Object* builtin_write_json(fe_Context *ctx, fe_Object *args) {
     }
 
     fclose(file);
-    free(filename);
+    builtin_free(ctx, filename);
     buf_free(&buf);
     return fe_make_number(ctx, (fe_Number)total_written);
 }
@@ -3064,16 +3307,17 @@ static int collect_process_argv(fe_Context *ctx, fe_Object *exe_obj,
         return 0;
     }
 
-    items = calloc((size_t)extra_count + 2, sizeof(char*));
+    items = (char**)builtin_alloc(ctx, sizeof(char*) * ((size_t)extra_count + 2));
     if (!items) {
         snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return 0;
     }
+    memset(items, 0, sizeof(char*) * ((size_t)extra_count + 2));
 
     items[0] = string_to_cstr(ctx, exe_obj, func_name);
     if (!items[0]) {
-        free(items);
+        builtin_free(ctx, items);
         return 0;
     }
 
@@ -3082,25 +3326,26 @@ static int collect_process_argv(fe_Context *ctx, fe_Object *exe_obj,
     while (!fe_isnil(ctx, node)) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
-            free_cstring_items(items, index);
+            free_cstring_items(ctx, items, index);
             fe_error(ctx, abort_error);
             return 0;
         }
         fe_Object *value = fe_car(ctx, node);
         if (fe_type(ctx, value) != FE_TSTRING) {
-            free_cstring_items(items, index);
+            free_cstring_items(ctx, items, index);
             fe_error(ctx, "runprocess: args must contain only strings");
             return 0;
         }
         items[index] = string_to_cstr(ctx, value, func_name);
         if (!items[index]) {
-            free_cstring_items(items, index);
+            free_cstring_items(ctx, items, index);
             return 0;
         }
         index++;
         node = fe_cdr(ctx, node);
     }
 
+    argv_out->ctx = ctx;
     argv_out->items = items;
     argv_out->count = index;
     return 1;
@@ -3123,19 +3368,20 @@ static int collect_process_env(fe_Context *ctx, fe_Object *env_obj,
         return 0;
     }
 
-    items = calloc((size_t)count + 1, sizeof(char*));
+    items = (char**)builtin_alloc(ctx, sizeof(char*) * ((size_t)count + 1));
     if (!items) {
         snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
         return 0;
     }
+    memset(items, 0, sizeof(char*) * ((size_t)count + 1));
 
     node = keys;
     index = 0;
     while (!fe_isnil(ctx, node)) {
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
-            free_cstring_items(items, index);
+            free_cstring_items(ctx, items, index);
             fe_error(ctx, abort_error);
             return 0;
         }
@@ -3147,30 +3393,30 @@ static int collect_process_env(fe_Context *ctx, fe_Object *env_obj,
         size_t value_len;
 
         if (fe_type(ctx, value_obj) != FE_TSTRING) {
-            free_cstring_items(items, index);
+            free_cstring_items(ctx, items, index);
             fe_error(ctx, "runprocess: env values must be strings");
             return 0;
         }
 
         key = string_to_cstr(ctx, key_obj, func_name);
         if (!key) {
-            free_cstring_items(items, index);
+            free_cstring_items(ctx, items, index);
             return 0;
         }
         value = string_to_cstr(ctx, value_obj, func_name);
         if (!value) {
-            free(key);
-            free_cstring_items(items, index);
+            builtin_free(ctx, key);
+            free_cstring_items(ctx, items, index);
             return 0;
         }
 
         key_len = strlen(key);
         value_len = strlen(value);
-        items[index] = malloc(key_len + value_len + 2);
+        items[index] = (char*)builtin_alloc(ctx, key_len + value_len + 2);
         if (!items[index]) {
-            free(key);
-            free(value);
-            free_cstring_items(items, index);
+            builtin_free(ctx, key);
+            builtin_free(ctx, value);
+            free_cstring_items(ctx, items, index);
             snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
             fe_error(ctx, msg);
             return 0;
@@ -3178,13 +3424,14 @@ static int collect_process_env(fe_Context *ctx, fe_Object *env_obj,
         memcpy(items[index], key, key_len);
         items[index][key_len] = '=';
         memcpy(items[index] + key_len + 1, value, value_len + 1);
-        free(key);
-        free(value);
+        builtin_free(ctx, key);
+        builtin_free(ctx, value);
 
         index++;
         node = fe_cdr(ctx, node);
     }
 
+    env_out->ctx = ctx;
     env_out->items = items;
     env_out->count = count;
     return 1;
@@ -3227,7 +3474,7 @@ static int parse_process_stream_mode(fe_Context *ctx, fe_Object *value,
         result = 0;
     }
 
-    free(mode);
+    builtin_free(ctx, mode);
     return result;
 }
 
@@ -3835,6 +4082,7 @@ static char* build_windows_command_line(fe_Context *ctx, CStringArray *argv,
     size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     const char *abort_error = NULL;
 
+    buf.ctx = NULL;
     buf.data = NULL;
     buf.len = 0;
     buf.cap = 0;
@@ -3866,7 +4114,7 @@ static char* build_windows_command_line(fe_Context *ctx, CStringArray *argv,
     }
 
     if (!buf.data) {
-        buf.data = copy_cstr("");
+        buf.data = copy_cstr_ctx(ctx, "");
         if (!buf.data) {
             snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
             fe_error(ctx, msg);
@@ -3878,26 +4126,36 @@ static char* build_windows_command_line(fe_Context *ctx, CStringArray *argv,
     return buf.data;
 }
 
-static char* build_windows_environment_block(fe_Context *ctx, CStringArray *env,
-                                             const char *func_name) {
-    size_t total = 2;
+static wchar_t* build_windows_environment_block(fe_Context *ctx, CStringArray *env,
+                                                const char *func_name) {
+    size_t total_wchars = 1;
     size_t offset = 0;
     int i;
-    char *block;
+    wchar_t *block;
     char msg[160];
     size_t poll_countdown = FEX_BUILTIN_ABORT_CHECK_INTERVAL;
     const char *abort_error = NULL;
 
     for (i = 0; i < env->count; i++) {
+        int needed;
+
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
             fe_error(ctx, abort_error);
             return NULL;
         }
-        total += strlen(env->items[i]) + 1;
+
+        needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                     env->items[i], -1, NULL, 0);
+        if (needed <= 0) {
+            snprintf(msg, sizeof(msg), "%s: invalid UTF-8 in env", func_name);
+            fe_error(ctx, msg);
+            return NULL;
+        }
+        total_wchars += (size_t)needed;
     }
 
-    block = malloc(total);
+    block = (wchar_t*)builtin_alloc(ctx, total_wchars * sizeof(wchar_t));
     if (!block) {
         snprintf(msg, sizeof(msg),"%s: out of memory", func_name);
         fe_error(ctx, msg);
@@ -3905,20 +4163,27 @@ static char* build_windows_environment_block(fe_Context *ctx, CStringArray *env,
     }
 
     for (i = 0; i < env->count; i++) {
+        int needed;
+
         abort_error = builtin_poll_abort(ctx, &poll_countdown);
         if (abort_error != NULL) {
-            free(block);
+            builtin_free(ctx, block);
             fe_error(ctx, abort_error);
             return NULL;
         }
-        size_t item_len = strlen(env->items[i]) + 1;
-        memcpy(block + offset, env->items[i], item_len);
-        offset += item_len;
-    }
-    block[offset++] = '\0';
-    block[offset] = '\0';
 
-    (void)ctx;
+        needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                     env->items[i], -1, block + offset,
+                                     (int)(total_wchars - offset));
+        if (needed <= 0) {
+            builtin_free(ctx, block);
+            snprintf(msg, sizeof(msg), "%s: invalid UTF-8 in env", func_name);
+            fe_error(ctx, msg);
+            return NULL;
+        }
+        offset += (size_t)needed;
+    }
+    block[offset] = L'\0';
     return block;
 }
 #else
@@ -3955,9 +4220,11 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
     init_temp_redirect_file(&stderr_redirect);
     init_process_capture_pipe(&stdout_pipe);
     init_process_capture_pipe(&stderr_pipe);
+    stdout_buf.ctx = NULL;
     stdout_buf.data = NULL;
     stdout_buf.len = 0;
     stdout_buf.cap = 0;
+    stderr_buf.ctx = NULL;
     stderr_buf.data = NULL;
     stderr_buf.len = 0;
     stderr_buf.cap = 0;
@@ -3998,10 +4265,13 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
 
 #ifdef _WIN32
     {
-        STARTUPINFOA startup_info;
+        STARTUPINFOW startup_info;
         PROCESS_INFORMATION process_info;
         char *command_line = NULL;
-        char *environment = NULL;
+        wchar_t *command_line_wide = NULL;
+        wchar_t *environment = NULL;
+        wchar_t *cwd_wide = NULL;
+        DWORD creation_flags = 0;
         DWORD wait_result;
         DWORD raw_exit_code = 0;
 
@@ -4012,10 +4282,25 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
         if (!command_line) {
             goto cleanup;
         }
+        command_line_wide = utf8_to_wide_alloc(ctx, command_line, func_name);
+        builtin_free(ctx, command_line);
+        command_line = NULL;
+        if (!command_line_wide) {
+            goto cleanup;
+        }
         if (options->use_env) {
             environment = build_windows_environment_block(ctx, &options->env, func_name);
             if (!environment) {
-                free(command_line);
+                builtin_free(ctx, command_line_wide);
+                goto cleanup;
+            }
+            creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+        }
+        if (options->cwd) {
+            cwd_wide = utf8_to_wide_alloc(ctx, options->cwd, func_name);
+            if (!cwd_wide) {
+                builtin_free(ctx, command_line_wide);
+                builtin_free(ctx, environment);
                 goto cleanup;
             }
         }
@@ -4026,8 +4311,9 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
         if (options->stdout_mode == PROCESS_STREAM_INHERIT) {
             stdout_redirect.handle = duplicate_inheritable_handle(GetStdHandle(STD_OUTPUT_HANDLE));
             if (stdout_redirect.handle == INVALID_HANDLE_VALUE) {
-                free(command_line);
-                free(environment);
+                builtin_free(ctx, command_line_wide);
+                builtin_free(ctx, environment);
+                builtin_free(ctx, cwd_wide);
                 fe_error(ctx, "runprocess: could not inherit stdout");
                 goto cleanup;
             }
@@ -4040,8 +4326,9 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
         if (options->stderr_mode == PROCESS_STREAM_INHERIT) {
             stderr_redirect.handle = duplicate_inheritable_handle(GetStdHandle(STD_ERROR_HANDLE));
             if (stderr_redirect.handle == INVALID_HANDLE_VALUE) {
-                free(command_line);
-                free(environment);
+                builtin_free(ctx, command_line_wide);
+                builtin_free(ctx, environment);
+                builtin_free(ctx, cwd_wide);
                 fe_error(ctx, "runprocess: could not inherit stderr");
                 goto cleanup;
             }
@@ -4052,16 +4339,18 @@ static int run_process_native(fe_Context *ctx, CStringArray *argv,
             startup_info.hStdError = stderr_redirect.handle;
         }
 
-        if (!CreateProcessA(NULL, command_line, NULL, NULL, TRUE, 0,
-                            environment, options->cwd, &startup_info, &process_info)) {
-            free(command_line);
-            free(environment);
+        if (!CreateProcessW(NULL, command_line_wide, NULL, NULL, TRUE, creation_flags,
+                            environment, cwd_wide, &startup_info, &process_info)) {
+            builtin_free(ctx, command_line_wide);
+            builtin_free(ctx, environment);
+            builtin_free(ctx, cwd_wide);
             fe_error(ctx, "runprocess: could not start process");
             goto cleanup;
         }
 
-        free(command_line);
-        free(environment);
+        builtin_free(ctx, command_line_wide);
+        builtin_free(ctx, environment);
+        builtin_free(ctx, cwd_wide);
         CloseHandle(process_info.hThread);
         child_process = process_info.hProcess;
         close_process_capture_pipe_read(&stdin_pipe);
@@ -4414,7 +4703,7 @@ cleanup:
     buf_free(&stdout_buf);
     buf_free(&stderr_buf);
     if (!ok) {
-        free_process_output(output);
+        free_process_output(ctx, output);
         if (out_error != NULL) {
             *out_error = (deferred_error != NULL) ? deferred_error : abort_error;
             return 0;
@@ -4473,14 +4762,14 @@ static fe_Object* builtin_cwd(fe_Context *ctx, fe_Object *args) {
     fe_Object *result;
 
     FEX_CHECK_NO_ARGS(ctx, args, "cwd");
-    path = current_working_directory_cstr();
+    path = current_working_directory_cstr(ctx);
     if (!path) {
         fe_error(ctx, "cwd: could not determine current directory");
         return fe_nil(ctx);
     }
 
     result = fe_string(ctx, path, strlen(path));
-    free(path);
+    builtin_free(ctx, path);
     return result;
 }
 
@@ -4497,11 +4786,19 @@ static fe_Object* builtin_chdir(fe_Context *ctx, fe_Object *args) {
     }
 
 #ifdef _WIN32
-    ok = SetCurrentDirectoryA(path) != 0;
+    {
+        wchar_t *wide_path = utf8_to_wide_alloc(ctx, path, "chdir");
+        if (!wide_path) {
+            builtin_free(ctx, path);
+            return fe_nil(ctx);
+        }
+        ok = SetCurrentDirectoryW(wide_path) != 0;
+        builtin_free(ctx, wide_path);
+    }
 #else
     ok = chdir(path) == 0;
 #endif
-    free(path);
+    builtin_free(ctx, path);
 
     if (!ok) {
         fe_error(ctx, "chdir: could not change directory");
@@ -4524,7 +4821,7 @@ static fe_Object* builtin_get_env(fe_Context *ctx, fe_Object *args) {
     }
 
     value = getenv(name);
-    free(name);
+    builtin_free(ctx, name);
     if (!value) {
         return fe_nil(ctx);
     }
@@ -4559,7 +4856,9 @@ static fe_Object* builtin_system(fe_Context *ctx, fe_Object *args) {
     const char *process_error = NULL;
 
     memset(&argv, 0, sizeof(argv));
+    argv.ctx = ctx;
     memset(&options, 0, sizeof(options));
+    options.env.ctx = ctx;
     memset(&output, 0, sizeof(output));
 
     FEX_CHECK_ARGS(ctx, args, 1, "system");
@@ -4571,17 +4870,17 @@ static fe_Object* builtin_system(fe_Context *ctx, fe_Object *args) {
     }
 
     if (!build_shell_process_argv(ctx, command, "system", &argv)) {
-        free(command);
+        builtin_free(ctx, command);
         free_cstring_array(&argv);
         return fe_nil(ctx);
     }
-    free(command);
+    builtin_free(ctx, command);
     options.stdout_mode = PROCESS_STREAM_INHERIT;
     options.stderr_mode = PROCESS_STREAM_INHERIT;
     if (!run_process_native(ctx, &argv, &options, &output, "system",
                             &process_error)) {
         free_cstring_array(&argv);
-        free_process_output(&output);
+        free_process_output(ctx, &output);
         if (process_error != NULL) {
             fe_error(ctx, process_error);
         }
@@ -4590,7 +4889,7 @@ static fe_Object* builtin_system(fe_Context *ctx, fe_Object *args) {
 
     result = fe_make_number(ctx, (fe_Number)output.exit_code);
     free_cstring_array(&argv);
-    free_process_output(&output);
+    free_process_output(ctx, &output);
     return result;
 }
 
@@ -4605,7 +4904,9 @@ static fe_Object* builtin_run_command(fe_Context *ctx, fe_Object *args) {
     const char *process_error = NULL;
 
     memset(&argv, 0, sizeof(argv));
+    argv.ctx = ctx;
     memset(&options, 0, sizeof(options));
+    options.env.ctx = ctx;
     memset(&output, 0, sizeof(output));
 
     FEX_CHECK_ARGS(ctx, args, 1, "runcommand");
@@ -4616,24 +4917,24 @@ static fe_Object* builtin_run_command(fe_Context *ctx, fe_Object *args) {
     }
 
     merged_command = build_merged_command(ctx, command, "runcommand");
-    free(command);
+    builtin_free(ctx, command);
     if (!merged_command) {
         return fe_nil(ctx);
     }
 
     if (!build_shell_process_argv(ctx, merged_command, "runcommand", &argv)) {
-        free(merged_command);
+        builtin_free(ctx, merged_command);
         free_cstring_array(&argv);
         return fe_nil(ctx);
     }
-    free(merged_command);
+    builtin_free(ctx, merged_command);
     options.stdout_mode = PROCESS_STREAM_CAPTURE;
     options.stderr_mode = PROCESS_STREAM_DISCARD;
     options.max_stdout = FEX_COMMAND_OUTPUT_MAX_BYTES;
     if (!run_process_native(ctx, &argv, &options, &output, "runcommand",
                             &process_error)) {
         free_cstring_array(&argv);
-        free_process_output(&output);
+        free_process_output(ctx, &output);
         if (process_error != NULL) {
             fe_error(ctx, process_error);
         }
@@ -4649,7 +4950,7 @@ static fe_Object* builtin_run_command(fe_Context *ctx, fe_Object *args) {
                         output.stdout_data ? output.stdout_data : (const unsigned char*)"",
                         output.stdout_len));
     free_cstring_array(&argv);
-    free_process_output(&output);
+    free_process_output(ctx, &output);
     return result;
 }
 
@@ -4664,7 +4965,9 @@ static fe_Object* builtin_run_process(fe_Context *ctx, fe_Object *args) {
     const char *process_error = NULL;
 
     memset(&argv, 0, sizeof(argv));
+    argv.ctx = ctx;
     memset(&options, 0, sizeof(options));
+    options.env.ctx = ctx;
     memset(&output, 0, sizeof(output));
 
     FEX_CHECK_ARGS(ctx, args, 1, "runprocess");
@@ -4685,8 +4988,8 @@ static fe_Object* builtin_run_process(fe_Context *ctx, fe_Object *args) {
         !run_process_native(ctx, &argv, &options, &output, "runprocess",
                             &process_error)) {
         free_cstring_array(&argv);
-        free_process_options(&options);
-        free_process_output(&output);
+        free_process_options(ctx, &options);
+        free_process_output(ctx, &output);
         if (process_error != NULL) {
             fe_error(ctx, process_error);
         }
@@ -4695,8 +4998,8 @@ static fe_Object* builtin_run_process(fe_Context *ctx, fe_Object *args) {
 
     result = build_process_result(ctx, &output);
     free_cstring_array(&argv);
-    free_process_options(&options);
-    free_process_output(&output);
+    free_process_options(ctx, &options);
+    free_process_output(ctx, &output);
     return result;
 }
 
@@ -4759,7 +5062,7 @@ static fe_Object* builtin_to_number(fe_Context *ctx, fe_Object *args) {
             return fe_nil(ctx);
         }
         if (len > 0 && memchr(buffer, '\0', len) != NULL) {
-            free(buffer);
+            builtin_free(ctx, buffer);
             fe_error(ctx, "tonumber: invalid number format");
             return fe_nil(ctx);
         }
@@ -4767,12 +5070,12 @@ static fe_Object* builtin_to_number(fe_Context *ctx, fe_Object *args) {
         value = strtod(buffer, &endptr);
 
         if (endptr != buffer + len) {
-            free(buffer);
+            builtin_free(ctx, buffer);
             fe_error(ctx, "tonumber: invalid number format");
             return fe_nil(ctx);
         }
 
-        free(buffer);
+        builtin_free(ctx, buffer);
         return fe_make_number(ctx, value);
     }
 

@@ -914,10 +914,32 @@ static Token lex_identifier() {
 }
 
 static Token lex_number() {
-  while (isdigit(*L.current)) advance();
+  if (L.start[0] == '0' && (*L.current == 'x' || *L.current == 'X')) {
+    advance();
+    if (!isxdigit((unsigned char)*L.current)) {
+      return error_token("Invalid hexadecimal literal.");
+    }
+    while (isxdigit((unsigned char)*L.current)) advance();
+    return make_token(TOKEN_NUMBER);
+  }
+
+  while (isdigit((unsigned char)*L.current)) advance();
   if (*L.current == '.' && isdigit(L.current[1])) {
     advance();
-    while (isdigit(*L.current)) advance();
+    while (isdigit((unsigned char)*L.current)) advance();
+  }
+  if (*L.current == 'e' || *L.current == 'E') {
+    const char *exp = L.current + 1;
+    if (*exp == '+' || *exp == '-') {
+      exp++;
+    }
+    if (isdigit((unsigned char)*exp)) {
+      advance();
+      if (*L.current == '+' || *L.current == '-') {
+        advance();
+      }
+      while (isdigit((unsigned char)*L.current)) advance();
+    }
   }
   return make_token(TOKEN_NUMBER);
 }
@@ -1437,8 +1459,33 @@ static fe_Object* parse_grouping() {
 }
 
 static fe_Object* parse_number() {
-  double value = strtod(P.previous.start, NULL);
-  return fe_make_number(P.ctx, (fe_Number)value);
+  char stack_buf[64];
+  char *buf = stack_buf;
+  fe_Number value;
+
+  if ((size_t)P.previous.length >= sizeof(stack_buf)) {
+    buf = (char*)fex_temp_alloc(P.ctx, (size_t)P.previous.length + 1);
+    if (!buf) {
+      error("Out of memory while parsing number.");
+      return fe_nil(P.ctx);
+    }
+  }
+
+  memcpy(buf, P.previous.start, (size_t)P.previous.length);
+  buf[P.previous.length] = '\0';
+
+  if (P.previous.length > 2 &&
+      buf[0] == '0' &&
+      (buf[1] == 'x' || buf[1] == 'X')) {
+    char *end = NULL;
+    unsigned long long ivalue = strtoull(buf, &end, 16);
+    if (end != NULL && *end == '\0') {
+      return fe_make_number(P.ctx, (fe_Number)ivalue);
+    }
+  }
+
+  value = strtod(buf, NULL);
+  return fe_make_number(P.ctx, value);
 }
 
 static fe_Object* make_import_spec_string(const char *spec, size_t len) {

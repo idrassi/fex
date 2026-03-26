@@ -402,6 +402,18 @@ CASES = [
         ),
     },
     {
+        "name": "unicode filesystem helpers",
+        "source": (
+            'let path = "tmp-🙂.txt";\n'
+            'writefile(path, "ok");\n'
+            "println(readfile(path));\n"
+        ),
+        "args": ["--builtin", "io"],
+        "use_temp_dir_as_cwd": True,
+        "exit_code": 0,
+        "stdout": "ok\n",
+    },
+    {
         "name": "bytes",
         "script": ROOT / "scripts" / "test_bytes.fex",
         "args": ["--builtins"],
@@ -642,6 +654,34 @@ CASES = [
         ],
     },
     {
+        "name": "readbytes memory budget",
+        "source": 'readbytes("fixture.bin");\n',
+        "args": ["--builtin", "io", "--max-memory", "5259264"],
+        "setup_files": {
+            "fixture.bin": {"size": 200 * 1024, "fill_byte": 0x5A},
+        },
+        "use_temp_dir_as_cwd": True,
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: memory limit exceeded",
+            '=> (readbytes "fixture.bin")',
+        ],
+    },
+    {
+        "name": "readfile memory budget",
+        "source": 'readfile("fixture.txt");\n',
+        "args": ["--builtin", "io", "--max-memory", "5259264"],
+        "setup_files": {
+            "fixture.txt": {"size": 200 * 1024, "fill_byte": 0x61},
+        },
+        "use_temp_dir_as_cwd": True,
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: memory limit exceeded",
+            '=> (readfile "fixture.txt")',
+        ],
+    },
+    {
         "name": "bad module syntax",
         "source": 'module(123) {\n    export let y = 20;\n}\n',
         "exit_code": 65,
@@ -668,6 +708,22 @@ CASES = [
             "runtime error: Only .head, .first, .tail, and .rest are valid on pairs",
             "=> (get p foo)",
         ],
+    },
+    {
+        "name": "invalid non-pair property",
+        "source": "let n = 1;\nn.foo;\n",
+        "args": ["--spans"],
+        "exit_code": 70,
+        "stderr_contains": [
+            "runtime error: property access is only supported on maps/modules and pairs",
+            "=> (get n foo)",
+        ],
+    },
+    {
+        "name": "numeric literals",
+        "source": "println(0xFF + 1);\nprintln(1.5e2);\n",
+        "exit_code": 0,
+        "stdout": "256\n150\n",
     },
     {
         "name": "cyclic import",
@@ -697,6 +753,13 @@ CASES = [
         "stderr_contains": [
             "I/O error: could not open input file",
         ],
+    },
+    {
+        "name": "unicode input file",
+        "source": "println(42);\n",
+        "input_filename": "inline-🙂.fex",
+        "exit_code": 0,
+        "stdout": "42\n",
     },
     {
         "name": "import path traversal rejected",
@@ -888,6 +951,29 @@ def describe_stream(name: str, text: str) -> str:
     return f"{name} was empty"
 
 
+def write_setup_file(path: Path, spec: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(spec, bytes):
+        path.write_bytes(spec)
+        return
+    if isinstance(spec, str):
+        path.write_text(spec, encoding="utf-8", newline="\n")
+        return
+    if isinstance(spec, dict):
+        if "bytes" in spec:
+            path.write_bytes(bytes(spec["bytes"]))
+            return
+        if "text" in spec:
+            path.write_text(str(spec["text"]), encoding="utf-8", newline="\n")
+            return
+        if "size" in spec and "fill_byte" in spec:
+            size = int(spec["size"])
+            fill_byte = int(spec["fill_byte"]) & 0xFF
+            path.write_bytes(bytes([fill_byte]) * size)
+            return
+    raise ValueError(f"unsupported setup file spec for {path}")
+
+
 def run_case(exe: Path, case: dict[str, object]) -> list[str]:
     command = [str(exe)]
     temp_path: Path | None = None
@@ -897,10 +983,18 @@ def run_case(exe: Path, case: dict[str, object]) -> list[str]:
     case_env = None
 
     try:
+        if "source" in case or case.get("setup_files") is not None:
+            temp_dir_obj = tempfile.TemporaryDirectory()
+
+        if temp_dir_obj is not None and case.get("setup_files") is not None:
+            temp_root = Path(temp_dir_obj.name)
+            for relative_path, spec in dict(case["setup_files"]).items():
+                write_setup_file(temp_root / str(relative_path), spec)
+
         if not case.get("skip_input_file", False):
             if "source" in case:
-                temp_dir_obj = tempfile.TemporaryDirectory()
-                temp_path = Path(temp_dir_obj.name) / "inline_case.fex"
+                input_filename = str(case.get("input_filename", "inline_case.fex"))
+                temp_path = Path(temp_dir_obj.name) / input_filename
                 temp_path.write_text(str(case["source"]), encoding="utf-8", newline="\n")
                 command.append(str(temp_path))
             else:

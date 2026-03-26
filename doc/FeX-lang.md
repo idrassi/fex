@@ -84,7 +84,7 @@ Statements are expressions terminated by `;`, except for blocks and declarations
 | `while (cond) stmt` | Loop while `cond` stays truthy. |
 | `{ ... }` | Block expression whose value is the last inner expression. |
 
-If `return` is omitted, a function returns `nil`.
+If `return` is omitted, a function returns the value of its last body expression. An empty function body returns `nil`.
 
 ## 6. Functions and Closures
 

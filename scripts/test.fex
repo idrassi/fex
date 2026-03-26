@@ -20,7 +20,7 @@ while (a < 5) {
 
 let factorial = fn(n) {
     if (n <= 1) {
-        1; // 'return' is not a keyword, last expression is returned
+        1; // explicit return is optional; the last expression is returned
     } else {
         n * factorial(n - 1);
     }

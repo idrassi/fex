@@ -614,6 +614,18 @@ int main(void) {
         return fail_status("expected nested same-thread compile errors to unwind cleanly", status, &error);
     }
 
+    status = fex_try_do_string(ctx,
+        "let hex = 0xFF;\n"
+        "let sci = 1.5e2;\n"
+        "hex + sci;\n",
+        &result,
+        &error);
+    if (status != FEX_STATUS_OK || fe_tonumber(ctx, result) != 405.0) {
+        fe_close(ctx);
+        free(memory);
+        return fail_status("expected hex and exponent numeric literals to compile and evaluate", status, &error);
+    }
+
     status = fex_try_do_string(ctx, "let p = 1 :: 2 :: nil;\np.foo;\n", &result, &error);
     if (status != FEX_STATUS_RUNTIME_ERROR) {
         fe_close(ctx);
@@ -629,6 +641,30 @@ int main(void) {
         fe_close(ctx);
         free(memory);
         return fail("runtime traceback was not captured");
+    }
+
+    status = fex_try_do_string(ctx, "let n = 1;\nn.foo;\n", &result, &error);
+    if (status != FEX_STATUS_RUNTIME_ERROR) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected runtime error on non-pair property access");
+    }
+    if (strstr(error.message, "property access is only supported") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected non-pair property access error message");
+    }
+
+    status = fex_try_do_string(ctx, "let n = nil;\nn.foo;\n", &result, &error);
+    if (status != FEX_STATUS_RUNTIME_ERROR) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected nil property access to raise a runtime error");
+    }
+    if (strstr(error.message, "property access is only supported") == NULL) {
+        fe_close(ctx);
+        free(memory);
+        return fail("expected nil property access error message");
     }
 
     {
@@ -1428,6 +1464,87 @@ int main(void) {
         fe_close(ctx);
         free(memory);
         return fail("unexpected pathjoin result after enabling I/O builtins");
+    }
+
+    {
+        const char *io_limit_path = "fex_try_api_memlimit.bin";
+        void *io_limit_memory = malloc(TEST_MEM_SIZE);
+        fe_Context *io_limit_ctx;
+        size_t baseline_used;
+        const size_t retained_overhead_limit = 4096;
+        char source_buf[256];
+
+        if (!io_limit_memory) {
+            fe_close(ctx);
+            free(memory);
+            return fail("failed to allocate I/O memory limit test memory");
+        }
+        if (!write_large_test_file(io_limit_path, 200 * 1024, 0x61)) {
+            fe_close(ctx);
+            free(memory);
+            free(io_limit_memory);
+            return fail("failed to create I/O memory limit fixture");
+        }
+
+        io_limit_ctx = fe_open(io_limit_memory, TEST_MEM_SIZE);
+        if (!io_limit_ctx) {
+            remove(io_limit_path);
+            fe_close(ctx);
+            free(memory);
+            free(io_limit_memory);
+            return fail("failed to open I/O memory limit test context");
+        }
+
+        fex_init_with_builtins(io_limit_ctx, FEX_CONFIG_ENABLE_SPANS, FEX_BUILTINS_IO);
+        baseline_used = fe_get_memory_used(io_limit_ctx);
+
+        fe_set_memory_limit(io_limit_ctx, baseline_used + 1024);
+        snprintf(source_buf, sizeof(source_buf), "readbytes(\"%s\");\n", io_limit_path);
+        status = fex_try_do_string(io_limit_ctx, source_buf, &result, &error);
+        fe_set_memory_limit(io_limit_ctx, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "memory limit exceeded") == NULL) {
+            remove(io_limit_path);
+            fe_close(io_limit_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(io_limit_memory);
+            return fail_status("expected readbytes to honor the tracked memory limit", status, &error);
+        }
+        if (fe_get_memory_used(io_limit_ctx) > baseline_used + retained_overhead_limit) {
+            remove(io_limit_path);
+            fe_close(io_limit_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(io_limit_memory);
+            return fail("expected readbytes memory-limit failures not to retain the file buffer");
+        }
+
+        fe_set_memory_limit(io_limit_ctx, baseline_used + 1024);
+        snprintf(source_buf, sizeof(source_buf), "readfile(\"%s\");\n", io_limit_path);
+        status = fex_try_do_string(io_limit_ctx, source_buf, &result, &error);
+        fe_set_memory_limit(io_limit_ctx, 0);
+        if (status != FEX_STATUS_RUNTIME_ERROR ||
+            strstr(error.message, "memory limit exceeded") == NULL) {
+            remove(io_limit_path);
+            fe_close(io_limit_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(io_limit_memory);
+            return fail_status("expected readfile to honor the tracked memory limit", status, &error);
+        }
+        if (fe_get_memory_used(io_limit_ctx) > baseline_used + retained_overhead_limit) {
+            remove(io_limit_path);
+            fe_close(io_limit_ctx);
+            fe_close(ctx);
+            free(memory);
+            free(io_limit_memory);
+            return fail("expected readfile memory-limit failures not to retain the file buffer");
+        }
+
+        fe_close(io_limit_ctx);
+        free(io_limit_memory);
+        remove(io_limit_path);
     }
 
     status = fex_try_do_string(ctx, "writefile(\"bad\\0path.txt\", \"x\");", &result, &error);

@@ -26,6 +26,7 @@
 #include <ctype.h>
 #include <limits.h>
 #ifdef _WIN32
+#include <windows.h>
 #include <io.h>
 #define FEX_ISATTY _isatty
 #define FEX_FILENO _fileno
@@ -40,6 +41,38 @@
 
 #define MEMORY_POOL_SIZE (5 * 1024 * 1024)
 #define REPL_BUFFER_SIZE 1024
+
+#ifdef _WIN32
+static char *utf8_from_wide_arg(const wchar_t *src) {
+  int needed;
+  char *dst;
+
+  needed = WideCharToMultiByte(CP_UTF8, 0, src, -1, NULL, 0, NULL, NULL);
+  if (needed <= 0) {
+    return NULL;
+  }
+  dst = (char*)malloc((size_t)needed);
+  if (!dst) {
+    return NULL;
+  }
+  if (WideCharToMultiByte(CP_UTF8, 0, src, -1, dst, needed, NULL, NULL) <= 0) {
+    free(dst);
+    return NULL;
+  }
+  return dst;
+}
+
+static void free_utf8_argv(int argc, char **argv) {
+  int i;
+  if (!argv) {
+    return;
+  }
+  for (i = 0; i < argc; i++) {
+    free(argv[i]);
+  }
+  free(argv);
+}
+#endif
 
 static int exit_code_for_status(FexStatus status) {
   switch (status) {
@@ -407,7 +440,7 @@ static void print_usage(const char *program_name) {
   fprintf(stderr, "the CLI reads stdin when piped input is present; otherwise it starts the REPL.\n");
 }
 
-int main(int argc, char **argv) {
+static int fex_main_utf8(int argc, char **argv) {
   int enable_spans = 0, i, module_path_count = 0;
   int read_stdin = 0;
   int end_of_options = 0;
@@ -753,3 +786,34 @@ int main(int argc, char **argv) {
   free(mem);
   return exit_code;
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t **wargv) {
+  char **argv;
+  int i;
+  int result;
+
+  argv = (char**)calloc((size_t)((argc > 0) ? argc : 1), sizeof(*argv));
+  if (!argv) {
+    fprintf(stderr, "Failed to allocate UTF-8 argv storage.\n");
+    return 1;
+  }
+
+  for (i = 0; i < argc; i++) {
+    argv[i] = utf8_from_wide_arg(wargv[i]);
+    if (!argv[i]) {
+      fprintf(stderr, "Failed to convert command-line arguments to UTF-8.\n");
+      free_utf8_argv(argc, argv);
+      return 1;
+    }
+  }
+
+  result = fex_main_utf8(argc, argv);
+  free_utf8_argv(argc, argv);
+  return result;
+}
+#else
+int main(int argc, char **argv) {
+  return fex_main_utf8(argc, argv);
+}
+#endif

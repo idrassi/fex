@@ -27,6 +27,7 @@
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
+#include <wchar.h>
 #else
 #include <sys/time.h>
 #endif
@@ -748,6 +749,40 @@ static void string_array_pop(fe_Context *ctx, char **items, int *count) {
   items[*count] = NULL;
 }
 
+#ifdef _WIN32
+static wchar_t* utf8_to_wide_tracked(fe_Context *ctx, const char *text) {
+  int needed;
+  wchar_t *wide;
+
+  if (!text) return NULL;
+  needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, NULL, 0);
+  if (needed <= 0) return NULL;
+  wide = tracked_alloc(ctx, (size_t)needed * sizeof(wchar_t));
+  if (!wide) return NULL;
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, wide, needed) <= 0) {
+    tracked_free(ctx, wide);
+    return NULL;
+  }
+  return wide;
+}
+
+static char* wide_to_utf8_tracked(fe_Context *ctx, const wchar_t *text) {
+  int needed;
+  char *utf8;
+
+  if (!text) return NULL;
+  needed = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
+  if (needed <= 0) return NULL;
+  utf8 = tracked_alloc(ctx, (size_t)needed);
+  if (!utf8) return NULL;
+  if (WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8, needed, NULL, NULL) <= 0) {
+    tracked_free(ctx, utf8);
+    return NULL;
+  }
+  return utf8;
+}
+#endif
+
 static int ensure_object_array_capacity(fe_Context *ctx, fe_Object ***items,
                                         int *capacity, int needed) {
   int new_capacity;
@@ -844,18 +879,42 @@ static char* dup_normalized_path(fe_Context *ctx, const char *path) {
 
 static char* normalize_existing_path(fe_Context *ctx, const char *path) {
 #ifdef _WIN32
-  char resolved[MAX_PATH];
+  wchar_t *wide_path;
+  wchar_t *wide_resolved;
+  DWORD needed;
 #else
   char resolved[4096];
 #endif
   char *copy;
 #ifdef _WIN32
-  if (!_fullpath(resolved, path, sizeof(resolved))) return NULL;
+  wide_path = utf8_to_wide_tracked(ctx, path);
+  if (!wide_path) return NULL;
+  needed = GetFullPathNameW(wide_path, 0, NULL, NULL);
+  if (needed == 0) {
+    tracked_free(ctx, wide_path);
+    return NULL;
+  }
+  wide_resolved = tracked_alloc(ctx, (size_t)needed * sizeof(wchar_t));
+  if (!wide_resolved) {
+    tracked_free(ctx, wide_path);
+    return NULL;
+  }
+  if (GetFullPathNameW(wide_path, needed, wide_resolved, NULL) == 0) {
+    tracked_free(ctx, wide_resolved);
+    tracked_free(ctx, wide_path);
+    return NULL;
+  }
+  copy = wide_to_utf8_tracked(ctx, wide_resolved);
+  tracked_free(ctx, wide_resolved);
+  tracked_free(ctx, wide_path);
+  if (!copy) return NULL;
 #else
   if (!realpath(path, resolved)) return NULL;
 #endif
+#ifndef _WIN32
   copy = dup_cstring(ctx, resolved);
   if (!copy) return NULL;
+#endif
   normalize_path_chars(ctx, copy);
   return copy;
 }
@@ -1106,10 +1165,31 @@ static void bind_imported_module(fe_Context *ctx, const char *spec,
 }
 
 static int file_exists(const char *path) {
+#ifdef _WIN32
+  int exists = 0;
+  int needed;
+  wchar_t *wide_path;
+
+  if (!path) return 0;
+  needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+  if (needed <= 0) return 0;
+  wide_path = (wchar_t*)malloc((size_t)needed * sizeof(wchar_t));
+  if (!wide_path) return 0;
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, needed) > 0) {
+    FILE *fp = _wfopen(wide_path, L"rb");
+    if (fp) {
+      fclose(fp);
+      exists = 1;
+    }
+  }
+  free(wide_path);
+  return exists;
+#else
   FILE *fp = fopen(path, "rb");
   if (!fp) return 0;
   fclose(fp);
   return 1;
+#endif
 }
 
 static char* read_text_file(fe_Context *ctx, const char *path) {
@@ -1119,7 +1199,16 @@ static char* read_text_file(fe_Context *ctx, const char *path) {
   size_t bytes_read;
   char *buffer;
 
+#ifdef _WIN32
+  {
+    wchar_t *wide_path = utf8_to_wide_tracked(ctx, path);
+    if (!wide_path) return NULL;
+    file = _wfopen(wide_path, L"rb");
+    tracked_free(ctx, wide_path);
+  }
+#else
   file = fopen(path, "rb");
+#endif
   if (!file) return NULL;
   if (fseek(file, 0L, SEEK_END) != 0) {
     fclose(file);
@@ -2864,10 +2953,25 @@ static fe_Object* eval(fe_Context *ctx, fe_Object *obj, fe_Object *env, fe_Objec
 static fe_Object* evallist(fe_Context *ctx, fe_Object *lst, fe_Object *env) {
   fe_Object *res = &nil;
   fe_Object **tail = &res;
+  int save = fe_savegc(ctx);
   while (!isnil(lst)) {
-    *tail = fe_cons(ctx, eval(ctx, fe_nextarg(ctx, &lst), env, NULL), &nil);
+    fe_Object *value;
+
+    fe_restoregc(ctx, save);
+    fe_pushgc(ctx, res);
+    fe_pushgc(ctx, lst);
+    fe_pushgc(ctx, env);
+    value = eval(ctx, fe_nextarg(ctx, &lst), env, NULL);
+
+    fe_restoregc(ctx, save);
+    fe_pushgc(ctx, res);
+    fe_pushgc(ctx, lst);
+    fe_pushgc(ctx, env);
+    fe_pushgc(ctx, value);
+    *tail = fe_cons(ctx, value, &nil);
     tail = &cdr(*tail);
   }
+  fe_restoregc(ctx, save);
   return res;
 }
 
@@ -2887,15 +2991,39 @@ static fe_Object* dolist(fe_Context *ctx, fe_Object *lst, fe_Object *env) {
 
 
 static fe_Object* argstoenv(fe_Context *ctx, fe_Object *prm, fe_Object *arg, fe_Object *env) {
+  int save = fe_savegc(ctx);
   while (!isnil(prm)) {
     if (type(prm) != FE_TPAIR) {
-      env = fe_cons(ctx, fe_cons(ctx, prm, arg), env);
+      fe_Object *binding;
+      fe_restoregc(ctx, save);
+      fe_pushgc(ctx, prm);
+      fe_pushgc(ctx, arg);
+      fe_pushgc(ctx, env);
+      binding = fe_cons(ctx, prm, arg);
+      fe_restoregc(ctx, save);
+      fe_pushgc(ctx, env);
+      fe_pushgc(ctx, binding);
+      env = fe_cons(ctx, binding, env);
       break;
     }
-    env = fe_cons(ctx, fe_cons(ctx, car(prm), fe_car(ctx, arg)), env);
+    {
+      fe_Object *binding;
+      fe_restoregc(ctx, save);
+      fe_pushgc(ctx, prm);
+      fe_pushgc(ctx, arg);
+      fe_pushgc(ctx, env);
+      binding = fe_cons(ctx, car(prm), fe_car(ctx, arg));
+      fe_restoregc(ctx, save);
+      fe_pushgc(ctx, prm);
+      fe_pushgc(ctx, arg);
+      fe_pushgc(ctx, env);
+      fe_pushgc(ctx, binding);
+      env = fe_cons(ctx, binding, env);
+    }
     prm = cdr(prm);
     arg = fe_cdr(ctx, arg);
   }
+  fe_restoregc(ctx, save);
   return env;
 }
 
@@ -3239,6 +3367,7 @@ tail_call:
 
   gc = fe_savegc(ctx);
   fe_pushgc(ctx, env);
+  fe_pushgc(ctx, obj);
   fn = eval(ctx, car(obj), env, NULL);
   arg = cdr(obj);
   res = &nil;
@@ -3361,8 +3490,8 @@ tail_call:
               res = &nil;
               break;
             }
+            fe_error(ctx, "property access is only supported on maps/modules and pairs");
           }
-          res = cdr(getbound(ctx, vb, va)); /* fallback: Re-use getbound for assoc list lookup */
           break;
         }
         case P_PUT:
@@ -3456,23 +3585,45 @@ tail_call:
           fe_Object *free_vars;
           fe_pushgc(ctx, bound);
           for (p = params; !isnil(p); p = cdr(p)) {
+              fe_restoregc(ctx, s);
+              fe_pushgc(ctx, bound);
               bound = fe_cons(ctx, car(p), bound);
           }
 
           free_vars = &nil;
           fe_pushgc(ctx, free_vars);
           analyze(ctx, body, bound, &free_vars);
-          fe_restoregc(ctx, s);
 
+          fe_restoregc(ctx, s);
           fe_pushgc(ctx, free_vars);
           fe_pushgc(ctx, params);
           fe_pushgc(ctx, body);
           fe_pushgc(ctx, env); /* Protect the definition-time environment */
 
           va = fe_cons(ctx, body, &nil);
+          fe_restoregc(ctx, s);
+          fe_pushgc(ctx, free_vars);
+          fe_pushgc(ctx, params);
+          fe_pushgc(ctx, body);
+          fe_pushgc(ctx, env);
+          fe_pushgc(ctx, va);
           va = fe_cons(ctx, params, va);
+          fe_restoregc(ctx, s);
+          fe_pushgc(ctx, free_vars);
+          fe_pushgc(ctx, params);
+          fe_pushgc(ctx, body);
+          fe_pushgc(ctx, env);
+          fe_pushgc(ctx, va);
           va = fe_cons(ctx, free_vars, va);
+          fe_restoregc(ctx, s);
+          fe_pushgc(ctx, free_vars);
+          fe_pushgc(ctx, params);
+          fe_pushgc(ctx, body);
+          fe_pushgc(ctx, env);
+          fe_pushgc(ctx, va);
           va = fe_cons(ctx, env, va); /* Prepend definition env to the list */
+          fe_restoregc(ctx, s);
+          fe_pushgc(ctx, va);
 
           res = object(ctx);
           settype(res, prim(fn) == P_FN ? FE_TFUNC : FE_TMACRO);
@@ -3631,7 +3782,9 @@ tail_call:
       break;
 
     case FE_TCFUNC:
-      res = cfunc(fn)(ctx, evallist(ctx, arg, env));
+      arg = evallist(ctx, arg, env);
+      fe_pushgc(ctx, arg);
+      res = cfunc(fn)(ctx, arg);
       break;
 
     case FE_TFUNC: {
@@ -3651,9 +3804,15 @@ tail_call:
       int s = fe_savegc(ctx);
       fe_pushgc(ctx, upvals);
       fe_pushgc(ctx, def_env);
+      fe_pushgc(ctx, arg);
       for (p = free_vars; !isnil(p); p = cdr(p)) {
         fe_Object *sym = car(p);
         fe_Object *binding = getbound(ctx, sym, def_env);
+        fe_restoregc(ctx, s);
+        fe_pushgc(ctx, upvals);
+        fe_pushgc(ctx, def_env);
+        fe_pushgc(ctx, arg);
+        fe_pushgc(ctx, binding);
         upvals = fe_cons(ctx, binding, upvals);
       }
       fe_restoregc(ctx, s);
@@ -3661,12 +3820,18 @@ tail_call:
       fe_pushgc(ctx, upvals);
       fe_pushgc(ctx, arg);
 
-      /* Create local environment */
-      fe_Object *locals = argstoenv(ctx, params, arg, &nil);
-
-      /* Create new frame: (frame . (locals . upvals)) */
-      fe_Object *frame = fe_cons(ctx, locals, upvals);
+      /* Create local environment and frame while rooting intermediates. */
+      fe_Object *locals;
+      fe_Object *frame;
+      int frame_save = fe_savegc(ctx);
+      fe_pushgc(ctx, upvals);
+      fe_pushgc(ctx, arg);
+      locals = argstoenv(ctx, params, arg, &nil);
+      fe_pushgc(ctx, locals);
+      frame = fe_cons(ctx, locals, upvals);
+      fe_pushgc(ctx, frame);
       frame = fe_cons(ctx, ctx->frame_sym, frame);
+      fe_restoregc(ctx, frame_save);
 
       /* Inline body evaluation with tail-call optimization:
          evaluate all but the last expression normally, then
@@ -3711,18 +3876,37 @@ tail_call:
       int s = fe_savegc(ctx);
       fe_pushgc(ctx, upvals);
       fe_pushgc(ctx, def_env);
+      fe_pushgc(ctx, arg);
       for (p = free_vars; !isnil(p); p = cdr(p)) {
         fe_Object *sym = car(p);
         fe_Object *binding = getbound(ctx, sym, def_env);
+        fe_restoregc(ctx, s);
+        fe_pushgc(ctx, upvals);
+        fe_pushgc(ctx, def_env);
+        fe_pushgc(ctx, arg);
+        fe_pushgc(ctx, binding);
         upvals = fe_cons(ctx, binding, upvals);
       }
       fe_restoregc(ctx, s);
 
-      fe_Object *locals = argstoenv(ctx, params, arg, &nil);
-      fe_Object *frame = fe_cons(ctx, locals, upvals);
+      fe_Object *locals;
+      fe_Object *frame;
+      int frame_save = fe_savegc(ctx);
+      fe_pushgc(ctx, upvals);
+      fe_pushgc(ctx, arg);
+      locals = argstoenv(ctx, params, arg, &nil);
+      fe_pushgc(ctx, locals);
+      frame = fe_cons(ctx, locals, upvals);
+      fe_pushgc(ctx, frame);
       frame = fe_cons(ctx, ctx->frame_sym, frame);
+      fe_restoregc(ctx, frame_save);
 
-      *obj = *dolist(ctx, body, frame);
+      {
+        int save = fe_savegc(ctx);
+        fe_pushgc(ctx, frame);
+        *obj = *dolist(ctx, body, frame);
+        fe_restoregc(ctx, save);
+      }
       fe_restoregc(ctx, gc);
       ctx->calllist = cdr(&cl);
       ctx->current_eval_depth--;
